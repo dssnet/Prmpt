@@ -5,6 +5,7 @@ import { Asterisk, ChevronDown, Columns2, Globe, X } from "lucide-vue-next";
 import {
   closeTabAndForget,
   HOME_TAB_ID,
+  moveTab,
   setActive,
   useTabs,
   type TabState,
@@ -79,27 +80,154 @@ interface DragState {
   startScreenX: number;
   startScreenY: number;
   active: boolean;
+  // Workspace tabs can be reordered but not torn off / split (v1 limit).
+  reorderOnly: boolean;
+  // The tab's own DOM node (stable across reorder — keyed by id), the grab
+  // point within it, and its width, so it can ride under the cursor.
+  el: HTMLElement;
+  grabOffsetX: number;
+  width: number;
 }
 let drag: DragState | null = null;
 const ghost = ref<{ x: number; y: number; label: string } | null>(null);
 let suppressClickUntil = 0;
+let pointerX = 0;
+let rafId = 0;
+let pinning = false;
+let pinnedEl: HTMLElement | null = null;
+
+// Live ordered list of currently-rendered visible tab elements, skipping any
+// mid leave-transition so a closing tab doesn't poison hit testing. DOM order
+// matches visibleTabs order.
+function visibleTabEls(): { id: number; el: HTMLElement }[] {
+  const root = stripEl.value?.$el ?? null;
+  if (!root) return [];
+  const out: { id: number; el: HTMLElement }[] = [];
+  for (const el of Array.from(
+    root.querySelectorAll<HTMLElement>("[data-tab-id]"),
+  )) {
+    if (el.classList.contains("tab-leave-active")) continue;
+    const id = Number(el.dataset.tabId);
+    if (Number.isFinite(id)) out.push({ id, el });
+  }
+  return out;
+}
+
+// Cursor within the tab bar (+ a little vertical slop) = the reorder zone.
+// Checked first on mouseup so a long horizontal drag can't tear off.
+const TAB_BAR_Y_SLOP = 8;
+function pointInTabBar(cx: number, cy: number): boolean {
+  const root = outerEl.value;
+  if (!root) return false;
+  const r = root.getBoundingClientRect();
+  return (
+    cx >= r.left &&
+    cx <= r.right &&
+    cy >= r.top - TAB_BAR_Y_SLOP &&
+    cy <= r.bottom + TAB_BAR_Y_SLOP
+  );
+}
+
+// Once-per-slot guard: only call moveTab when the target slot actually
+// changes, so the .tab-move animation doesn't thrash on every mousemove.
+let lastReorderBeforeId: number | null | undefined = undefined;
+
+// Glue the picked-up tab under the cursor every frame. It keeps its own DOM
+// node (keyed by id) as the array reorders, so we just translate it from
+// wherever the layout put it to where the cursor is holding it.
+function dragFrame(): void {
+  if (!drag || !drag.active || !pinnedEl) return;
+  const el = pinnedEl;
+  if (el.isConnected) {
+    el.style.transform = "";
+    const left = el.getBoundingClientRect().left;
+    el.style.transform = `translateX(${Math.round(
+      pointerX - drag.grabOffsetX - left,
+    )}px)`;
+  }
+  rafId = requestAnimationFrame(dragFrame);
+}
+
+function startPin(): void {
+  if (pinning || !drag) return;
+  pinning = true;
+  pinnedEl = drag.el;
+  pinnedEl.classList.remove("tab-settle");
+  pinnedEl.classList.add("tab-dragging");
+  rafId = requestAnimationFrame(dragFrame);
+}
+
+// settle=true → let it glide from the cursor to its final slot on drop.
+function stopPin(settle: boolean): void {
+  if (rafId) {
+    cancelAnimationFrame(rafId);
+    rafId = 0;
+  }
+  if (!pinning) return;
+  pinning = false;
+  const el = pinnedEl;
+  pinnedEl = null;
+  if (!el) return;
+  el.classList.remove("tab-dragging");
+  const hasTransform = !!el.style.transform && el.style.transform !== "none";
+  if (settle && hasTransform) {
+    el.classList.add("tab-settle");
+    requestAnimationFrame(() => {
+      el.style.transform = "";
+    });
+    window.setTimeout(() => el.classList.remove("tab-settle"), 240);
+  } else {
+    el.style.transform = "";
+  }
+}
+
+// Where the dragged tab's center currently sits, vs. the other tabs' centers.
+function computeReorderBeforeId(): number | null {
+  if (!drag) return null;
+  const centerX = pointerX - drag.grabOffsetX + drag.width / 2;
+  for (const { id, el } of visibleTabEls()) {
+    if (id === drag.tabId) continue; // skip the tab being carried
+    const t = tabs.value.find((x) => x.id === id);
+    if (!t || t.kind === "home") continue;
+    const r = el.getBoundingClientRect();
+    if (centerX < r.left + r.width / 2) return id;
+  }
+  return null; // past the last center → append
+}
+
+function applyLiveReorder(): void {
+  if (!drag) return;
+  const beforeId = computeReorderBeforeId();
+  if (beforeId === drag.tabId) return; // dropping onto itself → no-op
+  if (beforeId === lastReorderBeforeId) return; // slot unchanged
+  lastReorderBeforeId = beforeId;
+  moveTab(drag.tabId, beforeId);
+}
 
 function onTabMouseDown(t: TabState, e: MouseEvent): void {
   if (e.button !== 0) return; // left button only
-  if (t.kind === "workspace") return; // workspace tabs aren't draggable (v1)
+  const el = e.currentTarget as HTMLElement;
+  const r = el.getBoundingClientRect();
   drag = {
     tabId: t.id,
     label: labelFor(t),
     startScreenX: e.screenX,
     startScreenY: e.screenY,
     active: false,
+    reorderOnly: t.kind === "workspace",
+    el,
+    grabOffsetX: e.clientX - r.left,
+    width: r.width,
   };
+  pointerX = e.clientX;
+  lastReorderBeforeId = undefined;
   window.addEventListener("mousemove", onDragMove);
   window.addEventListener("mouseup", onDragUp);
 }
 
 function onDragMove(e: MouseEvent): void {
   if (!drag) return;
+  pointerX = e.clientX;
   if (!drag.active) {
     const dx = e.screenX - drag.startScreenX;
     const dy = e.screenY - drag.startScreenY;
@@ -107,6 +235,20 @@ function onDragMove(e: MouseEvent): void {
     drag.active = true;
     resetTabConsumed();
   }
+  // Inside the bar: carry the tab under the cursor and reorder live.
+  if (pointInTabBar(e.clientX, e.clientY)) {
+    ghost.value = null;
+    clearWorkspaceDragPreview();
+    startPin();
+    applyLiveReorder();
+    return;
+  }
+  // Left the bar: drop the carried look. Re-arm the slot guard so re-entering
+  // the bar recomputes from scratch.
+  stopPin(false);
+  lastReorderBeforeId = undefined;
+  if (drag.reorderOnly) return; // workspace tabs only reorder (v1)
+  // Outside the bar: original ghost + workspace-drop affordance.
   ghost.value = { x: e.clientX, y: e.clientY, label: drag.label };
   updateWorkspaceDragPreview(e.clientX, e.clientY);
 }
@@ -115,12 +257,19 @@ function onDragUp(e: MouseEvent): void {
   window.removeEventListener("mousemove", onDragMove);
   window.removeEventListener("mouseup", onDragUp);
   const d = drag;
+  const inBar = !!d && pointInTabBar(e.clientX, e.clientY);
+  stopPin(inBar); // settle into the slot if dropped in the bar
   drag = null;
   ghost.value = null;
   clearWorkspaceDragPreview();
   if (!d || !d.active) return; // never moved → it was a click
   // Swallow the click that follows this drag so it doesn't also switch tabs.
   suppressClickUntil = performance.now() + 300;
+
+  // Released inside the bar → it was a reorder, already applied live.
+  if (inBar) return;
+  // Workspace tabs can't tear off / split in v1.
+  if (d.reorderOnly) return;
 
   // Released over this window's terminal area → workspace split/merge.
   if (pointOverTerminal(e.clientX, e.clientY)) {
@@ -139,6 +288,7 @@ function onDragUp(e: MouseEvent): void {
 // visible. Sizing constants match the matching Tailwind classes below; nudge
 // them together if either side changes.
 const outerEl = ref<HTMLDivElement | null>(null);
+const stripEl = ref<{ $el: HTMLElement } | null>(null);
 const outerWidth = ref(0);
 
 const TAB_MIN_W = 110;
@@ -314,10 +464,16 @@ watch(overflowTabs, (n) => {
       v-if="visibleTabs.length > 0"
       class="flex-initial min-w-0 overflow-hidden"
     >
-      <TransitionGroup tag="div" name="tab" class="flex items-center gap-1.5">
+      <TransitionGroup
+        ref="stripEl"
+        tag="div"
+        name="tab"
+        class="flex items-center gap-1.5"
+      >
         <div
           v-for="t in visibleTabs"
           :key="t.id"
+          :data-tab-id="t.id"
           :class="classFor(t)"
           @click="onTabClick(t)"
           @mousedown="onTabMouseDown(t, $event)"
@@ -460,10 +616,31 @@ watch(overflowTabs, (n) => {
   transition: transform 260ms cubic-bezier(0.34, 1.5, 0.6, 1);
 }
 
+/* The tab currently held under the cursor: tracks the pointer with no
+   transition (so it never lags), lifted above its sliding neighbors. */
+.tab-dragging {
+  transition: none !important;
+  position: relative;
+  z-index: 30;
+  cursor: grabbing;
+  opacity: 0.97;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.4);
+  pointer-events: none;
+  will-change: transform;
+}
+
+/* On drop, glide from the cursor to the resolved slot instead of snapping. */
+.tab-settle {
+  transition: transform 200ms cubic-bezier(0.22, 1, 0.36, 1) !important;
+  position: relative;
+  z-index: 20;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .tab-enter-active,
   .tab-leave-active,
-  .tab-move {
+  .tab-move,
+  .tab-settle {
     transition: none;
   }
 }

@@ -243,6 +243,34 @@ export function setActive(id: number): void {
   }
 }
 
+/** Reorder a tab within the bar (session-only; no backend).
+ *  Moves `id` to sit immediately before `beforeId`; pass null to send it to
+ *  the end. Home stays pinned at index 0 and is never a valid target. */
+export function moveTab(id: number, beforeId: number | null): void {
+  if (id === HOME_TAB_ID) return;
+  const from = tabs.value.findIndex((t) => t.id === id);
+  if (from < 0) return;
+  const moved = tabs.value[from];
+  if (moved.kind === "home") return;
+
+  const next = tabs.value.slice();
+  next.splice(from, 1);
+
+  let to: number;
+  if (beforeId === null) {
+    to = next.length;
+  } else {
+    const refIdx = next.findIndex((t) => t.id === beforeId);
+    to = refIdx < 0 ? next.length : refIdx;
+  }
+  // Never allow insertion at index 0 — home is pinned there.
+  const homeIdx = next.findIndex((t) => t.kind === "home");
+  if (homeIdx === 0 && to === 0) to = 1;
+
+  next.splice(to, 0, moved);
+  tabs.value = next;
+}
+
 /** A workspace lost a leaf and now has ≤1 pane: drop the workspace and turn
  *  its slot back into a normal tab for the survivor (or remove it entirely). */
 function revertOrRemoveSlot(slotId: number, survivor: LeafNode | null): void {
