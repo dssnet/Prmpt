@@ -47,30 +47,27 @@ function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
   });
 }
 
-async function loadBundledFonts(sizePx: number) {
-  const specs: Array<[string, string]> = [
-    ["Noto Nerd Font Mono", nerdFontUrl],
-    ["Noto Color Emoji", emojiFontUrl],
-  ];
-  for (const [family, url] of specs) {
-    try {
-      const face = new FontFace(family, `url(${url}) format("truetype")`);
-      const loaded = await withTimeout(face.load(), 5000, `font ${family}`);
+function loadFont(family: string, url: string): Promise<void> {
+  const face = new FontFace(family, `url(${url}) format("truetype")`);
+  return withTimeout(face.load(), 5000, `font ${family}`)
+    .then((loaded) => {
       document.fonts.add(loaded);
-      console.log(
-        `[font] loaded ${family} from ${url} (check=${document.fonts.check(
-          `${sizePx}px "${family}"`,
-        )})`,
-      );
-    } catch (e) {
+    })
+    .catch((e) => {
       console.error(`[font] failed to load ${family} from ${url}:`, e);
-    }
-  }
-  try {
-    await withTimeout(document.fonts.ready, 3000, "document.fonts.ready");
-  } catch (e) {
-    console.warn("[font] document.fonts.ready did not settle", e);
-  }
+    });
+}
+
+// Only the primary monospace face has to be ready before the renderer
+// mounts — cell metrics (advance width, baseline) are measured from it.
+// The Noto Color Emoji file is ~10MB and is only a lazy atlas fallback
+// for emoji codepoints (rare in an initial shell prompt), so blocking
+// first paint on its download was the single biggest startup stall.
+// Kick it off in the background instead; the glyph atlas bakes lazily,
+// so emoji just fall back for the brief window until it lands.
+async function loadBundledFonts() {
+  void loadFont("Noto Color Emoji", emojiFontUrl);
+  await loadFont("Noto Nerd Font Mono", nerdFontUrl);
 }
 
 function ensureBundledFonts(stack: string): string {
@@ -84,27 +81,32 @@ function ensureBundledFonts(stack: string): string {
 }
 
 async function init() {
-  const config = await getConfig();
+  // These four are independent: config drives theme/font stack/Vue props;
+  // openDb runs SQL migrations; openSecrets unlocks Stronghold; font
+  // loading reads neither. Running them concurrently instead of one
+  // after another removes their summed latency from the critical path
+  // before the renderer can mount.
+  //
+  //  - openDb: SQL plugin migrations + open
+  //  - openSecrets: Stronghold unlock (non-fatal; SSH features degrade
+  //    but the UI must still mount), then mark rows broken if the
+  //    snapshot was quarantined this boot
+  //  - loadBundledFonts: FontFace API load so cell metrics and atlas
+  //    baking measure against real fonts rather than fallbacks
+  const [config] = await Promise.all([
+    getConfig(),
+    openDb(),
+    openSecrets()
+      .then((quarantined) => {
+        if (quarantined) return markAllBroken();
+      })
+      .catch((e) => {
+        console.error("openSecrets failed — continuing without secrets", e);
+      }),
+    loadBundledFonts(),
+  ]);
+
   initTheme(config.theme);
-
-  // Bring up the SQL plugin (runs migrations) and the Stronghold plugin
-  // (unlocks the snapshot using the boot password Rust just prepared). If
-  // Stronghold quarantined a stale snapshot this boot, stamp every saved
-  // row as broken so the UI can prompt for re-entry.
-  await openDb();
-
-  try {
-    const quarantined = await openSecrets();
-    if (quarantined) await markAllBroken();
-  } catch (e) {
-    // Non-fatal: SSH features will throw when used, but the UI still mounts.
-    console.error("openSecrets failed — continuing without secrets", e);
-  }
-
-  // Load the bundled fonts via the FontFace API before constructing the
-  // renderer, so cell metrics and atlas baking measure against real fonts
-  // rather than fallbacks.
-  await loadBundledFonts(config.font_size);
 
   // Always append the bundled fonts so Nerd Font icons / Powerline glyphs /
   // color emoji are available regardless of what's in the user's config.

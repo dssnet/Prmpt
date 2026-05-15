@@ -198,6 +198,9 @@ pub fn tear_off_tab(
         .title("Prmpt")
         .inner_size(args.width, args.height)
         .position(pos_x, pos_y)
+        // Dark terminal-colored frame during the webview cold-start
+        // instead of a white flash after the drop.
+        .background_color(tauri::window::Color(0x1e, 0x1e, 0x2e, 0xff))
         // Let HTML5 drag-and-drop work inside the webview (tab → terminal
         // workspace drops). Tauri's OS-level drag-drop handler otherwise
         // swallows dragover/drop events; tab tear-off only needs dragend.

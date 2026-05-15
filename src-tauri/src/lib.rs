@@ -57,6 +57,14 @@ pub struct PendingHydration(pub Mutex<HashMap<String, Vec<u64>>>);
 pub type SharedWindowCounter = Arc<WindowCounter>;
 pub type SharedPendingHydration = Arc<PendingHydration>;
 
+/// Conservative default terminal geometry for a tab the backend
+/// pre-spawns before its window's webview has booted. The frontend
+/// corrects this to the real size via `resize_tab` on hydrate (the same
+/// reflow the tear-off path relies on), so these only need to be
+/// plausible enough for the shell to start cleanly.
+const PRESPAWN_COLS: u16 = 100;
+const PRESPAWN_ROWS: u16 = 30;
+
 /// Migrations consumed by `tauri-plugin-sql` at startup. The SQL bodies
 /// live in `src-tauri/migrations/` and are inlined at compile time.
 fn ssh_migrations() -> Vec<Migration> {
@@ -191,6 +199,11 @@ pub fn run() {
             install_app_menu(app.handle())?;
             if let Some(window) = app.get_webview_window("main") {
                 configure_new_window(&window);
+                // Fork the shell now so its rc files run while the
+                // webview/font/WebGL bootstrap is still in flight,
+                // instead of after it. The frontend hydrates this tab
+                // via list_tabs_for_window rather than spawning its own.
+                prespawn_tab_for_window(app.handle(), "main");
             }
             Ok(())
         })
@@ -221,12 +234,16 @@ pub fn run() {
         });
 }
 
-fn open_blank_window<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
+fn open_blank_window(app: &AppHandle) -> tauri::Result<()> {
     let counter = app.state::<SharedWindowCounter>();
     let label = format!("window-{}", counter.next());
     let builder = WebviewWindowBuilder::new(app, &label, WebviewUrl::default())
         .title("Prmpt")
         .inner_size(960.0, 600.0)
+        // Paint the native window the terminal background up front so the
+        // brief webview cold-start shows a dark terminal-colored frame
+        // instead of a white flash, rather than delaying the whole window.
+        .background_color(tauri::window::Color(0x1e, 0x1e, 0x2e, 0xff))
         // Let HTML5 drag-and-drop work inside the webview (tab → terminal
         // workspace drops). Tauri's OS-level drag-drop handler otherwise
         // swallows dragover/drop events; tab tear-off only needs dragend.
@@ -241,7 +258,50 @@ fn open_blank_window<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
     let builder = builder.focused(true);
     let win = builder.visible(true).build()?;
     configure_new_window(&win);
+    prespawn_tab_for_window(app, &label);
     Ok(())
+}
+
+/// Fork the user's shell for `label` *before* its webview finishes
+/// booting, so rc-file execution (oh-my-zsh / Powerlevel10k, …) overlaps
+/// the frontend's font/WebGL bring-up instead of being serialized after
+/// it. The tab is stashed in `PendingHydration` so the frontend hydrates
+/// it via `list_tabs_for_window` instead of issuing its own `spawn_tab`.
+/// On any failure we log and bail; the frontend's fallback `spawnNewTab`
+/// still produces a working terminal.
+fn prespawn_tab_for_window(app: &AppHandle, label: &str) {
+    let registry = app.state::<tab::SharedRegistry>();
+    let config = app.state::<SharedConfig>();
+    let (shell, scrollback_lines, cell_px) = {
+        let guard = config.lock();
+        (
+            guard.shell.clone(),
+            guard.scrollback_lines,
+            guard.font_size.max(1.0) as u32,
+        )
+    };
+    match registry.spawn(
+        app.clone(),
+        label.to_string(),
+        PRESPAWN_COLS,
+        PRESPAWN_ROWS,
+        cell_px,
+        cell_px,
+        shell,
+        scrollback_lines,
+        config.inner().clone(),
+    ) {
+        Ok(id) => {
+            let pending = app.state::<SharedPendingHydration>();
+            pending
+                .0
+                .lock()
+                .entry(label.to_string())
+                .or_default()
+                .push(id);
+        }
+        Err(e) => eprintln!("prespawn: failed to spawn tab for {label}: {e}"),
+    }
 }
 
 #[cfg(not(any(target_os = "ios", target_os = "android")))]
