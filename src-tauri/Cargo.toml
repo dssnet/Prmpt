@@ -49,6 +49,18 @@ zeroize = { version = "1.8", features = ["zeroize_derive", "alloc"] }
 [target.'cfg(not(any(target_os = "ios", target_os = "android")))'.dependencies]
 portable-pty = "0.8"
 
+# On Windows, link libghostty-vt statically. The vendored libghostty-vt-sys
+# build script only recognizes ELF/Mach-O shared libraries (`.so`/`.dylib`)
+# in its dynamic-link path; Ghostty's Zig build emits a Windows DLL + import
+# lib the matcher never finds, so the build panics with "no libghostty-vt
+# shared library found". The static path matches `ghostty-vt-static.lib`
+# (which Zig does produce on Windows) and links the engine into prmpt.exe,
+# so there is no DLL to stage/ship alongside the binary. Cargo unions
+# features, so this only adds `link-static` on the Windows leg.
+[target.'cfg(windows)'.dependencies]
+libghostty-vt = { version = "0.1", features = ["link-static"] }
+libghostty-vt-sys = { version = "0.1", features = ["link-static"] }
+
 # Source both libghostty crates from the pinned `libghostty-rs` git
 # submodule (vendor/libghostty-rs) rather than crates.io. Our build.rs
 # changes live as a reviewable patch, applied onto the submodule by

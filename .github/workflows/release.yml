@@ -147,6 +147,12 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # GitHub's ubuntu-22.04 runner has no FUSE 2, so linuxdeploy
+          # (an AppImage) can't mount itself and AppImage bundling fails
+          # with "failed to run linuxdeploy". This makes all AppImage
+          # tools self-extract instead of mounting via FUSE. No-op on
+          # macOS/Windows legs.
+          APPIMAGE_EXTRACT_AND_RUN: 1
         with:
           releaseId: ${{ needs.create-release.outputs.release_id }}
           args: ${{ matrix.platform.args }}
