@@ -4,7 +4,7 @@
 
 A desktop terminal emulator. Tauri 2 shell, Ghostty's VT engine driving terminal state, custom WebGL2 renderer in the webview.
 
-The 1024×1024 source for the app icon lives at [`assets/icon.png`](assets/icon.png); the per-platform icon set under `src-tauri/icons/` is regenerated from it via `bun tauri icon assets/icon.png`.
+The 1024×1024 source for the app icon lives at [`assets/icon.png`](assets/icon.png) (borderless, works on every platform); the per-platform icon set under `src-tauri/icons/` is regenerated from it via `bun tauri icon assets/icon.png`.
 
 ## Toolchain
 
