@@ -29,8 +29,12 @@ if [ ! -d "$NATIVE_DIR" ]; then
   exit 0
 fi
 
+# Only the macOS (apple-darwin) per-target slices belong in a macOS .app.
+# Deliberately *not* `*-apple-*`: that also matches stale iOS triples
+# (aarch64-apple-ios, aarch64-apple-ios-sim) which are all arm64, and
+# `lipo -create` rejects two slices of the same architecture.
 shopt -s nullglob
-ARCH_FILES=( "$NATIVE_DIR"/libghostty-vt.*-apple-*.dylib )
+ARCH_FILES=( "$NATIVE_DIR"/libghostty-vt.*-apple-darwin.dylib )
 
 if [ "${#ARCH_FILES[@]}" -eq 0 ]; then
   echo "lipo-bundle-dylib: no per-target dylibs in $NATIVE_DIR; leaving $TARGET as-is" >&2
