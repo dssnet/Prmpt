@@ -38,6 +38,19 @@ function openKeyEditor(k: SshKeyRow | null) {
   editingKey.value = k;
   pane.value = "key-edit";
 }
+
+// Returning from an editor must re-fetch the list: the lists are kept mounted
+// under v-show, so onMounted(refresh) only ever runs once and a freshly
+// saved/edited row would otherwise stay invisible until a tab switch.
+function closeHostEditor() {
+  pane.value = "home";
+  void hostListRef.value?.refresh();
+}
+
+function closeKeyEditor() {
+  pane.value = "keys";
+  void keyListRef.value?.refresh();
+}
 </script>
 
 <template>
@@ -53,8 +66,8 @@ function openKeyEditor(k: SshKeyRow | null) {
     <HostEdit
       v-if="pane === 'host-edit'"
       :host="editingHost"
-      @done="pane = 'home'"
-      @cancel="pane = 'home'"
+      @done="closeHostEditor"
+      @cancel="closeHostEditor"
       @manage-keys="pane = 'keys'"
     />
     <KeyList
@@ -67,8 +80,8 @@ function openKeyEditor(k: SshKeyRow | null) {
     <KeyEdit
       v-if="pane === 'key-edit'"
       :key-row="editingKey"
-      @done="pane = 'keys'"
-      @cancel="pane = 'keys'"
+      @done="closeKeyEditor"
+      @cancel="closeKeyEditor"
     />
     <ThemePresets
       v-show="pane === 'settings'"
