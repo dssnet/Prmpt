@@ -23,7 +23,7 @@ fn main() {
 // libghostty-vt-sys ships a shared lib that the binary depends on at
 // runtime. Tauri's bundler doesn't see it unless it's at a path the
 // config can name. We rely on Cargo's `links = "ghostty-vt"` bridge:
-// the vendored libghostty-vt-sys build script emits `cargo:libdir=...`
+// our patched libghostty-vt-sys build script emits `cargo:libdir=...`
 // and `cargo:lib_filename=...`, and Cargo forwards those to us as
 // `DEP_GHOSTTY_VT_LIBDIR` and `DEP_GHOSTTY_VT_LIB_FILENAME`. For that
 // to work, this crate must depend on `libghostty-vt-sys` directly (not

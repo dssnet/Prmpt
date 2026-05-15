@@ -49,11 +49,15 @@ zeroize = { version = "1.8", features = ["zeroize_derive", "alloc"] }
 [target.'cfg(not(any(target_os = "ios", target_os = "android")))'.dependencies]
 portable-pty = "0.8"
 
-# Override libghostty-vt-sys with the local fork in `vendor/`, which
-# extends `build.rs`'s target allow-list with iOS / Android / Windows
-# triples. See vendor/libghostty-vt-sys/README.md.
+# Source both libghostty crates from the pinned `libghostty-rs` git
+# submodule (vendor/libghostty-rs) rather than crates.io. Our build.rs
+# changes live as a reviewable patch, applied onto the submodule by
+# `bun run setup-vendor` — run that before the first `cargo check`.
+# Both crates are patched together so the high-level API and the FFI
+# bindings stay ABI-consistent. See src-tauri/vendor/README.md.
 [patch.crates-io]
-libghostty-vt-sys = { path = "vendor/libghostty-vt-sys" }
+libghostty-vt = { path = "vendor/libghostty-rs/crates/libghostty-vt" }
+libghostty-vt-sys = { path = "vendor/libghostty-rs/crates/libghostty-vt-sys" }
 
 # Stronghold's internal scrypt key derivation is unusably slow when built
 # with debug optimizations — `Stronghold.load()` then takes 1–2 minutes,

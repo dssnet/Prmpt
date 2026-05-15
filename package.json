@@ -8,6 +8,7 @@
     "build": "vue-tsc --noEmit && vite build",
     "preview": "vite preview",
     "tauri": "tauri",
+    "setup-vendor": "bash scripts/setup-vendor.sh",
     "bump": "bun scripts/bump.ts"
   },
   "dependencies": {

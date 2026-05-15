@@ -1,0 +1,243 @@
+diff --git a/crates/libghostty-vt-sys/build.rs b/crates/libghostty-vt-sys/build.rs
+index 4a54faf..c590b05 100644
+--- a/crates/libghostty-vt-sys/build.rs
++++ b/crates/libghostty-vt-sys/build.rs
+@@ -2,6 +2,20 @@ use std::env;
+ use std::path::{Path, PathBuf};
+ use std::process::Command;
+ 
++// ─── prmpt fork patch (see src-tauri/vendor/libghostty-vt-sys.patch) ───
++// Tracks upstream master; layered changes:
++//   * `zig_target` recognizes iOS / Android / Windows triples so a
++//     cross-compile attempt doesn't panic (upstream: Linux + macOS only).
++//   * iOS cross builds pin `-Dcpu=apple_a14` (simulator SDK headers
++//     reject the `baseline` CPU Zig would otherwise default to).
++//   * iOS links a self-contained static archive: `merge_ios_cpp_deps`
++//     folds simdutf/highway/utfcpp into `libghostty-vt-ios.a`.
++//   * Re-exports `cargo:libdir` / `cargo:lib_filename` so prmpt's own
++//     build.rs can stage the dylib into the macOS `.app`'s
++//     `Contents/Frameworks/` (dyld can't find @rpath once the binary
++//     leaves `target/`).
++// ───────────────────────────────────────────────────────────────────────
++
+ /// Pinned ghostty commit. Update this to pull a newer version.
+ const GHOSTTY_REPO: &str = "https://github.com/ghostty-org/ghostty.git";
+ const GHOSTTY_COMMIT: &str = "6590196661f769dd8f2b3e85d6c98262c4ec5b3b";
+@@ -161,6 +175,20 @@ fn build_vendored(link_mode: LinkMode) {
+     if target != host {
+         let zig_target = zig_target(&target);
+         build.arg(format!("-Dtarget={zig_target}"));
++
++        // Ghostty pins macOS to a generic CPU but applies no analogous
++        // workaround for iOS, so Zig defaults the iOS cross-compile to
++        // `-mcpu baseline`, which Xcode 16+ / iPhoneSimulator 17+ SDK
++        // headers reject (`arm_neon.h` marks intrinsics like
++        // `vdupq_n_u8` as `always_inline` with FEAT_FlagM2, which won't
++        // inline into a `baseline` TU). `apple_a14` is the iOS-17 floor
++        // and carries every feature the simulator headers assume.
++        if matches!(
++            target.as_str(),
++            "aarch64-apple-ios" | "aarch64-apple-ios-sim"
++        ) {
++            build.arg("-Dcpu=apple_a14");
++        }
+     }
+ 
+     run(build, "zig build");
+@@ -169,22 +197,21 @@ fn build_vendored(link_mode: LinkMode) {
+     let include_dir = install_prefix.join("include");
+     warn_unused_xcframework(&lib_dir);
+ 
+-    let has_requested_library = std::fs::read_dir(&lib_dir)
+-        .unwrap_or_else(|error| panic!("failed to read {}: {error}", lib_dir.display()))
+-        .any(|entry| {
+-            let entry = entry.unwrap_or_else(|error| {
+-                panic!("failed to read entry from {}: {error}", lib_dir.display())
+-            });
+-            let file_name = entry.file_name();
+-            let Some(file_name) = file_name.to_str() else {
+-                return false;
+-            };
+-
+-            link_mode.matches_library(&target, file_name)
+-        });
++    // prmpt: iOS always links statically (the final link is Xcode's, so
++    // cargo's dylib directive never reaches it). Fold the C++ deps into a
++    // self-contained archive; this supersedes `link_mode` for iOS.
++    let is_ios = target.contains("apple-ios");
++    if is_ios {
++        merge_ios_cpp_deps(&zig_cache_dir, &lib_dir);
++    }
++
++    // prmpt: resolve the concrete artifact name. Upstream only checks
++    // *presence*; we also need the exact filename to re-export so the
++    // consumer build.rs can stage the dylib into the .app bundle.
++    let lib_filename = pick_lib_filename(&lib_dir, &target, link_mode, is_ios);
+     assert!(
+-        has_requested_library,
+-        "expected libghostty-vt {} in {}",
++        lib_dir.join(&lib_filename).exists(),
++        "expected libghostty-vt {} ({lib_filename}) in {}",
+         link_mode.artifact_kind(),
+         lib_dir.display()
+     );
+@@ -195,11 +222,132 @@ fn build_vendored(link_mode: LinkMode) {
+     );
+ 
+     println!("cargo:rustc-link-search=native={}", lib_dir.display());
+-    match link_mode {
+-        LinkMode::Dynamic => println!("cargo:rustc-link-lib=dylib=ghostty-vt"),
+-        LinkMode::Static => println!("cargo:rustc-link-lib=static=ghostty-vt"),
++    if is_ios {
++        // `ghostty-vt-ios` is the merged archive; plain `ghostty-vt`
++        // would leave simdutf/highway/utfcpp symbols undefined at the
++        // Rust staticlib link step. `c++` resolves simdutf's `std::*`.
++        println!("cargo:rustc-link-lib=static=ghostty-vt-ios");
++        println!("cargo:rustc-link-lib=dylib=c++");
++    } else {
++        match link_mode {
++            LinkMode::Dynamic => println!("cargo:rustc-link-lib=dylib=ghostty-vt"),
++            LinkMode::Static => println!("cargo:rustc-link-lib=static=ghostty-vt"),
++        }
+     }
+     emit_include_metadata(&[include_dir]);
++
++    // prmpt: re-exported to dependents as `DEP_GHOSTTY_VT_LIBDIR` /
++    // `DEP_GHOSTTY_VT_LIB_FILENAME` (cargo derives the env from the
++    // `links` key). prmpt's build.rs copies the dylib into the macOS
++    // `.app`'s `Contents/Frameworks/` so dyld resolves it at runtime.
++    println!("cargo:libdir={}", lib_dir.display());
++    println!("cargo:lib_filename={lib_filename}");
++}
++
++/// prmpt: pick the concrete library filename in `lib_dir`. iOS uses the
++/// merged static archive; other static/dynamic builds reuse upstream's
++/// `LinkMode::matches_library` predicate to find the (version-suffixed)
++/// artifact rather than hard-coding a version.
++fn pick_lib_filename(
++    lib_dir: &Path,
++    target: &str,
++    link_mode: LinkMode,
++    is_ios: bool,
++) -> String {
++    if is_ios {
++        return "libghostty-vt-ios.a".to_owned();
++    }
++    std::fs::read_dir(lib_dir)
++        .unwrap_or_else(|error| panic!("failed to read {}: {error}", lib_dir.display()))
++        .filter_map(|entry| entry.ok())
++        .map(|entry| entry.file_name())
++        .filter_map(|name| name.to_str().map(str::to_owned))
++        .find(|name| link_mode.matches_library(target, name))
++        .unwrap_or_else(|| {
++            panic!(
++                "no libghostty-vt {} found in {}",
++                link_mode.artifact_kind(),
++                lib_dir.display()
++            )
++        })
++}
++
++/// prmpt: produce a self-contained `libghostty-vt-ios.a`. Ghostty's
++/// build.zig installs only the Zig half as `libghostty-vt.a`; the C++
++/// deps (simdutf, highway, utfcpp) land in the Zig cache and are dropped
++/// from the static install path. iOS needs one archive (Xcode runs the
++/// final link), so merge them. `libtool -static` silently drops Mach-O
++/// members that aren't 8-byte aligned and Zig's archiver doesn't pad, so
++/// extract with `ar x` and re-archive with `ar rcs` to sidestep that.
++fn merge_ios_cpp_deps(zig_cache_dir: &Path, lib_dir: &Path) {
++    let merged = lib_dir.join("libghostty-vt-ios.a");
++    let cache_root = zig_cache_dir.join("o");
++
++    let mut archives: Vec<PathBuf> = vec![lib_dir.join("libghostty-vt.a")];
++    let mut seen: std::collections::HashSet<&'static str> = std::collections::HashSet::new();
++
++    let entries = std::fs::read_dir(&cache_root)
++        .unwrap_or_else(|e| panic!("failed to read {}: {e}", cache_root.display()));
++    for entry in entries {
++        let dir = match entry {
++            Ok(e) => e.path(),
++            Err(_) => continue,
++        };
++        for name in ["libsimdutf.a", "libhighway.a", "libutfcpp.a"] {
++            let candidate = dir.join(name);
++            if candidate.is_file() && seen.insert(name) {
++                archives.push(candidate);
++            }
++        }
++    }
++    assert!(
++        seen.contains("libsimdutf.a")
++            && seen.contains("libhighway.a")
++            && seen.contains("libutfcpp.a"),
++        "expected libsimdutf.a / libhighway.a / libutfcpp.a under {}; found {:?}",
++        cache_root.display(),
++        seen,
++    );
++
++    let work_dir = lib_dir.join("ios-merge-work");
++    let _ = std::fs::remove_dir_all(&work_dir);
++    std::fs::create_dir_all(&work_dir)
++        .unwrap_or_else(|e| panic!("failed to create {}: {e}", work_dir.display()));
++
++    let mut objects: Vec<PathBuf> = Vec::new();
++    for (idx, archive) in archives.iter().enumerate() {
++        let subdir = work_dir.join(format!("a{idx}"));
++        std::fs::create_dir_all(&subdir)
++            .unwrap_or_else(|e| panic!("failed to create {}: {e}", subdir.display()));
++
++        let mut extract = Command::new("ar");
++        extract.arg("x").arg(archive).current_dir(&subdir);
++        run(extract, &format!("ar x {}", archive.display()));
++
++        for entry in std::fs::read_dir(&subdir).unwrap() {
++            let path = entry.unwrap().path();
++            if path.extension().and_then(|s| s.to_str()) == Some("o") {
++                let mut chmod = Command::new("chmod");
++                chmod.arg("u+rw").arg(&path);
++                run(chmod, "chmod u+rw extracted object");
++                objects.push(path);
++            }
++        }
++    }
++    assert!(
++        !objects.is_empty(),
++        "no objects extracted from input archives: {archives:?}",
++    );
++
++    let _ = std::fs::remove_file(&merged);
++    let mut cmd = Command::new("ar");
++    cmd.arg("rcs").arg(&merged);
++    for o in &objects {
++        cmd.arg(o);
++    }
++    run(cmd, "ar rcs libghostty-vt-ios.a");
++
++    let _ = std::fs::remove_dir_all(&work_dir);
+ }
+ 
+ fn warn_unused_xcframework(lib_dir: &Path) {
+@@ -364,6 +512,23 @@ fn zig_target(target: &str) -> String {
+         "aarch64-unknown-linux-musl" => "aarch64-linux-musl",
+         "aarch64-apple-darwin" => "aarch64-macos-none",
+         "x86_64-apple-darwin" => "x86_64-macos-none",
++
++        // prmpt: iOS device + simulator
++        "aarch64-apple-ios" => "aarch64-ios-none",
++        "aarch64-apple-ios-sim" => "aarch64-ios-simulator",
++        "x86_64-apple-ios" => "x86_64-ios-simulator",
++
++        // prmpt: Android NDK
++        "aarch64-linux-android" => "aarch64-linux-android",
++        "armv7-linux-androideabi" => "arm-linux-androideabi",
++        "x86_64-linux-android" => "x86_64-linux-android",
++        "i686-linux-android" => "x86-linux-android",
++
++        // prmpt: Windows
++        "x86_64-pc-windows-gnu" => "x86_64-windows-gnu",
++        "x86_64-pc-windows-msvc" => "x86_64-windows-msvc",
++        "aarch64-pc-windows-msvc" => "aarch64-windows-msvc",
++
+         other => panic!("unsupported Rust target for vendored build: {other}"),
+     };
+     value.to_owned()

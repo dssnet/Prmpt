@@ -46,6 +46,7 @@ Tauri backend (Rust)                                        ▼
 
 ```bash
 bun install                       # once
+bun run setup-vendor              # once (and after any libghostty-rs submodule bump)
 cd src-tauri && cargo check       # type-check backend
 bun run build                     # type-check + bundle frontend
 # Launching the GUI: USER does this, not the agent:
