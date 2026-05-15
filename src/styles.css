@@ -1,0 +1,101 @@
+@import "tailwindcss";
+
+@font-face {
+  font-family: "Noto Nerd Font Mono";
+  src: url("./assets/fonts/NotoMonoNerdFontMono-Regular.ttf") format("truetype");
+  font-weight: 400;
+  font-style: normal;
+  font-display: block;
+}
+
+@font-face {
+  font-family: "Noto Color Emoji";
+  src: url("./assets/fonts/NotoColorEmoji.ttf") format("truetype");
+  font-display: block;
+}
+
+/* Runtime-mutated tokens. state/theme.ts updates --bg/--fg/--accent whenever
+   the user picks a preset or edits the custom theme; everything else derives
+   from them via color-mix so a single preset switch repaints the whole UI. */
+:root {
+  --bg: #1e1e2e;
+  --fg: #cdd6f4;
+  --accent: #89b4fa;
+  --surface-1: color-mix(in srgb, var(--fg) 6%, var(--bg));
+  --surface-2: color-mix(in srgb, var(--fg) 12%, var(--bg));
+  --surface-3: color-mix(in srgb, var(--fg) 18%, var(--bg));
+  --border: color-mix(in srgb, var(--fg) 14%, var(--bg));
+  --border-strong: color-mix(in srgb, var(--fg) 28%, var(--bg));
+  --fg-muted: color-mix(in srgb, var(--fg) 70%, var(--bg));
+  --fg-subtle: color-mix(in srgb, var(--fg) 45%, var(--bg));
+  --color-danger: #f38ba8;
+}
+
+/* Bridge runtime CSS variables into Tailwind theme tokens. Tailwind v4
+   exposes everything declared in @theme as a utility (`bg-bg`, `text-fg`,
+   `border-border-strong`, etc.) and respects live `--*` updates, so the
+   preset switcher keeps working without touching template code. */
+@theme {
+  --color-bg: var(--bg);
+  --color-fg: var(--fg);
+  --color-accent: var(--accent);
+  --color-surface-1: var(--surface-1);
+  --color-surface-2: var(--surface-2);
+  --color-surface-3: var(--surface-3);
+  --color-border: var(--border);
+  --color-border-strong: var(--border-strong);
+  --color-fg-muted: var(--fg-muted);
+  --color-fg-subtle: var(--fg-subtle);
+  --color-danger: var(--color-danger);
+  --font-mono: "Noto Nerd Font Mono", Menlo, ui-monospace, monospace;
+
+  --spacing-titlebar: 26px;
+  --spacing-tabbar: 34px;
+  --spacing-traffic-lights: 78px;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--fg);
+  overflow: hidden;
+  font-family: system-ui, -apple-system, sans-serif;
+}
+
+body {
+  display: flex;
+  flex-direction: column;
+}
+
+#app {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+/* Suppress macOS's text-context affordances on the canvas: Writing Tools,
+   Autofill, Look Up, etc. are injected by WKWebView when the system thinks
+   the focus is in editable/selectable text. tabindex="0" + synthetic focus
+   trips the heuristic, so we lock it down here. */
+#terminal-canvas {
+  outline: none;
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-user-modify: read-only;
+  -webkit-touch-callout: none;
+}
+
+/* The default chrome around the inner swatch in a color input is ugly
+   (thick gray frame). Strip it so the picker looks like the swatch. */
+input[type="color"]::-webkit-color-swatch-wrapper {
+  padding: 0;
+}
+
+input[type="color"]::-webkit-color-swatch {
+  border: none;
+  border-radius: 3px;
+}

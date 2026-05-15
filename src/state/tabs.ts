@@ -1,0 +1,442 @@
+import { computed, ref } from "vue";
+
+import {
+  closeTab,
+  connectSshHost,
+  forgetTab,
+  spawnTab,
+  type ExitPayload,
+  type RenderPayload,
+} from "../ipc";
+import {
+  collectLeaves,
+  deleteWorkspace,
+  findLeafByTabId,
+  getWorkspace,
+  makeLeaf,
+  makeSplit,
+  removeLeaf,
+  setWorkspace,
+  splitLeaf,
+  workspaceOfLeaf,
+  type LeafNode,
+  type SplitDir,
+  type TabOrigin,
+} from "./workspace";
+
+export const HOME_TAB_ID = 0;
+
+export type TabKind = "home" | "terminal" | "ssh" | "workspace";
+
+export interface TabState {
+  id: number;
+  kind: TabKind;
+  title: string;
+  hostLabel?: string;
+  hostId?: number;
+}
+
+export interface TabHydrateInfo {
+  id: number;
+  kind?: "terminal" | "ssh";
+  host_id?: number | null;
+  host_label?: string | null;
+}
+
+// Reactive state. The tabs array drives the tab bar; activeId picks the focused
+// one. Snapshots (huge per-frame cell arrays) live outside the reactive tree —
+// proxying them per frame would be a perf disaster — and a separate counter
+// triggers re-renders whenever a snapshot arrives for the active tab.
+const tabs = ref<TabState[]>([
+  { id: HOME_TAB_ID, kind: "home", title: "Home" },
+]);
+const activeId = ref<number>(HOME_TAB_ID);
+const snapshots = new Map<number, RenderPayload>();
+const renderSeq = ref(0);
+
+export function useTabs() {
+  const list = computed(() => tabs.value);
+  const terminals = computed(() =>
+    tabs.value.filter((t) => t.kind === "terminal" || t.kind === "ssh"),
+  );
+  const active = computed(() => tabs.value.find((t) => t.id === activeId.value) ?? null);
+  const activeTitle = computed(() => active.value?.title ?? "Prmpt");
+
+  return {
+    tabs: list,
+    terminals,
+    active,
+    activeId,
+    activeTitle,
+    renderSeq,
+  };
+}
+
+export function isInteractiveTab(t: TabState | null | undefined): boolean {
+  return !!t && t.kind !== "home";
+}
+
+export function isWorkspaceTab(t: TabState | null | undefined): boolean {
+  return !!t && t.kind === "workspace";
+}
+
+function originOf(t: TabState): TabOrigin {
+  return {
+    kind: t.kind === "ssh" ? "ssh" : "terminal",
+    title: t.title,
+    hostLabel: t.hostLabel,
+    hostId: t.hostId,
+  };
+}
+
+function findTab(id: number): TabState | undefined {
+  return tabs.value.find((t) => t.id === id);
+}
+
+function spliceTab(id: number): void {
+  const idx = tabs.value.findIndex((t) => t.id === id);
+  if (idx >= 0) tabs.value.splice(idx, 1);
+}
+
+function pickActiveAfterRemoval(): number {
+  const next = tabs.value.find((t) => t.kind !== "home");
+  return next ? next.id : HOME_TAB_ID;
+}
+
+export function snapshotFor(tabId: number): RenderPayload | undefined {
+  return snapshots.get(tabId);
+}
+
+export function activeSnapshot(): RenderPayload | undefined {
+  return snapshots.get(activeId.value);
+}
+
+export async function spawnTerminal(args: {
+  cols: number;
+  rows: number;
+  cellWidthPx: number;
+  cellHeightPx: number;
+}): Promise<number> {
+  const id = await spawnTab(args);
+  tabs.value.push({ id, kind: "terminal", title: "Terminal" });
+  activeId.value = id;
+  return id;
+}
+
+export async function spawnSsh(args: {
+  hostId: number;
+  hostLabel: string;
+  cols: number;
+  rows: number;
+  cellWidthPx: number;
+  cellHeightPx: number;
+  config: import("../ipc").SshConnectConfig;
+}): Promise<number> {
+  const id = await connectSshHost({
+    config: args.config,
+    cols: args.cols,
+    rows: args.rows,
+    cellWidthPx: args.cellWidthPx,
+    cellHeightPx: args.cellHeightPx,
+  });
+  tabs.value.push({
+    id,
+    kind: "ssh",
+    title: args.hostLabel,
+    hostLabel: args.hostLabel,
+    hostId: args.hostId,
+  });
+  activeId.value = id;
+  return id;
+}
+
+export async function closeTabAndForget(id: number): Promise<void> {
+  if (id === HOME_TAB_ID) return;
+  const t = findTab(id);
+  if (t && t.kind === "workspace") {
+    const ws = getWorkspace(id);
+    deleteWorkspace(id);
+    spliceTab(id);
+    if (activeId.value === id) activeId.value = pickActiveAfterRemoval();
+    if (ws) {
+      for (const leaf of collectLeaves(ws.root)) {
+        snapshots.delete(leaf.tabId);
+        closeTab(leaf.tabId).catch(() => undefined);
+      }
+    }
+    return;
+  }
+  try {
+    await closeTab(id);
+  } catch {
+    /* ignore — exit event still cleans up */
+  }
+}
+
+/** Splice a tab out of the bar without touching the backend — its PTY lives
+ *  on as a workspace pane. (Mirrors removeTabLocal but keeps the snapshot.) */
+function consumeTabIntoWorkspace(id: number): void {
+  spliceTab(id);
+}
+
+/** Drop `draggedTabId` onto a pane. If the target is a plain tab it becomes a
+ *  new workspace; if it's already a workspace the hit pane is split. Returns
+ *  the workspace slot id, or null if the drop was a no-op. */
+export function dropTabIntoTarget(
+  draggedTabId: number,
+  targetSlotId: number,
+  targetPaneTabId: number,
+  dir: SplitDir,
+  placeDraggedFirst: boolean,
+): number | null {
+  if (draggedTabId === targetPaneTabId) return null;
+  const dragged = findTab(draggedTabId);
+  const target = findTab(targetSlotId);
+  if (!dragged || !target || dragged.kind === "home" || target.kind === "home") {
+    return null;
+  }
+  const draggedLeaf = makeLeaf(draggedTabId, originOf(dragged));
+
+  if (target.kind === "workspace") {
+    const ws = getWorkspace(targetSlotId);
+    if (!ws) return null;
+    const root = splitLeaf(
+      ws.root,
+      targetPaneTabId,
+      draggedLeaf,
+      dir,
+      placeDraggedFirst,
+    );
+    setWorkspace(targetSlotId, { root, focusedTabId: draggedTabId });
+    consumeTabIntoWorkspace(draggedTabId);
+    activeId.value = targetSlotId;
+    return targetSlotId;
+  }
+
+  // Plain target → convert it into a workspace in place (keeps its slot id so
+  // the tab-bar position/animation stay stable).
+  const targetLeaf = makeLeaf(target.id, originOf(target));
+  const root = placeDraggedFirst
+    ? makeSplit(dir, draggedLeaf, targetLeaf)
+    : makeSplit(dir, targetLeaf, draggedLeaf);
+  const slotId = target.id;
+  target.kind = "workspace";
+  target.title = dragged.title;
+  target.hostLabel = undefined;
+  target.hostId = undefined;
+  setWorkspace(slotId, { root, focusedTabId: draggedTabId });
+  consumeTabIntoWorkspace(draggedTabId);
+  activeId.value = slotId;
+  return slotId;
+}
+
+/** Set the focused pane within a workspace (drives input/selection routing). */
+export function focusWorkspacePane(slotId: number, tabId: number): void {
+  const ws = getWorkspace(slotId);
+  if (!ws || ws.focusedTabId === tabId) return;
+  setWorkspace(slotId, { root: ws.root, focusedTabId: tabId });
+}
+
+export function setActive(id: number): void {
+  if (tabs.value.some((t) => t.id === id)) {
+    activeId.value = id;
+  }
+}
+
+/** A workspace lost a leaf and now has ≤1 pane: drop the workspace and turn
+ *  its slot back into a normal tab for the survivor (or remove it entirely). */
+function revertOrRemoveSlot(slotId: number, survivor: LeafNode | null): void {
+  deleteWorkspace(slotId);
+  const slot = findTab(slotId);
+  if (survivor && slot) {
+    const o = survivor.origin;
+    slot.id = survivor.tabId;
+    slot.kind = o.kind;
+    slot.title = snapshots.get(survivor.tabId)?.title || o.title;
+    slot.hostLabel = o.hostLabel;
+    slot.hostId = o.hostId;
+    if (activeId.value === slotId) activeId.value = survivor.tabId;
+  } else {
+    spliceTab(slotId);
+    if (activeId.value === slotId) activeId.value = pickActiveAfterRemoval();
+  }
+}
+
+/** Apply a tree after a leaf was removed: collapse to a tab if ≤1 pane left,
+ *  otherwise keep the workspace and fix focus if the focused pane went away. */
+function applyWorkspaceRemoval(
+  slotId: number,
+  removedTabId: number,
+  newRoot: ReturnType<typeof removeLeaf>,
+): void {
+  const ws = getWorkspace(slotId);
+  if (!newRoot || newRoot.kind === "leaf") {
+    revertOrRemoveSlot(slotId, newRoot && newRoot.kind === "leaf" ? newRoot : null);
+    return;
+  }
+  const focused =
+    ws && ws.focusedTabId === removedTabId
+      ? collectLeaves(newRoot)[0].tabId
+      : (ws?.focusedTabId ?? collectLeaves(newRoot)[0].tabId);
+  setWorkspace(slotId, { root: newRoot, focusedTabId: focused });
+  if (activeId.value === slotId) renderSeq.value++;
+}
+
+export function handleExit(p: ExitPayload): void {
+  if (p.tab_id === HOME_TAB_ID) return;
+
+  const wsId = workspaceOfLeaf(p.tab_id);
+  if (wsId !== undefined) {
+    const ws = getWorkspace(wsId);
+    snapshots.delete(p.tab_id);
+    forgetTab(p.tab_id).catch(() => undefined);
+    if (!ws) return;
+    applyWorkspaceRemoval(wsId, p.tab_id, removeLeaf(ws.root, p.tab_id));
+    return;
+  }
+
+  const idx = tabs.value.findIndex((t) => t.id === p.tab_id);
+  if (idx >= 0) tabs.value.splice(idx, 1);
+  snapshots.delete(p.tab_id);
+  forgetTab(p.tab_id).catch(() => undefined);
+  if (activeId.value === p.tab_id) {
+    activeId.value = pickActiveAfterRemoval();
+  }
+}
+
+/** Move an existing pane next to another pane within the same workspace
+ *  (tiling rearrange). Returns true if the tree changed. */
+export function moveWorkspaceLeaf(
+  slotId: number,
+  draggedTabId: number,
+  targetPaneTabId: number,
+  dir: SplitDir,
+  placeDraggedFirst: boolean,
+): boolean {
+  if (draggedTabId === targetPaneTabId) return false;
+  const ws = getWorkspace(slotId);
+  if (!ws) return false;
+  const leaf = findLeafByTabId(ws.root, draggedTabId);
+  if (!leaf || !findLeafByTabId(ws.root, targetPaneTabId)) return false;
+  const removed = removeLeaf(ws.root, draggedTabId);
+  if (!removed) return false;
+  const root = splitLeaf(
+    removed,
+    targetPaneTabId,
+    makeLeaf(draggedTabId, leaf.origin),
+    dir,
+    placeDraggedFirst,
+  );
+  setWorkspace(slotId, { root, focusedTabId: draggedTabId });
+  return true;
+}
+
+/** Pull a pane out of a workspace back into its own standalone tab. The PTY
+ *  keeps running; the workspace collapses if it drops to ≤1 pane. */
+export function detachWorkspaceLeaf(slotId: number, tabId: number): void {
+  const ws = getWorkspace(slotId);
+  if (!ws) return;
+  const leaf = findLeafByTabId(ws.root, tabId);
+  if (!leaf) return;
+  const newRoot = removeLeaf(ws.root, tabId);
+  if (!findTab(tabId)) {
+    tabs.value.push({
+      id: tabId,
+      kind: leaf.origin.kind,
+      title: snapshots.get(tabId)?.title || leaf.origin.title,
+      hostLabel: leaf.origin.hostLabel,
+      hostId: leaf.origin.hostId,
+    });
+  }
+  applyWorkspaceRemoval(slotId, tabId, newRoot);
+  activeId.value = tabId;
+}
+
+/** Close a single pane (its backend PTY). The exit event then prunes the
+ *  workspace tree via handleExit. */
+export async function closeWorkspacePane(tabId: number): Promise<void> {
+  try {
+    await closeTab(tabId);
+  } catch {
+    /* ignore — exit event still cleans up */
+  }
+}
+
+export function handleRender(payload: RenderPayload): void {
+  const wsId = workspaceOfLeaf(payload.tab_id);
+  const t = tabs.value.find((x) => x.id === payload.tab_id);
+  // A workspace leaf has no TabState of its own (it was consumed), but its
+  // snapshot must still be cached so the pane can render.
+  if (!t && wsId === undefined) return;
+  snapshots.set(payload.tab_id, payload);
+
+  if (payload.title && payload.title.length > 0) {
+    if (t && t.kind !== "workspace" && payload.title !== t.title) {
+      t.title = payload.title;
+    }
+    if (wsId !== undefined) {
+      const ws = getWorkspace(wsId);
+      const slot = findTab(wsId);
+      if (ws && slot && ws.focusedTabId === payload.tab_id) {
+        slot.title = payload.title;
+      }
+    }
+  }
+
+  if (payload.tab_id === activeId.value || wsId === activeId.value) {
+    renderSeq.value++;
+  }
+}
+
+export function hydrateTabs(infos: TabHydrateInfo[]): void {
+  for (const info of infos) {
+    if (info.id === HOME_TAB_ID || tabs.value.some((t) => t.id === info.id)) {
+      continue;
+    }
+    const kind: TabKind = info.kind === "ssh" ? "ssh" : "terminal";
+    const fallbackTitle =
+      kind === "ssh"
+        ? info.host_label ?? `SSH ${info.id}`
+        : `Terminal ${info.id}`;
+    tabs.value.push({
+      id: info.id,
+      kind,
+      title: fallbackTitle,
+      hostId: info.host_id ?? undefined,
+      hostLabel: info.host_label ?? undefined,
+    });
+  }
+  const firstTerminal = tabs.value.find((t) => t.kind !== "home");
+  if (firstTerminal && (activeId.value === HOME_TAB_ID || !tabs.value.some((t) => t.id === activeId.value))) {
+    activeId.value = firstTerminal.id;
+  }
+}
+
+export function attachTab(info: TabHydrateInfo): void {
+  if (info.id === HOME_TAB_ID || tabs.value.some((t) => t.id === info.id)) return;
+  const kind: TabKind = info.kind === "ssh" ? "ssh" : "terminal";
+  const fallbackTitle =
+    kind === "ssh" ? info.host_label ?? `SSH ${info.id}` : `Terminal ${info.id}`;
+  tabs.value.push({
+    id: info.id,
+    kind,
+    title: fallbackTitle,
+    hostId: info.host_id ?? undefined,
+    hostLabel: info.host_label ?? undefined,
+  });
+  activeId.value = info.id;
+}
+
+/** Local-only removal — the tab still exists on the backend, it has just
+ *  moved to another window. Don't call closeTab/forgetTab. */
+export function removeTabLocal(id: number): void {
+  if (id === HOME_TAB_ID) return;
+  const idx = tabs.value.findIndex((t) => t.id === id);
+  if (idx < 0) return;
+  tabs.value.splice(idx, 1);
+  snapshots.delete(id);
+  if (activeId.value === id) {
+    const next = tabs.value.find((t) => t.kind !== "home");
+    activeId.value = next ? next.id : HOME_TAB_ID;
+  }
+}

@@ -1,0 +1,160 @@
+name: Release
+
+# Trigger on any version-style tag push. Builds the macOS / Windows /
+# Linux bundles in parallel, attaches them to a single draft release,
+# and publishes when all three platforms succeed.
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  create-release:
+    name: Create draft release
+    runs-on: ubuntu-latest
+    outputs:
+      release_id: ${{ steps.create.outputs.result }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create draft release
+        id: create
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const tag = context.ref.replace('refs/tags/', '');
+            const { data } = await github.rest.repos.createRelease({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              tag_name: tag,
+              name: `Prmpt ${tag}`,
+              body: 'See attached bundles for installers / archives. Built from tag `' + tag + '`.',
+              draft: true,
+              prerelease: false,
+            });
+            return data.id;
+
+  build:
+    name: Build (${{ matrix.platform.label }})
+    needs: create-release
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          # macOS-14 is ARM (M1); produces a universal binary by adding
+          # the x86_64 target below. Use `args: ''` to skip universal
+          # if a single-arch build is preferred.
+          - label: macOS (universal)
+            os: macos-14
+            args: '--target universal-apple-darwin'
+            extra_rust_targets: 'x86_64-apple-darwin,aarch64-apple-darwin'
+
+          - label: Linux x86_64
+            os: ubuntu-22.04
+            args: ''
+            extra_rust_targets: ''
+
+          - label: Windows x86_64
+            os: windows-latest
+            args: ''
+            extra_rust_targets: ''
+
+    runs-on: ${{ matrix.platform.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux build dependencies
+        if: matrix.platform.os == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            build-essential \
+            file \
+            wget
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          # Empty string is accepted and means "no extra targets".
+          targets: ${{ matrix.platform.extra_rust_targets }}
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: 'src-tauri -> target'
+          # Distinct cache per matrix platform so the macOS universal
+          # build (two rustc targets) doesn't share a key with Linux
+          # or Windows.
+          key: ${{ matrix.platform.label }}
+          # Keep a partial cache around if the build fails partway —
+          # otherwise a flaky tauri bundle step wipes hours of work.
+          cache-on-failure: true
+
+      # libghostty-vt-sys's build.rs invokes Zig to compile Ghostty's
+      # vendored VT engine. Must match the version in CLAUDE.md.
+      # Note: @v1 of this action is deprecated and its mirror index was
+      # last updated May 2024, so it 404s on Zig releases past 0.13.x —
+      # pin to @v2 instead.
+      # v2's default `use-cache: true` caches ZIG_GLOBAL_CACHE_DIR, so
+      # repeat Zig invocations from libghostty-vt-sys are warm.
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: '0.15.2'
+          cache-key: ${{ matrix.platform.label }}
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+
+      # setup-bun caches the Bun toolchain but NOT `bun install`'s
+      # package cache. ~/.bun/install/cache works on all three OSes
+      # (Bun normalizes the path on Windows too).
+      - name: Cache bun install
+        uses: actions/cache@v4
+        with:
+          path: ~/.bun/install/cache
+          key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-bun-
+
+      - name: Install JS dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Build & upload Tauri bundle
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          releaseId: ${{ needs.create-release.outputs.release_id }}
+          args: ${{ matrix.platform.args }}
+
+  publish-release:
+    name: Publish release
+    needs: [create-release, build]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Mark release as non-draft
+        uses: actions/github-script@v7
+        env:
+          RELEASE_ID: ${{ needs.create-release.outputs.release_id }}
+        with:
+          script: |
+            await github.rest.repos.updateRelease({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              release_id: Number(process.env.RELEASE_ID),
+              draft: false,
+              make_latest: 'true',
+            });

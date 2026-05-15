@@ -1,0 +1,109 @@
+[package]
+name = "prmpt"
+version = "0.0.5"
+description = "A terminal emulator built on Tauri + libghostty-vt"
+authors = ["Yanick"]
+edition = "2021"
+rust-version = "1.93"
+
+[lib]
+name = "prmpt_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+libghostty-vt = "0.1"
+# Declared as a direct dep (in addition to the transitive use via
+# `libghostty-vt`) so the build script can read
+# `DEP_GHOSTTY_VT_LIBDIR` / `DEP_GHOSTTY_VT_LIB_FILENAME` to stage the
+# dylib for macOS bundling. See src-tauri/build.rs.
+libghostty-vt-sys = "0.1"
+toml = "0.8"
+thiserror = "1"
+anyhow = "1"
+parking_lot = "0.12"
+crossbeam-channel = "0.5"
+directories = "5"
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "macros", "io-util", "time", "net"] }
+tauri-plugin-sql = { version = "2", features = ["sqlite"] }
+tauri-plugin-stronghold = "2"
+rand = "0.8"
+# Used in the Stronghold plugin's password-hash function: the boot
+# password file holds 64 hex chars, which we decode back to the 32 raw
+# bytes the snapshot KeyProvider expects.
+hex = "0.4"
+russh = "0.49"
+russh-keys = "0.49"
+async-trait = "0.1"
+bytes = "1"
+zeroize = { version = "1.8", features = ["zeroize_derive", "alloc"] }
+
+# portable-pty's transitive `termios 0.2.2` has no iOS/Android support,
+# and there is no local-PTY story on those targets anyway (sandbox
+# forbids fork/exec for App-Store binaries). Pull it in only on desktop.
+[target.'cfg(not(any(target_os = "ios", target_os = "android")))'.dependencies]
+portable-pty = "0.8"
+
+# Override libghostty-vt-sys with the local fork in `vendor/`, which
+# extends `build.rs`'s target allow-list with iOS / Android / Windows
+# triples. See vendor/libghostty-vt-sys/README.md.
+[patch.crates-io]
+libghostty-vt-sys = { path = "vendor/libghostty-vt-sys" }
+
+# Stronghold's internal scrypt key derivation is unusably slow when built
+# with debug optimizations — `Stronghold.load()` then takes 1–2 minutes,
+# which is what was timing out the JS bootstrap. Forcing scrypt (and its
+# dependencies) to opt-level 3 in dev brings it back to milliseconds. This
+# is the documented upstream workaround for tauri-plugin-stronghold.
+[profile.dev.package.scrypt]
+opt-level = 3
+
+[profile.dev.package.salsa20]
+opt-level = 3
+
+[profile.dev.package.sha2]
+opt-level = 3
+
+[profile.dev.package.pbkdf2]
+opt-level = 3
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", features = [
+    "NSImage",
+    "NSBitmapImageRep",
+    "NSGraphicsContext",
+    "NSGraphics",
+    "NSImageRep",
+    "NSColor",
+] }
+objc2-foundation = { version = "0.3", features = [
+    "NSString",
+    "NSGeometry",
+    "NSData",
+] }
+# Keychain Services for the Stronghold boot key. See src/secure_store/macos.rs.
+security-framework = "3"
+
+[target.'cfg(target_os = "ios")'.dependencies]
+# Same crate compiles for iOS; backs onto the iOS Keychain.
+security-framework = "3"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.58", features = [
+    "Win32_Security_Credentials",
+    "Win32_Foundation",
+] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# Stores the boot key in the Secret Service (libsecret / GNOME Keyring /
+# KWallet via D-Bus). When no daemon is running the backend reports
+# Unavailable and we fall back to the legacy file. The crate's
+# `rt-tokio-crypto-rust` feature picks the existing tokio runtime + a
+# pure-Rust crypto stack so we don't pull in system OpenSSL.
+secret-service = { version = "4", features = ["rt-tokio-crypto-rust"] }
