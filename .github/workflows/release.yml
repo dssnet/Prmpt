@@ -69,7 +69,12 @@ jobs:
     runs-on: ${{ matrix.platform.os }}
 
     steps:
+      # libghostty-rs is a git submodule consumed via a `[patch]` path
+      # dependency in src-tauri/Cargo.toml. Without `submodules: recursive`
+      # the path is empty and cargo fails to read its Cargo.toml.
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - name: Install Linux build dependencies
         if: matrix.platform.os == 'ubuntu-22.04'
@@ -131,6 +136,12 @@ jobs:
 
       - name: Install JS dependencies
         run: bun install --frozen-lockfile
+
+      # Lays the prmpt fork patch (libghostty-vt-sys.patch) onto the
+      # pinned submodule. Required before any cargo build — the build.rs
+      # in libghostty-vt-sys depends on it. Idempotent.
+      - name: Apply libghostty-rs fork patch
+        run: bun run setup-vendor
 
       - name: Build & upload Tauri bundle
         uses: tauri-apps/tauri-action@v0
