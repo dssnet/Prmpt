@@ -97,7 +97,8 @@ jobs:
             patchelf \
             build-essential \
             file \
-            wget
+            wget \
+            libfuse2
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
