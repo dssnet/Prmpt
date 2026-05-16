@@ -276,6 +276,47 @@ jobs:
           releaseId: ${{ needs.create-release.outputs.release_id }}
           args: ${{ matrix.platform.args }}
 
+      # linuxdeploy-plugin-gtk bundles the host's libwayland-* into the
+      # AppImage. libwayland is tied to the running compositor, so on a
+      # user machine whose libwayland differs the bundled copy shadows
+      # the host's and WebKitGTK's EGL display creation dies with
+      # "Could not create default EGL display: EGL_BAD_PARAMETER" — the
+      # window opens but the webview never paints (terminal + home view
+      # blank). The .deb/.rpm have no bundled libs and work fine. Fix:
+      # strip libwayland-*.so* from the AppImage so it uses the host's,
+      # repack, and replace the asset tauri-action already uploaded.
+      # (im-wayland*.so are GTK input-method modules, NOT libwayland —
+      # leave them.) Verified end-to-end in a Linux container repro.
+      - name: Fix AppImage (strip bundled libwayland, repack, replace)
+        if: matrix.platform.os == 'ubuntu-22.04'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.create-release.outputs.version }}
+          APPIMAGE_EXTRACT_AND_RUN: 1
+          ARCH: x86_64
+        run: |
+          set -euo pipefail
+          appimage=$(ls src-tauri/target/release/bundle/appimage/*.AppImage | head -1)
+          echo "Repacking $appimage"
+          work=$(mktemp -d)
+          cp "$appimage" "$work/orig.AppImage"
+          ( cd "$work" && ./orig.AppImage --appimage-extract >/dev/null )
+          before=$(ls "$work"/squashfs-root/usr/lib | grep -E '^libwayland-.*\.so' || true)
+          echo "stripping: ${before:-<none found>}"
+          rm -f "$work"/squashfs-root/usr/lib/libwayland-*.so*
+          curl -sSfL -o "$work/appimagetool" \
+            "https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage"
+          chmod +x "$work/appimagetool"
+          # Overwrite in place so the asset name is unchanged.
+          "$work/appimagetool" --no-appstream "$work/squashfs-root" "$appimage"
+          # Sanity: repack must be a valid AppImage with no libwayland.
+          ( cd "$work" && mkdir verify && cd verify \
+            && "$appimage" --appimage-extract >/dev/null \
+            && ! ls squashfs-root/usr/lib | grep -qE '^libwayland-.*\.so' )
+          echo "Replacing release asset $(basename "$appimage")"
+          gh release upload "v${VERSION}" "$appimage" --clobber
+          rm -rf "$work"
+
   publish-release:
     name: Publish release
     needs: [create-release, build]

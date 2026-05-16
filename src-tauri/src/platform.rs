@@ -69,6 +69,112 @@ pub fn home_dir() -> Option<PathBuf> {
     directories::BaseDirs::new().map(|d| d.home_dir().to_path_buf())
 }
 
+/// Strip AppImage-injected variables from a child command's environment.
+///
+/// The AppImage runtime / linuxdeploy `AppRun` *prepends* `$APPDIR/...`
+/// onto `LD_LIBRARY_PATH` and a swarm of GTK/GIO/GdkPixbuf/typelib path
+/// vars before our process even starts, keeping the user's original
+/// value as the suffix. Those bundled libs (older glib/gio, …) are
+/// correct for *our* webview but poison for arbitrary programs the user
+/// runs in the terminal: e.g. `flatpak` loads the host
+/// `libmalcontent-0.so.0`, which then resolves `g_task_set_static_name`
+/// against our bundled GLib < 2.76 and dies with "undefined symbol".
+/// The .deb/.rpm builds set none of this, so their shells are clean;
+/// the terminal must hand its child the same login-grade environment.
+///
+/// Because `AppRun` only prepends `$APPDIR` entries, the original is
+/// recoverable exactly: drop the entries under `$APPDIR`, keep the
+/// rest. No-op when not launched from an AppImage (`APPDIR` unset) and
+/// on non-Linux targets.
+#[cfg(all(not(target_os = "ios"), not(target_os = "android")))]
+#[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
+pub fn sanitize_child_env(cmd: &mut portable_pty::CommandBuilder) {
+    #[cfg(target_os = "linux")]
+    {
+        let appdir = match std::env::var("APPDIR") {
+            Ok(d) if !d.is_empty() => d,
+            _ => return,
+        };
+
+        // Colon-separated search paths: keep only non-$APPDIR entries;
+        // unset entirely if nothing host-side remains (so the child
+        // gets the system default, not an empty override).
+        const PATH_LIST_VARS: &[&str] = &[
+            "LD_LIBRARY_PATH",
+            "XDG_DATA_DIRS",
+            "XDG_CONFIG_DIRS",
+            "GI_TYPELIB_PATH",
+            "GTK_PATH",
+            "GIO_MODULE_DIR",
+            "GIO_EXTRA_MODULES",
+            "GSETTINGS_SCHEMA_DIR",
+            "QT_PLUGIN_PATH",
+            "GST_PLUGIN_SYSTEM_PATH",
+            "GST_PLUGIN_SYSTEM_PATH_1_0",
+            "GST_PLUGIN_PATH",
+            "GST_PLUGIN_PATH_1_0",
+            "PYTHONPATH",
+            "PERLLIB",
+            "PERL5LIB",
+        ];
+        for var in PATH_LIST_VARS {
+            let Ok(val) = std::env::var(var) else { continue };
+            let kept: Vec<&str> = val
+                .split(':')
+                .filter(|e| !e.is_empty() && !is_under(e, &appdir))
+                .collect();
+            if kept.is_empty() {
+                cmd.env_remove(var);
+            } else {
+                cmd.env(var, kept.join(":"));
+            }
+        }
+
+        // Single-value vars pointing at a file/dir inside the bundle.
+        const SINGLE_VARS: &[&str] = &[
+            "GDK_PIXBUF_MODULE_FILE",
+            "GDK_PIXBUF_MODULEDIR",
+            "GTK_EXE_PREFIX",
+            "GTK_DATA_PREFIX",
+            "GTK_IM_MODULE_FILE",
+            "FONTCONFIG_FILE",
+            "FONTCONFIG_PATH",
+            "LIBGL_DRIVERS_PATH",
+            "PYTHONHOME",
+        ];
+        for var in SINGLE_VARS {
+            if let Ok(val) = std::env::var(var) {
+                if is_under(&val, &appdir) {
+                    cmd.env_remove(var);
+                }
+            }
+        }
+
+        // LD_PRELOAD is space- or colon-separated; just drop it whole
+        // if it references the bundle at all.
+        if let Ok(val) = std::env::var("LD_PRELOAD") {
+            if val.contains(&appdir) {
+                cmd.env_remove("LD_PRELOAD");
+            }
+        }
+
+        // Don't let the child believe it's running inside an AppImage.
+        for var in ["APPDIR", "APPIMAGE", "APPIMAGE_UUID", "ARGV0", "OWD"] {
+            cmd.env_remove(var);
+        }
+    }
+}
+
+/// True if `entry` is `appdir` itself or a path beneath it. `AppRun`
+/// uses literal `$APPDIR` prefixes, so a string prefix test is exact;
+/// tolerate a trailing-slash mismatch on either side.
+#[cfg(target_os = "linux")]
+fn is_under(entry: &str, appdir: &str) -> bool {
+    let e = entry.trim_end_matches('/');
+    let a = appdir.trim_end_matches('/');
+    e == a || e.starts_with(&format!("{a}/"))
+}
+
 /// macOS overlay titlebar (titlebar blended into the window's content
 /// view). The `title_bar_style` / `hidden_title` builder methods only
 /// exist on macOS in Tauri 2; call sites must `#[cfg(target_os =

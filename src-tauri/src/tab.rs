@@ -262,6 +262,11 @@ impl TabRegistry {
         }
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
+        // When packaged as an AppImage, hand the shell the user's
+        // login environment, not our bundled-runtime one (otherwise
+        // e.g. `flatpak` crashes on our older bundled GLib). No-op for
+        // .deb/.rpm/.app and when not run from an AppImage.
+        platform::sanitize_child_env(&mut cmd);
 
         let child = pair
             .slave
