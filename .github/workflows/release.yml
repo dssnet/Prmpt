@@ -162,6 +162,24 @@ jobs:
       - name: Install JS dependencies
         run: bun install --frozen-lockfile
 
+      # tauri-bundler's notarization shells out to `xcrun notarytool`
+      # with `--issuer $APPLE_API_ISSUER --key-id $APPLE_API_KEY
+      # --key $APPLE_API_KEY_PATH`. So APPLE_API_KEY must be the short
+      # App Store Connect *Key ID* (e.g. 2X9R4HXF34) and
+      # APPLE_API_KEY_PATH must be a path to the .p8 *on the runner*.
+      # Storing the .p8 body in APPLE_API_KEY made notarytool receive a
+      # multi-line PEM as --key-id ("Error: Invalid option"); storing a
+      # path in a secret pointed at a file that doesn't exist on a fresh
+      # runner. Materialize the key from the APPLE_API_KEY_P8 secret
+      # (raw .p8 contents) into a temp file with 0600 perms instead.
+      - name: Provision Apple notarization key
+        if: matrix.platform.os == 'macos-14'
+        env:
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+        run: |
+          install -m 600 /dev/null "$RUNNER_TEMP/apple_api_key.p8"
+          printf '%s\n' "$APPLE_API_KEY_P8" > "$RUNNER_TEMP/apple_api_key.p8"
+
       # Lays the prmpt fork patch (libghostty-vt-sys.patch) onto the
       # pinned submodule. Required before any cargo build — the build.rs
       # in libghostty-vt-sys depends on it. Idempotent.
@@ -186,9 +204,13 @@ jobs:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          # APPLE_API_KEY = short App Store Connect Key ID (NOT the .p8
+          # body). APPLE_API_KEY_PATH is the file written by the
+          # "Provision Apple notarization key" step above — never a
+          # secret, since the path must resolve on this runner.
           APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
           APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
-          APPLE_API_KEY_PATH: ${{ secrets.APPLE_API_KEY_PATH }}
+          APPLE_API_KEY_PATH: ${{ runner.temp }}/apple_api_key.p8
         with:
           releaseId: ${{ needs.create-release.outputs.release_id }}
           args: ${{ matrix.platform.args }}
