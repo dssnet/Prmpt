@@ -195,6 +195,13 @@ jobs:
           # tools self-extract instead of mounting via FUSE. No-op on
           # macOS/Windows legs.
           APPIMAGE_EXTRACT_AND_RUN: 1
+          # Even with FUSE resolved, linuxdeploy's strip pass aborts the
+          # whole run ("failed to run linuxdeploy") when it can't strip
+          # one of the staged binaries — the Zig-produced libghostty-vt
+          # (non-standard section layout) and the webkit2gtk libs are
+          # common offenders. Stripping only trims the AppImage; skip it
+          # so bundling succeeds. No-op on macOS/Windows legs.
+          NO_STRIP: true
           # Apple code signing + notarization. Only the macOS leg has
           # these secrets populated; on the Ubuntu/Windows legs they
           # resolve to empty strings and tauri-action skips signing, so
