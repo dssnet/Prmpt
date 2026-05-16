@@ -64,7 +64,7 @@ bun tauri dev
 - Get cells via `RenderState::update(&terminal)` → `Snapshot` → `RowIterator::update(&snapshot)` → `CellIterator::update(&row)`. Each iterator is reused across frames (don't recreate per row).
 - `CellIteration::style()` returns `Err(InvalidValue)` for cells that have no styling applied. Treat as "use defaults", do not propagate.
 - `CursorVisualStyle` is `#[non_exhaustive]`. Always have a `_ => default` arm.
-- `on_pty_write` runs synchronously inside `vt_write`. The closure captures the PTY writer (we use `Rc<RefCell<Box<dyn Write>>>` on the tab thread).
+- `on_pty_write` runs synchronously inside `vt_write`, so it must never block. The closure does a non-blocking `try_send` of the reply bytes onto a bounded queue drained by a dedicated per-tab **writer thread** (`tab-<id>-writer`); replies are dropped if the queue is full. User input (`TabCmd::Write`) uses a reliable blocking send on the same queue. This decoupling stops a child that floods output without reading its stdin (`cat /dev/urandom`) from jamming the PTY input queue and stalling the VT thread / blocking CTRL+C.
 - The crate's `set_dirty` plumbing has a known oddity in 0.1.1 (passes `&&T` to a `*const c_void` argument). Returns `InvalidValue` sometimes — use `.ok()` and move on.
 
 ## IPC contract

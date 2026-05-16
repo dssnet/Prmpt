@@ -1,8 +1,6 @@
 use std::{
-    cell::RefCell,
     collections::HashMap,
     io::{Read, Write},
-    rc::Rc,
     sync::{
         atomic::{AtomicU64, Ordering},
         Arc,
@@ -11,7 +9,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crossbeam_channel::{select, unbounded, Receiver, Sender};
+use crossbeam_channel::{bounded, select, unbounded, Receiver, Sender};
 use libghostty_vt::{
     render::{CellIterator, CursorVisualStyle, Dirty, RenderState, RowIterator},
     screen::CellWide,
@@ -36,6 +34,21 @@ use crate::{
     },
     SharedConfig,
 };
+
+/// Bounded capacity of the per-tab PTY-*write* queue (terminal replies +
+/// user input). Replies are dropped when full so a child that floods output
+/// without reading its own stdin (`cat /dev/urandom`) cannot jam the PTY input
+/// queue and stall the VT thread (which also blocked CTRL+C from reaching the
+/// line discipline). Interactive apps drain their input and never hit this.
+const PTY_WRITE_QUEUE_CAP: usize = 1024;
+
+/// When the user presses CTRL+C and this many PTY-output chunks are already
+/// buffered, the foreground process is being interrupted while a flood is in
+/// flight (e.g. `cat /dev/urandom`). Those buffered bytes are about-to-be-killed
+/// output; discard them so the screen stops immediately instead of scrolling
+/// the stale backlog for seconds. Normal commands never buffer this deep (the
+/// loop drains them faster than they arrive), so their output is untouched.
+const INTERRUPT_FLUSH_BACKLOG: usize = 64;
 
 #[derive(Clone, Copy, Debug)]
 pub enum ScrollKind {
@@ -510,16 +523,41 @@ fn run_tab_loop(
         }
     };
 
-    let writer_cell = Rc::new(RefCell::new(writer));
+    // Dedicated PTY-writer thread. `on_pty_write` runs synchronously inside
+    // `vt_write` on this (VT) thread, so a blocking write there freezes
+    // terminal parsing. A child that floods output without reading its own
+    // stdin (e.g. `cat /dev/urandom`, which makes us emit query replies it
+    // never drains) fills the PTY input queue; the old direct `write_all`
+    // then blocked `vt_write` indefinitely and also kept CTRL+C from reaching
+    // the line discipline. Off-loading writes here keeps the VT thread free;
+    // replies are dropped if the queue backs up (disposable when the child
+    // isn't reading), while user input is sent reliably and is low-volume.
+    let (write_tx, write_rx) = bounded::<Vec<u8>>(PTY_WRITE_QUEUE_CAP);
+    {
+        let mut writer = writer;
+        thread::Builder::new()
+            .name(format!("tab-{tab_id}-writer"))
+            .spawn(move || {
+                while let Ok(bytes) = write_rx.recv() {
+                    if writer.write_all(&bytes).is_err() {
+                        break;
+                    }
+                    let _ = writer.flush();
+                }
+            })
+            .map_err(|e| AppError::Other(format!("spawn writer thread: {e}")))?;
+    }
     let mut terminal = Terminal::new(TerminalOptions {
         cols,
         rows,
         max_scrollback: scrollback_lines,
     })?;
     {
-        let w = writer_cell.clone();
+        let tx = write_tx.clone();
         terminal.on_pty_write(move |_t, bytes| {
-            let _ = w.borrow_mut().write_all(bytes);
+            // Non-blocking: drop replies if the writer can't keep up so a
+            // non-reading flooder can never stall the VT thread.
+            let _ = tx.try_send(bytes.to_vec());
         })?;
     }
     let mut render_state = RenderState::new()?;
@@ -536,9 +574,36 @@ fn run_tab_loop(
         select! {
             recv(cmd_rx) -> msg => match msg {
                 Ok(TabCmd::Write(bytes)) => {
+                    let is_interrupt = bytes.contains(&0x03);
                     terminal.scroll_viewport(ScrollViewport::Bottom);
                     pending_emit = true;
-                    let _ = writer_cell.borrow_mut().write_all(&bytes);
+                    // Reliable send: input is tiny and must not be dropped. The
+                    // queue won't back up from a flood (replies use try_send).
+                    let _ = write_tx.send(bytes);
+
+                    // CTRL+C delivers SIGINT to the foreground process group
+                    // immediately (verified: the line discipline kills e.g.
+                    // `cat /dev/urandom` on the first press). But a flood it
+                    // already produced sits buffered in pty_rx and would keep
+                    // scrolling for seconds, making the interrupt *look* dead.
+                    // Those bytes are the killed process's output — drop the
+                    // backlog so the screen stops at once. Only triggers on a
+                    // genuine flood; normal output never buffers this deep.
+                    if is_interrupt && pty_rx.len() > INTERRUPT_FLUSH_BACKLOG {
+                        let mut hit_eof = false;
+                        while let Ok(ev) = pty_rx.try_recv() {
+                            match ev {
+                                PtyEvent::Data(_) => {}
+                                PtyEvent::Eof => {
+                                    hit_eof = true;
+                                    break;
+                                }
+                            }
+                        }
+                        if hit_eof {
+                            break;
+                        }
+                    }
                 }
                 Ok(TabCmd::Resize { cols, rows, cell_width_px, cell_height_px }) => {
                     match &mut backend {
