@@ -3,7 +3,10 @@
 //   - package.json
 //   - src-tauri/tauri.conf.json  (the value users see in the .app bundle)
 //   - src-tauri/Cargo.toml       (the [package] entry only — not dep versions)
-// then run `cargo check` to refresh src-tauri/Cargo.lock.
+// run `cargo check` to refresh src-tauri/Cargo.lock, then commit the
+// bump as "v<version>" and push it to main. Releasing is then a manual
+// GitHub Actions dispatch from main (the workflow creates the tag) —
+// not a tag push.
 //
 // Usage: bun run bump <version>
 //        e.g. bun run bump 0.1.1
@@ -90,10 +93,49 @@ if (cargo.status !== 0) {
   process.exit(cargo.status ?? 1);
 }
 
+// Commit the bump automatically. The release workflow no longer
+// triggers on a `v*` tag push — it is dispatched manually from `main`
+// (see .github/workflows/release.yml). So all we need locally is the
+// version commit on main; the tag is created by the workflow itself.
+function git(...args: string[]) {
+  const r = spawnSync("git", args, { cwd: root, stdio: "inherit" });
+  if (r.status !== 0) {
+    console.error(`bump: \`git ${args.join(" ")}\` failed`);
+    process.exit(r.status ?? 1);
+  }
+}
+
+const bumpedFiles = [
+  "package.json",
+  "src-tauri/tauri.conf.json",
+  "src-tauri/Cargo.toml",
+  "src-tauri/Cargo.lock",
+];
+git("add", ...bumpedFiles);
+
+// Nothing staged means every file was already at this version — skip
+// the commit rather than erroring on an empty commit.
+const staged = spawnSync("git", ["diff", "--cached", "--quiet", "--", ...bumpedFiles], {
+  cwd: root,
+});
+if (staged.status === 0) {
+  console.log(`\nNothing to commit — already at v${version}.`);
+} else {
+  git("commit", "-m", `v${version}`);
+  console.log(`\nCommitted v${version}.`);
+}
+
+// Push the bump to main so the dispatched release workflow sees it.
+git("push", "origin", "HEAD");
+console.log("Pushed to main.");
+
 console.log(`
-Next steps:
-  git add package.json src-tauri/tauri.conf.json src-tauri/Cargo.toml src-tauri/Cargo.lock
-  git commit -m "v${version}"
-  git tag v${version}
-  git push origin HEAD v${version}
+Next step — start a release in GitHub Actions:
+    gh workflow run release.yml --ref main
+  (or: GitHub → Actions → "Release" → "Run workflow" → branch: main)
+
+The Release workflow reads the version from src-tauri/tauri.conf.json,
+creates the v${version} tag + GitHub release itself, and builds all
+three platform bundles. Running it from main keeps its build cache
+restorable by the next release.
 `);
