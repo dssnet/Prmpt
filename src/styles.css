@@ -29,6 +29,11 @@
   --fg-muted: color-mix(in srgb, var(--fg) 70%, var(--bg));
   --fg-subtle: color-mix(in srgb, var(--fg) 45%, var(--bg));
   --color-danger: #f38ba8;
+  /* #terminal-host inset from the window edge (was Tailwind `m-1`). */
+  --frame-inset: 4px;
+  /* Workspace pane corner radius. Single source of truth: the `.pane-overlay`
+     CSS border and the WebGL content clip both read this. */
+  --pane-radius: 12px;
 }
 
 /* Bridge runtime CSS variables into Tailwind theme tokens. Tailwind v4

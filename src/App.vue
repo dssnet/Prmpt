@@ -44,6 +44,7 @@ import {
   clearSelection,
   copyCurrentSelection,
   computeDims,
+  resolveDropAt,
   focusCanvas,
   getCellMetrics,
   hasSelection,
@@ -83,6 +84,58 @@ async function spawnNewTab(): Promise<void> {
     cellHeightPx: Math.round(cellHeightPx * dpr),
   });
   focusCanvas();
+}
+
+// The + button dragged over the terminal: spawn a fresh terminal and split it
+// into the workspace at the drop point — same outcome as dragging an existing
+// tab there, but the tab is born at the destination.
+async function newTabIntoWorkspace(
+  clientX: number,
+  clientY: number,
+): Promise<void> {
+  // Resolve the drop target *before* spawning: spawnTerminal makes the new tab
+  // active, which would make resolveDropAt point the split at the new tab
+  // itself (and the self-drop guard would then cancel it). Mirrors
+  // splitActive's capture-then-spawn-then-split ordering.
+  const res = resolveDropAt(clientX, clientY);
+  const { cellWidthPx, cellHeightPx, dpr } = getCellMetrics();
+  const dims = computeDims();
+  const newId = await spawnTerminal({
+    cols: dims.cols,
+    rows: dims.rows,
+    cellWidthPx: Math.round(cellWidthPx * dpr),
+    cellHeightPx: Math.round(cellHeightPx * dpr),
+  });
+  // No pane under the cursor → the freshly spawned tab just stays a normal
+  // tab, a fine fallback.
+  if (res) {
+    dropTabIntoTarget(
+      newId,
+      res.slotId,
+      res.targetPaneTabId,
+      res.dir,
+      res.placeDraggedFirst,
+    );
+  }
+  focusCanvas();
+}
+
+// The + button dragged out of the window: spawn a terminal, then hand it to
+// the same tear-off path tabs use (attach to a window under the cursor, or
+// open a new window).
+async function newTabInWindow(
+  screenX: number,
+  screenY: number,
+): Promise<void> {
+  const { cellWidthPx, cellHeightPx, dpr } = getCellMetrics();
+  const dims = computeDims();
+  const newId = await spawnTerminal({
+    cols: dims.cols,
+    rows: dims.rows,
+    cellWidthPx: Math.round(cellWidthPx * dpr),
+    cellHeightPx: Math.round(cellHeightPx * dpr),
+  });
+  await handleDragOut(newId, screenX, screenY);
 }
 
 async function handleDragOut(
@@ -413,7 +466,12 @@ onBeforeUnmount(() => {
 
 <template>
   <TitleBar />
-  <TabBar :on-drag-out="handleDragOut" @request-new-tab="spawnNewTab" />
+  <TabBar
+    :on-drag-out="handleDragOut"
+    @request-new-tab="spawnNewTab"
+    @new-tab-workspace="newTabIntoWorkspace"
+    @new-tab-window="newTabInWindow"
+  />
   <TerminalView :config="props.config">
     <HomeView v-show="active?.kind === 'home'" />
   </TerminalView>

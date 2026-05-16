@@ -21,7 +21,11 @@ import {
 const props = defineProps<{
   onDragOut?: (tabId: number, screenX: number, screenY: number) => void;
 }>();
-const emit = defineEmits<{ requestNewTab: [] }>();
+const emit = defineEmits<{
+  requestNewTab: [];
+  newTabWorkspace: [clientX: number, clientY: number];
+  newTabWindow: [screenX: number, screenY: number];
+}>();
 
 const { tabs, active } = useTabs();
 
@@ -250,7 +254,7 @@ function onDragMove(e: MouseEvent): void {
   if (drag.reorderOnly) return; // workspace tabs only reorder (v1)
   // Outside the bar: original ghost + workspace-drop affordance.
   ghost.value = { x: e.clientX, y: e.clientY, label: drag.label };
-  updateWorkspaceDragPreview(e.clientX, e.clientY);
+  updateWorkspaceDragPreview(e.clientX, e.clientY, drag.tabId);
 }
 
 function onDragUp(e: MouseEvent): void {
@@ -281,6 +285,76 @@ function onDragUp(e: MouseEvent): void {
   const dy = e.screenY - d.startScreenY;
   if (dx * dx + dy * dy < DRAG_OUT_THRESHOLD * DRAG_OUT_THRESHOLD) return;
   props.onDragOut?.(d.tabId, e.screenX, e.screenY);
+}
+
+// The + button shares the tabs' mouse-driven drag (HTML5 DnD is unreliable in
+// WKWebView). It has no DOM node to carry and no slot to reorder, so it's a
+// trimmed version: just the ghost + workspace preview, resolving on release to
+// a click, a workspace split, or a tear-off — App spawns the actual terminal.
+interface PlusDrag {
+  startScreenX: number;
+  startScreenY: number;
+  active: boolean;
+}
+let plusDrag: PlusDrag | null = null;
+
+function onPlusMouseDown(e: MouseEvent): void {
+  if (e.button !== 0) return; // left button only
+  plusDrag = {
+    startScreenX: e.screenX,
+    startScreenY: e.screenY,
+    active: false,
+  };
+  window.addEventListener("mousemove", onPlusMove);
+  window.addEventListener("mouseup", onPlusUp);
+}
+
+function onPlusMove(e: MouseEvent): void {
+  if (!plusDrag) return;
+  if (!plusDrag.active) {
+    const dx = e.screenX - plusDrag.startScreenX;
+    const dy = e.screenY - plusDrag.startScreenY;
+    if (dx * dx + dy * dy < DRAG_START_PX * DRAG_START_PX) return;
+    plusDrag.active = true;
+    resetTabConsumed();
+  }
+  // Inside the bar: no affordance — releasing here is just "new tab".
+  if (pointInTabBar(e.clientX, e.clientY)) {
+    ghost.value = null;
+    clearWorkspaceDragPreview();
+    return;
+  }
+  // Outside the bar: ghost + the same workspace drop highlight tabs show.
+  ghost.value = { x: e.clientX, y: e.clientY, label: "New terminal" };
+  updateWorkspaceDragPreview(e.clientX, e.clientY);
+}
+
+function onPlusUp(e: MouseEvent): void {
+  window.removeEventListener("mousemove", onPlusMove);
+  window.removeEventListener("mouseup", onPlusUp);
+  const d = plusDrag;
+  plusDrag = null;
+  ghost.value = null;
+  clearWorkspaceDragPreview();
+  // Never moved (or dropped back in the bar) → a plain new tab.
+  if (!d || !d.active || pointInTabBar(e.clientX, e.clientY)) {
+    emit("requestNewTab");
+    return;
+  }
+  // Over this window's terminal → spawn + split into the workspace there.
+  if (pointOverTerminal(e.clientX, e.clientY)) {
+    emit("newTabWorkspace", e.clientX, e.clientY);
+    return;
+  }
+  // Far enough out → spawn into a new / other window.
+  const dx = e.screenX - d.startScreenX;
+  const dy = e.screenY - d.startScreenY;
+  if (dx * dx + dy * dy >= DRAG_OUT_THRESHOLD * DRAG_OUT_THRESHOLD) {
+    emit("newTabWindow", e.screenX, e.screenY);
+    return;
+  }
+  // Small drag that left the bar but landed nowhere meaningful → new tab.
+  emit("requestNewTab");
 }
 
 // Overflow handling: older tabs (those opened first) collapse into a dropdown
@@ -502,9 +576,9 @@ watch(overflowTabs, (n) => {
       </TransitionGroup>
     </div>
     <div
-      title="New tab (⌘T)"
+      title="New tab (⌘T) — drag onto the terminal to split, or out for a new window"
       class="flex-none flex items-center justify-center w-6 h-6 rounded-full text-fg-subtle cursor-pointer text-sm leading-none bg-surface-1 hover:bg-surface-2 hover:text-fg transition-colors duration-100"
-      @click="emit('requestNewTab')"
+      @mousedown="onPlusMouseDown"
     >
       +
     </div>

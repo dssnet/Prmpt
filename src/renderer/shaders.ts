@@ -45,6 +45,21 @@ uniform float uUnderlineH;
 uniform float uStrikethroughY;
 uniform float uStrikethroughH;
 
+// Rounded-rect clip for the pane this draw belongs to. uMaskRect is
+// (x, y, w, h) in framebuffer px (gl_FragCoord space); uMaskRadius the
+// corner radius in px. uMaskRadius <= 0 disables the clip.
+uniform vec4 uMaskRect;
+uniform float uMaskRadius;
+
+bool outsidePaneMask() {
+    if (uMaskRadius <= 0.0) return false;
+    vec2 hsz = uMaskRect.zw * 0.5;
+    vec2 p = gl_FragCoord.xy - (uMaskRect.xy + hsz);
+    vec2 d = abs(p) - (hsz - vec2(uMaskRadius));
+    float dist = length(max(d, 0.0)) + min(max(d.x, d.y), 0.0) - uMaskRadius;
+    return dist > 0.0;
+}
+
 in vec2 vUV;
 in vec4 vFg;
 in vec4 vBg;
@@ -67,6 +82,7 @@ bool hasFlag(float flags, float bit) {
 }
 
 void main() {
+    if (outsidePaneMask()) discard;
     if (hasFlag(vFlags, F_SPACER_TAIL)) {
         outColor = vBg;
         return;
@@ -115,9 +131,22 @@ export const CURSOR_FRAGMENT_SRC = /* glsl */ `#version 300 es
 precision highp float;
 uniform vec4 uColor;
 uniform int uStyle; // 0 block, 1 bar, 2 underline, 3 hollow
+uniform vec4 uMaskRect;   // pane clip rect (x,y,w,h) in framebuffer px
+uniform float uMaskRadius; // corner radius px; <=0 disables
 in vec2 vLocal;
 out vec4 outColor;
+
+bool outsidePaneMask() {
+    if (uMaskRadius <= 0.0) return false;
+    vec2 hsz = uMaskRect.zw * 0.5;
+    vec2 p = gl_FragCoord.xy - (uMaskRect.xy + hsz);
+    vec2 d = abs(p) - (hsz - vec2(uMaskRadius));
+    float dist = length(max(d, 0.0)) + min(max(d.x, d.y), 0.0) - uMaskRadius;
+    return dist > 0.0;
+}
+
 void main() {
+    if (outsidePaneMask()) discard;
     if (uStyle == 3) {
         float edge = 0.06;
         if (vLocal.x < edge || vLocal.x > 1.0 - edge ||

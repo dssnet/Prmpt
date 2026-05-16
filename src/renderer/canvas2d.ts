@@ -72,7 +72,7 @@ export class Canvas2DRenderer implements Renderer {
     payload: RenderPayload,
     selection: SelectionRange | null,
     rect: PaneViewport,
-    opts: { cursor: CursorMode },
+    opts: { cursor: CursorMode; cornerRadius?: number },
   ): void {
     const dpr = this.m.dpr;
     const dw = Math.max(1, Math.round(rect.w * dpr));
@@ -82,7 +82,11 @@ export class Canvas2DRenderer implements Renderer {
     const ctx = this.ctx;
     ctx.save();
     ctx.beginPath();
-    ctx.rect(dx, dy, dw, dh);
+    const r = Math.max(
+      0,
+      Math.min((opts.cornerRadius ?? 0) * dpr, Math.min(dw, dh) / 2),
+    );
+    ctx.roundRect(dx, dy, dw, dh, r);
     ctx.clip();
     ctx.translate(dx, dy);
     this.paint(payload, selection, opts.cursor, dw, dh);

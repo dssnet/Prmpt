@@ -245,6 +245,21 @@ export function drawNow(): void {
   drawActive();
 }
 
+/** Pane corner radius (CSS px) for the WebGL content clip. Reads the single
+ *  `--pane-radius` token so it always matches the `.pane-overlay` CSS border.
+ *  Cached after first read. */
+let _paneRadius: number | null = null;
+function paneCornerRadius(): number {
+  if (_paneRadius != null) return _paneRadius;
+  const v = parseFloat(
+    getComputedStyle(document.documentElement).getPropertyValue(
+      "--pane-radius",
+    ),
+  );
+  _paneRadius = Number.isFinite(v) ? v : 12;
+  return _paneRadius;
+}
+
 function drawActive(): void {
   if (!renderer) return;
   const a = activeWs();
@@ -261,7 +276,7 @@ function drawActive(): void {
           snap,
           sel,
           { x: pane.x, y: pane.y, w: pane.w, h: pane.h },
-          { cursor: focused ? "full" : "hollow" },
+          { cursor: focused ? "full" : "none", cornerRadius: paneCornerRadius() },
         );
       }
     } finally {
@@ -603,6 +618,7 @@ function clientToLocal(
 export function resolveDropAt(
   clientX: number,
   clientY: number,
+  draggedId?: number,
 ): DropResolution | null {
   const { active } = useTabs();
   const activeTab = active.value;
@@ -627,6 +643,10 @@ export function resolveDropAt(
     slotId = activeTab.id;
     targetPaneTabId = activeTab.id;
   }
+
+  // Dropping a tab onto its own pane is a no-op (see dropTabIntoTarget);
+  // suppress the preview so the active tab dragged over itself shows nothing.
+  if (draggedId != null && draggedId === targetPaneTabId) return null;
 
   // Normalised position within the target pane. The cursor's nearest edge
   // picks the split axis (tiling-WM style); the half it sits in picks the
@@ -658,10 +678,11 @@ export function resolveDropAt(
 export function updateWorkspaceDragPreview(
   clientX: number,
   clientY: number,
+  draggedId?: number,
 ): void {
   // WKWebView sometimes emits (0,0) during a drag — ignore those samples.
   if (clientX === 0 && clientY === 0) return;
-  const res = resolveDropAt(clientX, clientY);
+  const res = resolveDropAt(clientX, clientY, draggedId);
   wsDragPreview.value = res ? res.highlight : null;
 }
 
@@ -683,7 +704,7 @@ export function commitWorkspaceDrop(
   clientX: number,
   clientY: number,
 ): boolean {
-  const res = resolveDropAt(clientX, clientY);
+  const res = resolveDropAt(clientX, clientY, draggedId);
   wsDragPreview.value = null;
   if (!res) return false;
   const slot = dropTabIntoTarget(

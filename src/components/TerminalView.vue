@@ -143,6 +143,7 @@ let dividerRaf = 0;
 
 function onDividerDown(d: DividerRect, e: MouseEvent) {
   e.preventDefault();
+  e.stopPropagation(); // don't bubble to onHostMouseDown / begin a terminal selection
   dragSplitId = d.splitId;
   window.addEventListener("mousemove", onDividerMove);
   window.addEventListener("mouseup", onDividerUp);
@@ -214,7 +215,7 @@ function onPaneDragMove(e: MouseEvent) {
     paneDrag.active = true;
   }
   paneGhost.value = { x: e.clientX, y: e.clientY, label: paneDrag.label };
-  updateWorkspaceDragPreview(e.clientX, e.clientY);
+  updateWorkspaceDragPreview(e.clientX, e.clientY, paneDrag.tabId);
 }
 
 function onPaneDragUp(e: MouseEvent) {
@@ -278,7 +279,14 @@ onBeforeUnmount(() => {
 });
 
 watch(active, () => {
-  if (active.value?.kind === "home") return;
+  if (active.value?.kind === "home") {
+    // Leaving a workspace for Home: drop the pane frames / hover bars and any
+    // in-flight drag affordance so they don't linger on top of the Home view.
+    refreshOverlays();
+    paneGhost.value = null;
+    clearWorkspaceDragPreview();
+    return;
+  }
   reflowActive(active.value);
   requestDraw();
   refreshDividers();
@@ -309,7 +317,8 @@ watch(theme, (next) => {
   <div
     id="terminal-host"
     ref="hostRef"
-    class="flex-1 relative overflow-hidden block select-none m-1"
+    class="flex-1 relative overflow-hidden block select-none"
+    style="margin: var(--frame-inset)"
     @mousedown="onHostMouseDown"
     @wheel="onHostWheel"
     @contextmenu="onHostContextMenu"
@@ -396,6 +405,14 @@ watch(theme, (next) => {
   position: absolute;
   z-index: 15;
   pointer-events: none;
+  box-sizing: border-box;
+  border: 1px solid
+    color-mix(
+      in srgb,
+      var(--border-strong, rgba(255, 255, 255, 0.18)) 45%,
+      transparent
+    );
+  border-radius: var(--pane-radius);
 }
 .pane-bar {
   position: absolute;
@@ -415,8 +432,14 @@ watch(theme, (next) => {
   color: var(--fg-muted, #cdd6f4);
   background: color-mix(in srgb, var(--surface-3, #313244) 80%, transparent);
   border-bottom: 1px solid
-    color-mix(in srgb, var(--border-strong, rgba(255, 255, 255, 0.18)) 60%, transparent);
-  border-radius: 4px 4px 0 0;
+    color-mix(
+      in srgb,
+      var(--border-strong, rgba(255, 255, 255, 0.18)) 60%,
+      transparent
+    );
+  /* Sit flush inside the overlay's rounded corner (minus its 1px border). */
+  border-radius: calc(var(--pane-radius) - 1px) calc(var(--pane-radius) - 1px) 0
+    0;
   opacity: 0;
   transition: opacity 120ms ease;
 }
@@ -476,7 +499,8 @@ watch(theme, (next) => {
   border-radius: 6px;
   background: color-mix(in srgb, var(--accent, #89b4fa) 22%, transparent);
   border: 2px solid color-mix(in srgb, var(--accent, #89b4fa) 80%, transparent);
-  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent, #89b4fa) 30%, transparent) inset;
+  box-shadow: 0 0 0 1px
+    color-mix(in srgb, var(--accent, #89b4fa) 30%, transparent) inset;
   transition:
     left 90ms ease,
     top 90ms ease,

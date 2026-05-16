@@ -31,7 +31,7 @@ export interface Renderer {
     payload: RenderPayload,
     selection: SelectionRange | null,
     rect: PaneViewport,
-    opts: { cursor: CursorMode },
+    opts: { cursor: CursorMode; cornerRadius?: number },
   ): void;
   /** Prepare the canvas for a multi-pane frame (clears gutters). */
   beginFrame(): void;

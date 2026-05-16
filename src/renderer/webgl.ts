@@ -92,6 +92,8 @@ export class WebGLRenderer implements Renderer {
     underlineH: WebGLUniformLocation;
     strikeY: WebGLUniformLocation;
     strikeH: WebGLUniformLocation;
+    maskRect: WebGLUniformLocation;
+    maskRadius: WebGLUniformLocation;
   };
   private cursorUniforms: {
     viewportPx: WebGLUniformLocation;
@@ -99,10 +101,19 @@ export class WebGLRenderer implements Renderer {
     sizePx: WebGLUniformLocation;
     color: WebGLUniformLocation;
     style: WebGLUniformLocation;
+    maskRect: WebGLUniformLocation;
+    maskRadius: WebGLUniformLocation;
   };
+  // Active pane clip, in framebuffer px (gl_FragCoord space). radius <= 0
+  // disables it (full-canvas / single-tab draws).
+  private maskRect: [number, number, number, number] = [0, 0, 0, 0];
+  private maskRadiusPx = 0;
   private instanceCapacity = 0;
   private instanceBuf: Float32Array = new Float32Array(0);
   private cursorColor: [number, number, number, number];
+  // Whole-canvas clear color. Painted into the divider gutters between
+  // workspace panes; theme background so they don't read as black lines.
+  private bgColor: [number, number, number, number];
 
   constructor(
     private canvas: HTMLCanvasElement,
@@ -211,6 +222,8 @@ export class WebGLRenderer implements Renderer {
       underlineH: gl.getUniformLocation(this.program, "uUnderlineH")!,
       strikeY: gl.getUniformLocation(this.program, "uStrikethroughY")!,
       strikeH: gl.getUniformLocation(this.program, "uStrikethroughH")!,
+      maskRect: gl.getUniformLocation(this.program, "uMaskRect")!,
+      maskRadius: gl.getUniformLocation(this.program, "uMaskRadius")!,
     };
     this.cursorUniforms = {
       viewportPx: gl.getUniformLocation(this.cursorProgram, "uViewportPx")!,
@@ -218,9 +231,12 @@ export class WebGLRenderer implements Renderer {
       sizePx: gl.getUniformLocation(this.cursorProgram, "uSizePx")!,
       color: gl.getUniformLocation(this.cursorProgram, "uColor")!,
       style: gl.getUniformLocation(this.cursorProgram, "uStyle")!,
+      maskRect: gl.getUniformLocation(this.cursorProgram, "uMaskRect")!,
+      maskRadius: gl.getUniformLocation(this.cursorProgram, "uMaskRadius")!,
     };
 
     this.cursorColor = hexToRgba(config.theme.cursor);
+    this.bgColor = hexToRgba(config.theme.background);
   }
 
   metrics(): FontMetrics {
@@ -252,6 +268,8 @@ export class WebGLRenderer implements Renderer {
     const gl = this.gl;
     gl.disable(gl.SCISSOR_TEST);
     gl.viewport(0, 0, this.canvas.width, this.canvas.height);
+    this.maskRect = [0, 0, this.canvas.width, this.canvas.height];
+    this.maskRadiusPx = 0;
     this.paintGrid(
       payload,
       selection ?? null,
@@ -265,7 +283,7 @@ export class WebGLRenderer implements Renderer {
     payload: RenderPayload,
     selection: SelectionRange | null,
     rect: PaneViewport,
-    opts: { cursor: CursorMode },
+    opts: { cursor: CursorMode; cornerRadius?: number },
   ): void {
     const gl = this.gl;
     const dpr = this.m.dpr;
@@ -278,14 +296,28 @@ export class WebGLRenderer implements Renderer {
     gl.enable(gl.SCISSOR_TEST);
     gl.viewport(dx, dy, dw, dh);
     gl.scissor(dx, dy, dw, dh);
+    this.maskRect = [dx, dy, dw, dh];
+    const r = Math.round((opts.cornerRadius ?? 0) * dpr);
+    this.maskRadiusPx = Math.max(0, Math.min(r, Math.floor(Math.min(dw, dh) / 2)));
     this.paintGrid(payload, selection, opts.cursor, dw, dh);
+  }
+
+  private pushMask(u: {
+    maskRect: WebGLUniformLocation;
+    maskRadius: WebGLUniformLocation;
+  }): void {
+    const gl = this.gl;
+    const m = this.maskRect;
+    gl.uniform4f(u.maskRect, m[0], m[1], m[2], m[3]);
+    gl.uniform1f(u.maskRadius, this.maskRadiusPx);
   }
 
   beginFrame(): void {
     const gl = this.gl;
     gl.disable(gl.SCISSOR_TEST);
     gl.viewport(0, 0, this.canvas.width, this.canvas.height);
-    gl.clearColor(0, 0, 0, 1);
+    const b = this.bgColor;
+    gl.clearColor(b[0], b[1], b[2], 1);
     gl.clear(gl.COLOR_BUFFER_BIT);
   }
 
@@ -364,8 +396,21 @@ export class WebGLRenderer implements Renderer {
     gl.bindBuffer(gl.ARRAY_BUFFER, this.instanceVBO);
     gl.bufferSubData(gl.ARRAY_BUFFER, 0, buf, 0, total * INSTANCE_FLOATS);
 
-    gl.clearColor(bg0[0], bg0[1], bg0[2], 1);
-    gl.clear(gl.COLOR_BUFFER_BIT);
+    // Pane background as a mask-clipped quad instead of gl.clear, so the
+    // rounded corners aren't square-filled. beginFrame already cleared the
+    // whole canvas to the theme bg, which shows through the rounded-off
+    // corner. (radius <= 0 → full rect, identical to the old clear.)
+    gl.disable(gl.BLEND);
+    gl.useProgram(this.cursorProgram);
+    gl.bindVertexArray(this.cursorVAO);
+    gl.uniform2f(this.cursorUniforms.viewportPx, vpW, vpH);
+    gl.uniform2f(this.cursorUniforms.originPx, 0, 0);
+    gl.uniform2f(this.cursorUniforms.sizePx, vpW, vpH);
+    gl.uniform4f(this.cursorUniforms.color, bg0[0], bg0[1], bg0[2], 1);
+    gl.uniform1i(this.cursorUniforms.style, 0);
+    this.pushMask(this.cursorUniforms);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    gl.bindVertexArray(null);
 
     gl.useProgram(this.program);
     gl.bindVertexArray(this.cellVAO);
@@ -377,6 +422,7 @@ export class WebGLRenderer implements Renderer {
     gl.uniform1f(this.uniforms.underlineH, 1 / this.m.cellHeight);
     gl.uniform1f(this.uniforms.strikeY, 0.5 - 0.5 / this.m.cellHeight);
     gl.uniform1f(this.uniforms.strikeH, 1 / this.m.cellHeight);
+    this.pushMask(this.uniforms);
     gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, total);
     gl.bindVertexArray(null);
 
@@ -388,6 +434,7 @@ export class WebGLRenderer implements Renderer {
       gl.useProgram(this.cursorProgram);
       gl.bindVertexArray(this.cursorVAO);
       gl.uniform2f(this.cursorUniforms.viewportPx, vpW, vpH);
+      this.pushMask(this.cursorUniforms);
       const cw = this.m.cellWidth;
       const ch = this.m.cellHeight;
       const ox = cursor.x * cw;
@@ -458,6 +505,7 @@ export class WebGLRenderer implements Renderer {
     gl.uniform2f(this.cursorUniforms.viewportPx, vpW, vpH);
     gl.uniform4f(this.cursorUniforms.color, 120 / 255, 160 / 255, 255 / 255, 0.35);
     gl.uniform1i(this.cursorUniforms.style, 0);
+    this.pushMask(this.cursorUniforms);
     gl.enable(gl.BLEND);
     gl.blendFuncSeparate(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA, gl.ONE, gl.ONE);
 
@@ -491,6 +539,7 @@ export class WebGLRenderer implements Renderer {
 
   updateTheme(theme: ThemeConfig): void {
     this.cursorColor = hexToRgba(theme.cursor);
+    this.bgColor = hexToRgba(theme.background);
   }
 
   dispose(): void {
