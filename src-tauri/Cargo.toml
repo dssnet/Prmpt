@@ -49,14 +49,18 @@ zeroize = { version = "1.8", features = ["zeroize_derive", "alloc"] }
 [target.'cfg(not(any(target_os = "ios", target_os = "android")))'.dependencies]
 portable-pty = "0.8"
 
-# On Windows, link libghostty-vt statically. The vendored libghostty-vt-sys
-# build script only recognizes ELF/Mach-O shared libraries (`.so`/`.dylib`)
-# in its dynamic-link path; Ghostty's Zig build emits a Windows DLL + import
-# lib the matcher never finds, so the build panics with "no libghostty-vt
-# shared library found". The static path matches `ghostty-vt-static.lib`
-# (which Zig does produce on Windows) and links the engine into prmpt.exe,
-# so there is no DLL to stage/ship alongside the binary. Cargo unions
-# features, so this only adds `link-static` on the Windows leg.
+# On Windows, select the `link-static` feature. The vendored
+# libghostty-vt-sys build script's *dynamic* matcher only recognizes
+# ELF/Mach-O shared libs (`.so`/`.dylib`), so without this the build
+# panics with "no libghostty-vt shared library found". The static path
+# matches `ghostty-vt-static.lib` (which Zig does produce on Windows)
+# and the build succeeds. NOTE: this does NOT yield a self-contained
+# exe — the sys build script emits `cargo:rustc-link-lib=static=ghostty-vt`,
+# and the MSVC linker resolves that through Zig's import lib
+# `ghostty-vt.lib`, so prmpt.exe keeps a runtime dependency on
+# `ghostty-vt.dll`. That DLL is staged by build.rs and bundled next to
+# the executable via tauri.windows.conf.json. Cargo unions features, so
+# this only adds `link-static` on the Windows leg.
 [target.'cfg(windows)'.dependencies]
 libghostty-vt = { version = "0.1", features = ["link-static"] }
 libghostty-vt-sys = { version = "0.1", features = ["link-static"] }

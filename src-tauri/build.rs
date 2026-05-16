@@ -115,4 +115,30 @@ fn stage_native_lib() {
             );
         }
     }
+
+    // Windows: Ghostty's Zig build emits both `ghostty-vt-static.lib`
+    // (what `pick_lib_filename` reports, so `src` above points there)
+    // and a DLL + its import lib `ghostty-vt.lib`. The MSVC linker
+    // resolves `static=ghostty-vt` through that import lib, so
+    // prmpt.exe ends up with a runtime dependency on `ghostty-vt.dll`
+    // regardless of the static archive. Stage that DLL so
+    // tauri.windows.conf.json can bundle it next to the executable;
+    // without it the app aborts at launch with
+    // "ghostty-vt.dll nicht gefunden".
+    if target_os == "windows" {
+        let dll_src = PathBuf::from(&libdir).join("ghostty-vt.dll");
+        let dll_dst = staged_dir.join("ghostty-vt.dll");
+        if !dll_src.exists() {
+            println!(
+                "cargo:warning=ghostty-vt.dll not found at {} — Windows bundle will crash at launch",
+                dll_src.display()
+            );
+        } else if let Err(e) = fs::copy(&dll_src, &dll_dst) {
+            println!(
+                "cargo:warning=failed to stage ghostty-vt.dll: {e} (src={}, dst={})",
+                dll_src.display(),
+                dll_dst.display(),
+            );
+        }
+    }
 }
