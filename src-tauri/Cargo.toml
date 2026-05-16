@@ -127,3 +127,19 @@ windows = { version = "0.58", features = [
 # `rt-tokio-crypto-rust` feature picks the existing tokio runtime + a
 # pure-Rust crypto stack so we don't pull in system OpenSSL.
 secret-service = { version = "4", features = ["rt-tokio-crypto-rust"] }
+
+# Select `link-static` on Linux too. With the default *dynamic* link
+# the binary gets `NEEDED: libghostty-vt.so.0` but no RUNPATH, and
+# nothing stages the Zig-built .so into a loader-visible location (the
+# macOS path solves this with bundle.macOS.frameworks; there is no
+# Linux equivalent). linuxdeploy then aborts AppImage bundling with
+# "Could not find dependency: libghostty-vt.so.0", and the .deb/.rpm
+# binaries are equally unrunnable (the lib is simply missing at
+# runtime). Static linking folds the self-contained
+# `ghostty-vt-static.a` into the executable: no .so dependency,
+# AppImage/deb/rpm all build and run. macOS deliberately stays on the
+# dynamic + Frameworks path (its build.rs/dyld handling is
+# macOS-specific). Cargo unions features, so this only adds
+# `link-static` on the Linux leg.
+libghostty-vt = { version = "0.1", features = ["link-static"] }
+libghostty-vt-sys = { version = "0.1", features = ["link-static"] }
