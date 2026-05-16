@@ -68,6 +68,16 @@ jobs:
 
     runs-on: ${{ matrix.platform.os }}
 
+    env:
+      # Route rustc through sccache (the Setup sccache step provides the
+      # binary and points SCCACHE_GHA_* at the Actions cache backend).
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: 'true'
+      # Incremental compilation is dead weight on a fresh CI checkout
+      # (nothing to be incremental against) and is incompatible with
+      # sccache — turning it off shrinks the cache and lets sccache hit.
+      CARGO_INCREMENTAL: '0'
+
     steps:
       # libghostty-rs is a git submodule consumed via a `[patch]` path
       # dependency in src-tauri/Cargo.toml. Without `submodules: recursive`
@@ -95,6 +105,15 @@ jobs:
           # Empty string is accepted and means "no extra targets".
           targets: ${{ matrix.platform.extra_rust_targets }}
 
+      # sccache caches individual `rustc` invocations to the GitHub
+      # Actions cache, so the large dependency tree (tauri, russh,
+      # tokio, stronghold, objc2/windows/secret-service, …) is reused
+      # across releases and — on macOS — across the two universal-binary
+      # arches. It does NOT wrap build scripts, so it does not cover the
+      # Zig VT-engine compile; rust-cache's cache-all-crates handles that.
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.6
+
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
         with:
@@ -106,6 +125,12 @@ jobs:
           # Keep a partial cache around if the build fails partway —
           # otherwise a flaky tauri bundle step wipes hours of work.
           cache-on-failure: true
+          # libghostty-vt / -sys are [patch] path deps into the pinned
+          # submodule. Without this, rust-cache treats them like local
+          # crates and drops their artifacts — including the expensive
+          # Zig-compiled libghostty-vt-sys build-script output — so the
+          # VT engine recompiles every release on every OS. Keep them.
+          cache-all-crates: true
 
       # libghostty-vt-sys's build.rs invokes Zig to compile Ghostty's
       # vendored VT engine. Must match the version in CLAUDE.md.
