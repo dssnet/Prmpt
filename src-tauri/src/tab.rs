@@ -246,7 +246,17 @@ impl TabRegistry {
             .map_err(|e| AppError::Pty(e.to_string()))?;
 
         let shell_path = shell.unwrap_or_else(platform::default_shell);
+        // Resolve login args before moving `shell_path` into the builder.
+        // The slice is `'static` so it doesn't borrow `shell_path`.
+        let login_args: &[&str] = if config.lock().login_shell {
+            platform::login_shell_args(&shell_path)
+        } else {
+            &[]
+        };
         let mut cmd = CommandBuilder::new(shell_path);
+        for a in login_args {
+            cmd.arg(a);
+        }
         if let Some(home) = platform::home_dir() {
             cmd.cwd(home);
         }

@@ -14,5 +14,11 @@
   },
   "build": {
     "beforeBundleCommand": "bash scripts/lipo-bundle-dylib.sh"
+  },
+  "bundle": {
+    "macOS": {
+      "entitlements": "Entitlements.plist",
+      "hardenedRuntime": true
+    }
   }
 }

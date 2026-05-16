@@ -41,6 +41,27 @@ pub fn default_shell() -> String {
     }
 }
 
+/// Args that turn `shell` into a *login* shell so it sources the user's
+/// profile (`~/.zprofile`, `~/.bash_profile`, …) and therefore the real
+/// `PATH`. A PTY-attached shell with no command argument is already
+/// *interactive*; this only adds the *login* part. Returned only for
+/// shells we know accept `-l`; anything else (pwsh/cmd/unknown) is a
+/// no-op so we never feed a flag a shell will choke on.
+///
+/// Why this matters: a GUI-launched `.app` inherits `launchd`'s minimal
+/// `PATH`, so without a login shell `code`, Homebrew binaries, etc. are
+/// not found.
+pub fn login_shell_args(shell_path: &str) -> &'static [&'static str] {
+    let name = std::path::Path::new(shell_path)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("");
+    match name {
+        "zsh" | "bash" | "fish" | "sh" | "dash" | "ksh" => &["-l"],
+        _ => &[],
+    }
+}
+
 /// Returns the user's home directory, or `None` if the OS can't resolve
 /// one. Wraps the `directories` crate so we don't grow another path
 /// abstraction.

@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!--
+    Hardened-runtime entitlements for the macOS Developer ID build.
+    Deliberately NO App Sandbox: a terminal must run arbitrary tools and
+    be eligible for user-granted Full Disk Access; sandboxing breaks both.
+  -->
+
+  <!-- Required: the bundled libghostty-vt.dylib is built/signed
+       separately and would be rejected by library validation under
+       hardened runtime without this. -->
+  <key>com.apple.security.cs.disable-library-validation</key>
+  <true/>
+
+  <!-- WKWebView JIT (the WebGL2 renderer runs in the webview). -->
+  <key>com.apple.security.cs.allow-jit</key>
+  <true/>
+  <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+  <true/>
+  <key>com.apple.security.cs.allow-dyld-environment-variables</key>
+  <true/>
+
+  <!-- Let terminal-spawned tools drive automation (osascript etc.). -->
+  <key>com.apple.security.automation.apple-events</key>
+  <true/>
+</dict>
+</plist>

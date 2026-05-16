@@ -49,6 +49,7 @@ export interface Config {
   font_size: number;
   line_height: number;
   shell: string | null;
+  login_shell: boolean;
   scrollback_lines: number;
   theme: ThemeConfig;
 }
@@ -142,6 +143,16 @@ export function onMenuSelectAll(handler: () => void): Promise<UnlistenFn> {
 
 export async function getConfig(): Promise<Config> {
   return await invoke<Config>("get_config");
+}
+
+/** Whether macOS Full Disk Access is granted. Always true off macOS. */
+export async function fullDiskAccessGranted(): Promise<boolean> {
+  return await invoke<boolean>("full_disk_access_granted");
+}
+
+/** Opens System Settings → Privacy & Security → Full Disk Access. */
+export async function openFullDiskAccessSettings(): Promise<void> {
+  await invoke("open_full_disk_access_settings");
 }
 
 export async function setTheme(theme: ThemeConfig): Promise<void> {

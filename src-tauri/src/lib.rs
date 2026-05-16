@@ -151,6 +151,8 @@ pub fn run() {
             commands::window_at_screen_point,
             commands::get_stronghold_unlock,
             commands::connect_ssh_host,
+            commands::full_disk_access_granted,
+            commands::open_full_disk_access_settings,
         ]);
 
     // iOS / Android have no menu bar — `on_menu_event` doesn't exist on

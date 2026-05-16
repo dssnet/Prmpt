@@ -11,6 +11,7 @@ pub struct Config {
     pub font_size: f32,
     pub line_height: f32,
     pub shell: Option<String>,
+    pub login_shell: bool,
     pub scrollback_lines: usize,
     pub theme: Theme,
 }
@@ -33,6 +34,7 @@ impl Default for Config {
             font_size: 13.0,
             line_height: 1.2,
             shell: None,
+            login_shell: true,
             scrollback_lines: 10_000,
             theme: Theme::default(),
         }

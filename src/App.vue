@@ -7,6 +7,7 @@ import {
   attachTab,
   closeCurrentWindow,
   currentWindowLabel,
+  fullDiskAccessGranted,
   listTabsForWindow,
   onExit,
   onMenuCopy,
@@ -51,6 +52,7 @@ import {
   reflowActive,
   selectAll,
 } from "./state/terminal";
+import FullDiskAccessModal from "./components/FullDiskAccessModal.vue";
 import HomeView from "./components/HomeView.vue";
 import HostKeyMismatchModal from "./components/HostKeyMismatchModal.vue";
 import TabBar from "./components/TabBar.vue";
@@ -61,8 +63,15 @@ const props = defineProps<{ config: Config }>();
 
 const { tabs, active } = useTabs();
 const hostKeyModal = ref<SshHostKeyMismatch | null>(null);
+const fdaModal = ref(false);
 
 const myLabel = currentWindowLabel();
+
+function dismissFda(): void {
+  // First-run only: once seen, never nag again on this machine.
+  localStorage.setItem("prmpt.fdaOnboardingSeen", "1");
+  fdaModal.value = false;
+}
 
 async function spawnNewTab(): Promise<void> {
   const { cellWidthPx, cellHeightPx, dpr } = getCellMetrics();
@@ -382,6 +391,17 @@ onMounted(async () => {
   } else {
     await spawnNewTab();
   }
+
+  // First-run macOS Full Disk Access explainer: primary window only, once
+  // per machine, and only if it isn't already granted. Off macOS the
+  // backend reports granted=true so this never fires.
+  if (myLabel === "main" && !localStorage.getItem("prmpt.fdaOnboardingSeen")) {
+    try {
+      if (!(await fullDiskAccessGranted())) fdaModal.value = true;
+    } catch (err) {
+      console.error("Full Disk Access check failed:", err);
+    }
+  }
 });
 
 onBeforeUnmount(() => {
@@ -402,4 +422,5 @@ onBeforeUnmount(() => {
     :payload="hostKeyModal"
     @close="hostKeyModal = null"
   />
+  <FullDiskAccessModal v-if="fdaModal" @close="dismissFda" />
 </template>

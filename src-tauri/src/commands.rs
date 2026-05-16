@@ -405,3 +405,51 @@ pub fn show_context_menu(app: AppHandle, window: WebviewWindow) -> AppResult<()>
 pub fn show_context_menu(_app: AppHandle, _window: WebviewWindow) -> AppResult<()> {
     Ok(())
 }
+
+// --- Full Disk Access (macOS) -------------------------------------------
+//
+// macOS gates a terminal's ability to read protected locations (and to
+// let tools it spawns do so) behind the user-granted Full Disk Access
+// TCC permission. There is no API to request it; the app can only detect
+// the state and deep-link the user to the right Settings pane. The
+// frontend shows a one-time explainer on first run when this is false.
+
+/// True if we can read a TCC-protected path — the practical signal that
+/// Full Disk Access is granted. The per-user TCC database always exists
+/// and opening it for read returns `EPERM` without FDA, `Ok` with it.
+#[cfg(target_os = "macos")]
+#[tauri::command]
+pub fn full_disk_access_granted() -> bool {
+    let Some(home) = platform::home_dir() else {
+        return false;
+    };
+    let tcc = home.join("Library/Application Support/com.apple.TCC/TCC.db");
+    std::fs::File::open(tcc).is_ok()
+}
+
+/// Opens System Settings straight to Privacy & Security → Full Disk
+/// Access so the user can add Prmpt.
+#[cfg(target_os = "macos")]
+#[tauri::command]
+pub fn open_full_disk_access_settings() -> AppResult<()> {
+    std::process::Command::new("open")
+        .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles")
+        .spawn()
+        .map_err(|e| AppError::Other(e.to_string()))?;
+    Ok(())
+}
+
+// Non-macOS: no such permission model. Report "granted" so the frontend
+// explainer never shows, and make the opener a clean no-op so the UI can
+// call these commands unconditionally.
+#[cfg(not(target_os = "macos"))]
+#[tauri::command]
+pub fn full_disk_access_granted() -> bool {
+    true
+}
+
+#[cfg(not(target_os = "macos"))]
+#[tauri::command]
+pub fn open_full_disk_access_settings() -> AppResult<()> {
+    Ok(())
+}

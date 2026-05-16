@@ -153,6 +153,17 @@ jobs:
           # tools self-extract instead of mounting via FUSE. No-op on
           # macOS/Windows legs.
           APPIMAGE_EXTRACT_AND_RUN: 1
+          # Apple code signing + notarization. Only the macOS leg has
+          # these secrets populated; on the Ubuntu/Windows legs they
+          # resolve to empty strings and tauri-action skips signing, so
+          # those builds are unchanged. See plan C1-C4 for how to obtain
+          # and set these repo secrets.
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY_PATH: ${{ secrets.APPLE_API_KEY_PATH }}
         with:
           releaseId: ${{ needs.create-release.outputs.release_id }}
           args: ${{ matrix.platform.args }}
