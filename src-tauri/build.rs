@@ -125,15 +125,32 @@ fn stage_native_lib() {
     // tauri.windows.conf.json can bundle it next to the executable;
     // without it the app aborts at launch with
     // "ghostty-vt.dll nicht gefunden".
+    //
+    // Zig follows the standard Windows install layout: the import lib
+    // (`ghostty-vt.lib`) lands in `<prefix>/lib` (== `libdir`) but the
+    // DLL itself goes to `<prefix>/bin`. Older Zig/layouts kept both in
+    // `lib`, so probe both — `lib` first for back-compat, then the
+    // sibling `bin` (the current, correct location).
     if target_os == "windows" {
-        let dll_src = PathBuf::from(&libdir).join("ghostty-vt.dll");
+        let libdir_path = PathBuf::from(&libdir);
+        let dll_candidates = [
+            libdir_path.join("ghostty-vt.dll"),
+            libdir_path
+                .parent()
+                .unwrap_or(&libdir_path)
+                .join("bin")
+                .join("ghostty-vt.dll"),
+        ];
+        let dll_src = dll_candidates.iter().find(|p| p.exists());
         let dll_dst = staged_dir.join("ghostty-vt.dll");
-        if !dll_src.exists() {
+        let Some(dll_src) = dll_src else {
             println!(
-                "cargo:warning=ghostty-vt.dll not found at {} — Windows bundle will crash at launch",
-                dll_src.display()
+                "cargo:warning=ghostty-vt.dll not found in {} or sibling bin/ — Windows bundle will crash at launch",
+                libdir
             );
-        } else if let Err(e) = fs::copy(&dll_src, &dll_dst) {
+            return;
+        };
+        if let Err(e) = fs::copy(dll_src, &dll_dst) {
             println!(
                 "cargo:warning=failed to stage ghostty-vt.dll: {e} (src={}, dst={})",
                 dll_src.display(),
