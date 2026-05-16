@@ -164,18 +164,16 @@ jobs:
 
       # tauri-bundler's notarization shells out to `xcrun notarytool`
       # with `--issuer $APPLE_API_ISSUER --key-id $APPLE_API_KEY
-      # --key $APPLE_API_KEY_PATH`. So APPLE_API_KEY must be the short
-      # App Store Connect *Key ID* (e.g. 2X9R4HXF34) and
-      # APPLE_API_KEY_PATH must be a path to the .p8 *on the runner*.
-      # Storing the .p8 body in APPLE_API_KEY made notarytool receive a
-      # multi-line PEM as --key-id ("Error: Invalid option"); storing a
-      # path in a secret pointed at a file that doesn't exist on a fresh
-      # runner. Materialize the key from the APPLE_API_KEY_P8 secret
-      # (raw .p8 contents) into a temp file with 0600 perms instead.
+      # --key $APPLE_API_KEY_PATH`, where --key must be a *path to the
+      # .p8 file*. The APPLE_API_KEY_PATH secret actually holds the .p8
+      # *body*, so passing it straight through fed notarytool a
+      # multi-line PEM as the --key path ("Error: Invalid option").
+      # Materialize that body into a 0600 temp file and point
+      # APPLE_API_KEY_PATH at the file instead.
       - name: Provision Apple notarization key
         if: matrix.platform.os == 'macos-14'
         env:
-          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_PATH }}
         run: |
           install -m 600 /dev/null "$RUNNER_TEMP/apple_api_key.p8"
           printf '%s\n' "$APPLE_API_KEY_P8" > "$RUNNER_TEMP/apple_api_key.p8"
