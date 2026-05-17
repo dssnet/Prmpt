@@ -346,6 +346,9 @@ jobs:
       - name: Patch latest.json with re-signed Linux signature
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # No actions/checkout in this job, so gh can't infer the repo
+          # from git. Set it explicitly.
+          GH_REPO: ${{ github.repository }}
           VERSION: ${{ needs.create-release.outputs.version }}
         run: |
           set -euo pipefail
