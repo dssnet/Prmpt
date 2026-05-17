@@ -308,6 +308,9 @@ jobs:
         run: |
           set -euo pipefail
           appimage=$(ls src-tauri/target/release/bundle/appimage/*.AppImage | head -1)
+          # Absolute path: later steps cd into $work, so a repo-relative
+          # path would no longer resolve (breaks the verify subshell).
+          appimage=$(readlink -f "$appimage")
           echo "Repacking $appimage"
           work=$(mktemp -d)
           cp "$appimage" "$work/orig.AppImage"
