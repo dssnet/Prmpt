@@ -47,7 +47,7 @@
       "endpoints": [
         "https://github.com/dssnet/Prmpt/releases/latest/download/latest.json"
       ],
-      "pubkey": "PASTE_CONTENT_OF_prmpt-updater.key.pub_HERE",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDIyNEFEN0VENURGMzA3NEYKUldSUEIvTmQ3ZGRLSWhJazBSWmViaGFmYnRnT3JFbHRtRkdZVVZ5NFB0ZWZyUTZMNmQ1YTcwVGEK",
       "windows": {
         "installMode": "passive"
       }
