@@ -4,10 +4,12 @@ import { computed } from "vue";
 
 import { applyTheme, useTheme } from "../state/theme";
 import { findPresetMatch, PRESETS } from "../state/themes";
+import { runUpdateCheck, useUpdate } from "../state/update";
 import { Button } from "./ui";
 
 const emit = defineEmits<{ back: []; openCustom: [] }>();
 const { theme } = useTheme();
+const { status: updateStatus } = useUpdate();
 
 const activeName = computed(() => findPresetMatch(theme.value));
 
@@ -71,6 +73,17 @@ function classFor(active: boolean): string {
         </div>
         <div class="text-xs text-fg">Custom</div>
       </button>
+    </div>
+
+    <h2 class="m-0 mt-2 text-base font-medium tracking-wide text-fg">Updates</h2>
+    <div class="flex items-center gap-3">
+      <Button
+        variant="secondary"
+        :disabled="updateStatus === 'checking' || updateStatus === 'downloading'"
+        @click="runUpdateCheck(true)"
+      >
+        {{ updateStatus === "checking" ? "Checking…" : "Check for updates" }}
+      </Button>
     </div>
   </div>
 </template>

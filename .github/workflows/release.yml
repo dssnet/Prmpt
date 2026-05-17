@@ -272,6 +272,12 @@ jobs:
           APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
           APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
           APPLE_API_KEY_PATH: ${{ runner.temp }}/apple_api_key.p8
+          # Updater signing. With these set + bundle.createUpdaterArtifacts
+          # true, tauri-action signs each bundle, writes a `.sig`, and
+          # generates/uploads `latest.json` to the draft release (merging
+          # the three platforms' entries across the matrix legs).
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           releaseId: ${{ needs.create-release.outputs.release_id }}
           args: ${{ matrix.platform.args }}
@@ -294,6 +300,11 @@ jobs:
           VERSION: ${{ needs.create-release.outputs.version }}
           APPIMAGE_EXTRACT_AND_RUN: 1
           ARCH: x86_64
+          # The repack rewrites the AppImage bytes, so tauri-action's
+          # signature no longer verifies. Re-sign with the same key
+          # (the signer reads these env vars automatically).
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
           set -euo pipefail
           appimage=$(ls src-tauri/target/release/bundle/appimage/*.AppImage | head -1)
@@ -313,8 +324,11 @@ jobs:
           ( cd "$work" && mkdir verify && cd verify \
             && "$appimage" --appimage-extract >/dev/null \
             && ! ls squashfs-root/usr/lib | grep -qE '^libwayland-.*\.so' )
-          echo "Replacing release asset $(basename "$appimage")"
-          gh release upload "v${VERSION}" "$appimage" --clobber
+          # Re-sign the repacked AppImage so its updater signature
+          # matches the new bytes. Overwrites the stale .sig in place.
+          bun run tauri signer sign "$appimage"
+          echo "Replacing release assets $(basename "$appimage") + .sig"
+          gh release upload "v${VERSION}" "$appimage" "${appimage}.sig" --clobber
           rm -rf "$work"
 
   publish-release:
@@ -322,6 +336,24 @@ jobs:
     needs: [create-release, build]
     runs-on: ubuntu-latest
     steps:
+      # tauri-action wrote latest.json with the signature of the AppImage
+      # *before* the libwayland repack. Now that all matrix legs are done
+      # (no clobber race), re-point linux-x86_64 at the re-signed sig the
+      # Linux leg uploaded. jq + gh are preinstalled on ubuntu-latest.
+      - name: Patch latest.json with re-signed Linux signature
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.create-release.outputs.version }}
+        run: |
+          set -euo pipefail
+          work=$(mktemp -d)
+          cd "$work"
+          gh release download "v${VERSION}" -p latest.json -p "*.AppImage.sig" --clobber
+          sig=$(cat ./*.AppImage.sig)
+          jq --arg s "$sig" '.platforms["linux-x86_64"].signature = $s' latest.json > latest.json.new
+          mv latest.json.new latest.json
+          gh release upload "v${VERSION}" latest.json --clobber
+
       - name: Mark release as non-draft
         uses: actions/github-script@v7
         env:

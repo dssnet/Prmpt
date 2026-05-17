@@ -129,6 +129,7 @@ pub fn run() {
             })
             .build(),
         )
+        .plugin(tauri_plugin_process::init())
         .manage(registry)
         .manage(cfg)
         .manage(window_counter)
@@ -154,6 +155,12 @@ pub fn run() {
             commands::full_disk_access_granted,
             commands::open_full_disk_access_settings,
         ]);
+
+    // The updater plugin is desktop-only (mobile distributes via the
+    // stores; no in-place self-update). Gate it on the same cfg the
+    // Cargo dependency uses so the build stays consistent.
+    #[cfg(not(any(target_os = "ios", target_os = "android")))]
+    let builder = builder.plugin(tauri_plugin_updater::Builder::new().build());
 
     // iOS / Android have no menu bar — `on_menu_event` doesn't exist on
     // those targets, so the entire menu-dispatch closure is desktop-only.

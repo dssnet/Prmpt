@@ -56,6 +56,9 @@ import {
 import FullDiskAccessModal from "./components/FullDiskAccessModal.vue";
 import HomeView from "./components/HomeView.vue";
 import HostKeyMismatchModal from "./components/HostKeyMismatchModal.vue";
+import UpdateModal from "./components/UpdateModal.vue";
+import { runUpdateCheck } from "./state/update";
+import { UPDATE_CHECK_INTERVAL_MS } from "./updater";
 import TabBar from "./components/TabBar.vue";
 import TerminalView from "./components/TerminalView.vue";
 import TitleBar from "./components/TitleBar.vue";
@@ -67,6 +70,10 @@ const hostKeyModal = ref<SshHostKeyMismatch | null>(null);
 const fdaModal = ref(false);
 
 const myLabel = currentWindowLabel();
+
+// Recurring background update check (in addition to the once-on-launch
+// one). Cleared in onBeforeUnmount so tear-off windows don't leak timers.
+let updateTimer: ReturnType<typeof setInterval> | undefined;
 
 function dismissFda(): void {
   // First-run only: once seen, never nag again on this machine.
@@ -455,12 +462,25 @@ onMounted(async () => {
       console.error("Full Disk Access check failed:", err);
     }
   }
+
+  // Updater: silent check on launch, then on a recurring interval.
+  // Only the primary window drives this — a relaunch tears down every
+  // window, so multiple windows racing the same check is pointless.
+  // Kept off the critical path (no await) so first paint never waits on
+  // the network.
+  if (myLabel === "main") {
+    void runUpdateCheck();
+    updateTimer = setInterval(() => {
+      void runUpdateCheck();
+    }, UPDATE_CHECK_INTERVAL_MS);
+  }
 });
 
 onBeforeUnmount(() => {
   window.removeEventListener("keydown", onKeyDown);
   window.removeEventListener("paste", onPaste);
   window.removeEventListener("contextmenu", onContextMenu);
+  if (updateTimer !== undefined) clearInterval(updateTimer);
 });
 </script>
 
@@ -481,4 +501,5 @@ onBeforeUnmount(() => {
     @close="hostKeyModal = null"
   />
   <FullDiskAccessModal v-if="fdaModal" @close="dismissFda" />
+  <UpdateModal />
 </template>

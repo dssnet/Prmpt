@@ -32,6 +32,8 @@ directories = "5"
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "macros", "io-util", "time", "net"] }
 tauri-plugin-sql = { version = "2", features = ["sqlite"] }
 tauri-plugin-stronghold = "2"
+# `relaunch()` after an in-place update install. Works on all targets.
+tauri-plugin-process = "2"
 rand = "0.8"
 # Used in the Stronghold plugin's password-hash function: the boot
 # password file holds 64 hex chars, which we decode back to the 32 raw
@@ -48,6 +50,10 @@ zeroize = { version = "1.8", features = ["zeroize_derive", "alloc"] }
 # forbids fork/exec for App-Store binaries). Pull it in only on desktop.
 [target.'cfg(not(any(target_os = "ios", target_os = "android")))'.dependencies]
 portable-pty = "0.8"
+# The updater is desktop-only (no in-place self-update on iOS/Android,
+# where app distribution goes through the stores). Keep it off mobile so
+# the plugin and its libsodium/HTTP deps don't get pulled in there.
+tauri-plugin-updater = "2"
 
 # On Windows, select the `link-static` feature. The vendored
 # libghostty-vt-sys build script's *dynamic* matcher only recognizes

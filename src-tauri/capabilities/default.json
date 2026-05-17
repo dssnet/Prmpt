@@ -11,6 +11,8 @@
     "sql:default",
     "sql:allow-execute",
     "stronghold:default",
-    "stronghold:allow-remove-store-record"
+    "stronghold:allow-remove-store-record",
+    "updater:default",
+    "process:allow-restart"
   ]
 }
