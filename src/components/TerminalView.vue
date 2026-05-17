@@ -2,7 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { X } from "lucide-vue-next";
 
-import { scrollTab, type Config } from "../ipc";
+import { scrollTab, showContextMenu, type Config } from "../ipc";
 import {
   applyRendererTheme,
   commitDividerDrag,
@@ -90,8 +90,15 @@ function onHostWheel(e: WheelEvent) {
 }
 
 function onHostContextMenu(e: MouseEvent) {
+  // Suppress WKWebView's native menu and open ours directly. We can't rely on
+  // bubbling to App.vue's window-level contextmenu listener — stopping
+  // propagation here is needed to keep the event from other host handlers, so
+  // drive the menu ourselves.
   e.preventDefault();
   e.stopPropagation();
+  void showContextMenu().catch((err) =>
+    console.error("show_context_menu failed:", err),
+  );
 }
 
 // ---- Tab → terminal-area drop (create / extend a workspace) ---------------

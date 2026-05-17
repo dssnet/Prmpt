@@ -234,6 +234,31 @@ async function pasteIntoInput(el: EditableInput): Promise<void> {
   el.dispatchEvent(new Event("input", { bubbles: true }));
 }
 
+// macOS uses Cmd (metaKey) as the app modifier; Linux/Windows terminals use
+// Ctrl+Shift so plain Ctrl stays free for shell control codes (Ctrl+C =
+// SIGINT, Ctrl+D = EOF, …). Matches GNOME Terminal / Konsole / Windows
+// Terminal conventions.
+const IS_MAC =
+  /Mac|iPhone|iPod|iPad/.test(navigator.platform) ||
+  navigator.userAgent.includes("Mac OS X");
+
+// True when the platform's primary app-shortcut chord is held.
+function isPrimaryMod(e: KeyboardEvent): boolean {
+  return IS_MAC
+    ? e.metaKey && !e.ctrlKey
+    : e.ctrlKey && e.shiftKey && !e.metaKey;
+}
+
+// Layout/Shift-stable key name: physical letter/digit via `code` (so
+// Ctrl+Shift+C still reads as "c" and Ctrl+Shift+1 as "1"), otherwise the
+// logical key ("ArrowUp", "Home", …).
+function canonicalKey(e: KeyboardEvent): string {
+  if (/^Key[A-Z]$/.test(e.code)) return e.code.slice(3).toLowerCase();
+  if (/^Digit[0-9]$/.test(e.code)) return e.code.slice(5);
+  if (e.key.length === 1) return e.key.toLowerCase();
+  return e.key;
+}
+
 type Shortcut = {
   mod: "meta" | "shift";
   match: (key: string) => boolean;
@@ -265,9 +290,9 @@ async function splitActive(dir: "h" | "v"): Promise<void> {
   focusCanvas();
 }
 
-// WKWebView only fires `paste` when something editable is focused. The canvas
-// isn't, so the global paste handler never sees Cmd+V via keyboard — we drive
-// it from this table instead.
+// The webview only fires `paste` when something editable is focused. The
+// canvas isn't, so the global paste handler never sees the paste chord
+// (Cmd+V / Ctrl+Shift+V) via keyboard — we drive it from this table instead.
 const shortcuts: Shortcut[] = [
   { mod: "meta", match: (k) => k === "t", run: () => void spawnNewTab() },
   {
@@ -287,7 +312,7 @@ const shortcuts: Shortcut[] = [
     mod: "meta",
     match: (k) => /^[1-9]$/.test(k),
     run: (e) => {
-      const idx = Number(e.key) - 1;
+      const idx = Number(canonicalKey(e)) - 1;
       const list = tabs.value.filter((t) => t.kind !== "home");
       if (list[idx]) setActive(list[idx].id);
     },
@@ -333,17 +358,21 @@ function onKeyDown(e: KeyboardEvent) {
   // (a/c/v/x) for the terminal — let the field handle them natively (or
   // let the Edit menu accelerators route through the menu handlers).
   const editable = focusedEditable() != null;
+  const key = canonicalKey(e);
+  const primary = isPrimaryMod(e);
   for (const s of shortcuts) {
-    if (s.mod === "meta" && !e.metaKey) continue;
-    if (s.mod === "shift" && !e.shiftKey) continue;
-    if (!s.match(e.key)) continue;
-    if (editable && s.mod === "meta" && /^[acvxACVX]$/.test(e.key)) continue;
+    if (s.mod === "meta" && !primary) continue;
+    if (s.mod === "shift" && !(e.shiftKey && !primary)) continue;
+    if (!s.match(key)) continue;
+    if (editable && s.mod === "meta" && /^[acvx]$/.test(key)) continue;
     if (s.when && !s.when()) continue;
     e.preventDefault();
     s.run(e);
     return;
   }
-  if (e.metaKey) return;
+  // Swallow the primary chord even when nothing matched, so an unbound
+  // Cmd/Ctrl+Shift combo never leaks to the terminal as a control byte.
+  if (e.metaKey || primary) return;
 
   const bytes = encodeKey(e);
   if (bytes) {
