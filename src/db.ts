@@ -8,6 +8,7 @@
  * of the CRUD helpers.
  */
 
+import { invoke } from "@tauri-apps/api/core";
 import Database from "@tauri-apps/plugin-sql";
 
 export type SshAuthMethod = "password" | "key" | "agent";
@@ -85,14 +86,15 @@ type RawKeyRow = Omit<SshKeyRow, "has_passphrase" | "broken"> & {
 
 type RawForwardRow = Omit<SshPortForwardRow, "enabled"> & { enabled: number };
 
-const DB_URL = "sqlite:prmpt.db";
-
 let db: Database | null = null;
 
-/** Opens (and migrates) the database. Idempotent. */
+/** Opens (and migrates) the database. Idempotent. The connection URL
+ *  is resolved by the backend (`get_db_url`) so JS and Rust agree on
+ *  the absolute path the SQL plugin registered migrations under. */
 export async function openDb(): Promise<Database> {
   if (!db) {
-    db = await Database.load(DB_URL);
+    const url = await invoke<string>("get_db_url");
+    db = await Database.load(url);
   }
   return db;
 }

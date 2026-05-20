@@ -32,7 +32,12 @@ bun tauri dev                     # launch the app
 
 ## Where things live at runtime
 
-- Config: `~/Library/Application Support/de.dss-net.prmpt/config.toml` — auto-generated on first run; delete to reset to defaults.
+- Data dir — auto-generated on first run; delete `config.toml` to reset to defaults:
+  - macOS: `~/Library/Application Support/Prmpt/`
+  - Linux: `~/.config/Prmpt/` (or `$XDG_CONFIG_HOME/Prmpt/`)
+  - Windows: `%APPDATA%\Prmpt\` (i.e. `…\AppData\Roaming\Prmpt\`)
+  
+  Holds `config.toml`, `prmpt.db`, `stronghold.key`, `prmpt.stronghold`. On upgrade from earlier versions, files are migrated automatically from the legacy `de.dss-net.prmpt` / `dss-net\prmpt` folders.
 - Compiled frontend: `dist/`
 - Cargo target: `src-tauri/target/`
 

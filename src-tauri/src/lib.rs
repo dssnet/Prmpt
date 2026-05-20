@@ -1,8 +1,10 @@
 mod commands;
 mod config;
+mod data_migrations;
 mod error;
 #[cfg(target_os = "macos")]
 mod macos;
+mod paths;
 mod platform;
 mod protocol;
 mod secure_store;
@@ -32,9 +34,10 @@ use tauri_plugin_sql::{Migration, MigrationKind};
 pub type SharedConfig = Arc<Mutex<Config>>;
 pub type SharedRuntime = Arc<tokio::runtime::Runtime>;
 
-/// URL the SQL plugin registers the database under. Mirrors the value
-/// in `tauri.conf.json`'s `plugins.sql.preload`.
-const DB_URL: &str = "sqlite:prmpt.db";
+/// URL handed to `tauri-plugin-sql` and returned to the frontend by
+/// `get_db_url`. Resolved at startup from `paths::db_url()` so both
+/// sides agree on the (absolute, OS-specific) connection string.
+pub struct DbUrl(pub String);
 
 /// Monotonic counter used to label runtime-created windows
 /// (`"window-1"`, `"window-2"`, ...). The initial window keeps the
@@ -92,10 +95,17 @@ fn ssh_migrations() -> Vec<Migration> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Move any pre-unification on-disk state into the new `Prmpt` data
+    // dir before anything else reads or writes it. See
+    // `data_migrations/` for the framework and `v001_unify_data_dir.rs`
+    // for the move logic.
+    data_migrations::run().expect("apply data migrations");
+
     let registry: tab::SharedRegistry = Arc::new(TabRegistry::new());
     let cfg: SharedConfig = Arc::new(Mutex::new(Config::load_or_default()));
     let window_counter: SharedWindowCounter = Arc::new(WindowCounter::default());
     let pending: SharedPendingHydration = Arc::new(PendingHydration::default());
+    let db_url = paths::db_url().expect("resolve db url");
 
     let runtime: SharedRuntime = Arc::new(
         tokio::runtime::Builder::new_multi_thread()
@@ -114,7 +124,7 @@ pub fn run() {
     let builder = tauri::Builder::default()
         .plugin(
             tauri_plugin_sql::Builder::new()
-                .add_migrations(DB_URL, ssh_migrations())
+                .add_migrations(&db_url, ssh_migrations())
                 .build(),
         )
         .plugin(
@@ -136,6 +146,7 @@ pub fn run() {
         .manage(window_counter)
         .manage(pending)
         .manage(runtime)
+        .manage(DbUrl(db_url))
         .invoke_handler(tauri::generate_handler![
             commands::spawn_tab,
             commands::close_tab,
@@ -152,6 +163,7 @@ pub fn run() {
             commands::list_tabs_for_window,
             commands::window_at_screen_point,
             commands::get_stronghold_unlock,
+            commands::get_db_url,
             commands::connect_ssh_host,
             commands::full_disk_access_granted,
             commands::open_full_disk_access_settings,

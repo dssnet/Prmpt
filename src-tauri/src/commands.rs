@@ -15,7 +15,7 @@ use crate::{
     ssh::{self, SshConnectConfig},
     stronghold::{self, StrongholdUnlock},
     tab::{PtyEvent, ScrollKind, SharedRegistry},
-    SharedConfig, SharedPendingHydration, SharedRuntime, SharedWindowCounter,
+    DbUrl, SharedConfig, SharedPendingHydration, SharedRuntime, SharedWindowCounter,
 };
 
 #[cfg(target_os = "macos")]
@@ -306,6 +306,14 @@ pub fn window_at_screen_point(
 #[tauri::command]
 pub fn get_stronghold_unlock() -> AppResult<StrongholdUnlock> {
     stronghold::prepare_unlock()
+}
+
+/// URL the frontend should pass to `Database.load(...)`. Resolved
+/// once at startup (see `lib.rs::run`) so JS and Rust agree even
+/// when the path is an absolute filesystem path.
+#[tauri::command]
+pub fn get_db_url(url: State<'_, DbUrl>) -> String {
+    url.0.clone()
 }
 
 #[derive(serde::Deserialize)]

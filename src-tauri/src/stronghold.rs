@@ -25,12 +25,12 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use directories::ProjectDirs;
 use rand::RngCore;
 use serde::Serialize;
 
 use crate::{
     error::{AppError, AppResult},
+    paths,
     secure_store::{PlatformStore, SecureStore, SecureStoreError},
 };
 
@@ -199,11 +199,7 @@ fn write_boot_password_file(path: &Path, key: &[u8; 32]) -> AppResult<()> {
 }
 
 fn data_dir() -> AppResult<PathBuf> {
-    let dirs = ProjectDirs::from("de", "dss-net", "prmpt")
-        .ok_or_else(|| AppError::Crypto("cannot resolve project dirs".into()))?;
-    let dir = dirs.config_dir().to_path_buf();
-    std::fs::create_dir_all(&dir)?;
-    Ok(dir)
+    paths::ensure_app_data_dir()
 }
 
 fn boot_password_path() -> AppResult<PathBuf> {

@@ -5,7 +5,7 @@ A desktop terminal emulator. Tauri 2 shell, Ghostty's VT engine driving terminal
 ## Hard rules
 
 - **Do not run `bun tauri dev` in the background, monitor it, or otherwise launch the GUI from an agent session.** The user runs it manually for visual testing. Compiling (`cargo check`, `bun run build`) is fine; launching the windowed app is not.
-- **Do not modify the user's config file** at `~/Library/Application Support/de.dss-net.prmpt/config.toml`. If a new default needs to apply, instruct the user to delete that file (it auto-regenerates) — do not overwrite it.
+- **Do not modify the user's config file** at `~/Library/Application Support/Prmpt/config.toml` (macOS) / `~/.config/Prmpt/config.toml` (Linux) / `%APPDATA%\Prmpt\config.toml` (Windows). If a new default needs to apply, instruct the user to delete that file (it auto-regenerates) — do not overwrite it.
 - **libghostty-vt** types are `!Send + !Sync`. All terminal state access happens on a per-tab dedicated thread. Tauri command handlers post messages via `crossbeam-channel`; they never touch `Terminal` directly. Keep it that way.
 
 ## Architecture (one diagram)
@@ -85,7 +85,7 @@ Commands frontend → backend: `spawn_tab`, `close_tab`, `write_input`, `resize_
 
 ## Where things live at runtime
 
-- Config: `~/Library/Application Support/de.dss-net.prmpt/config.toml`. **Auto-generated with defaults on first run.** Deleting it regenerates. Edit `src-tauri/src/config.rs::Config::default` to change defaults; existing files are not migrated — if a new default is needed, tell the user to delete the file or edit the relevant key themselves (do not edit it from the agent).
+- Data dir — `Prmpt/` under the OS config root (macOS `~/Library/Application Support/`, Linux `~/.config/`, Windows `%APPDATA%`). Holds `config.toml`, `prmpt.db`, `stronghold.key`, `prmpt.stronghold`, and a `data_version` counter for the `data_migrations/` framework. The path is owned by `src-tauri/src/paths.rs`; all consumers (config.rs, stronghold.rs, the SQL plugin URL in lib.rs) go through it. **`config.toml` is auto-generated with defaults on first run.** Deleting it regenerates. Edit `src-tauri/src/config.rs::Config::default` to change defaults; existing files are not migrated — if a new default is needed, tell the user to delete the file or edit the relevant key themselves (do not edit it from the agent).
 - Built frontend: `dist/`.
 - Tauri target: `src-tauri/target/`.
 

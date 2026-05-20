@@ -1,8 +1,8 @@
-use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 use std::{fs, path::PathBuf};
 
 use crate::error::{AppError, AppResult};
+use crate::paths;
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(default)]
@@ -58,9 +58,7 @@ impl Default for Theme {
 }
 
 fn config_path() -> AppResult<PathBuf> {
-    let dirs = ProjectDirs::from("de", "dss-net", "prmpt")
-        .ok_or_else(|| AppError::Config("cannot resolve config dir".into()))?;
-    Ok(dirs.config_dir().join("config.toml"))
+    Ok(paths::ensure_app_data_dir()?.join("config.toml"))
 }
 
 impl Config {
