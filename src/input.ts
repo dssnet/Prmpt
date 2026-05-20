@@ -1,5 +1,7 @@
 const encoder = new TextEncoder();
 
+const IS_MAC = typeof navigator !== "undefined" && /Mac/i.test(navigator.platform);
+
 function ctrlByte(letter: string): Uint8Array | null {
   if (letter.length !== 1) return null;
   const code = letter.toLowerCase().charCodeAt(0);
@@ -111,10 +113,16 @@ export function encodeKey(e: KeyboardEvent): Uint8Array | null {
   }
 
   if (bytes && e.altKey) {
-    const prefixed = new Uint8Array(bytes.length + 1);
-    prefixed[0] = 0x1b;
-    prefixed.set(bytes, 1);
-    return prefixed;
+    // On macOS, Option composes special characters (Option+L → @, Option+5 → [, …).
+    // The OS has already produced the composed glyph in e.key, so don't ESC-prefix it.
+    // On other platforms, Alt+key is the conventional Meta-prefix (ESC + key).
+    const isComposedChar = IS_MAC && key.length === 1;
+    if (!isComposedChar) {
+      const prefixed = new Uint8Array(bytes.length + 1);
+      prefixed[0] = 0x1b;
+      prefixed.set(bytes, 1);
+      return prefixed;
+    }
   }
   return bytes;
 }
