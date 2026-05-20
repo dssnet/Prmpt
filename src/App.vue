@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { readText as readClipboardText } from "@tauri-apps/plugin-clipboard-manager";
 import { onMounted, onBeforeUnmount, ref } from "vue";
 
 import { recordHostFingerprint } from "./db";
@@ -214,7 +215,7 @@ async function copyFromInput(el: EditableInput): Promise<void> {
 async function pasteIntoInput(el: EditableInput): Promise<void> {
   let text: string;
   try {
-    text = await navigator.clipboard.readText();
+    text = await readClipboardText();
   } catch (err) {
     console.error("clipboard read failed:", err);
     return;

@@ -130,6 +130,7 @@ pub fn run() {
             .build(),
         )
         .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_clipboard_manager::init())
         .manage(registry)
         .manage(cfg)
         .manage(window_counter)

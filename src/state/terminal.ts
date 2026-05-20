@@ -1,3 +1,4 @@
+import { readText as readClipboardText } from "@tauri-apps/plugin-clipboard-manager";
 import { ref } from "vue";
 
 import {
@@ -567,7 +568,7 @@ export async function pasteFromClipboard(): Promise<void> {
   const target = inputTargetTabId();
   if (target == null) return;
   try {
-    const text = await navigator.clipboard.readText();
+    const text = await readClipboardText();
     if (!text) return;
     void writeInput(target, new TextEncoder().encode(text));
   } catch (err) {

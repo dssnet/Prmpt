@@ -13,6 +13,7 @@
     "stronghold:default",
     "stronghold:allow-remove-store-record",
     "updater:default",
-    "process:allow-restart"
+    "process:allow-restart",
+    "clipboard-manager:allow-read-text"
   ]
 }
