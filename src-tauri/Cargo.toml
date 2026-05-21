@@ -61,6 +61,17 @@ portable-pty = "0.8"
 # where app distribution goes through the stores). Keep it off mobile so
 # the plugin and its libsodium/HTTP deps don't get pulled in there.
 tauri-plugin-updater = "2"
+# Swap libmalloc for jemalloc. macOS's libmalloc keeps free'd
+# "MALLOC_LARGE" regions parked in a purgeable pool until the kernel
+# signals real memory pressure — `malloc_zone_pressure_relief` is just
+# a hint and on recent macOS returns 0 bytes released. iota_stronghold's
+# scrypt invocations at startup allocate four ~128 MB buffers and
+# libmalloc strands all of them, leaving ~512 MB resident long after
+# they're freed. jemalloc returns large allocations to the OS promptly,
+# so the post-scrypt RSS drops in step instead of hanging around for a
+# minute. Mobile keeps the system allocator (different platform story
+# and we don't have the same issue there).
+tikv-jemallocator = { version = "0.6", default-features = false, features = ["unprefixed_malloc_on_supported_platforms"] }
 
 # On Windows, select the `link-static` feature. The vendored
 # libghostty-vt-sys build script's *dynamic* matcher only recognizes

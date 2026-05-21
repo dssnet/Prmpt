@@ -53,15 +53,18 @@ export async function openSecrets(): Promise<boolean> {
   // On the initial load (no HMR), the Stronghold plugin's IPC channel
   // sometimes isn't ready by the time the JS bootstrap hits this call —
   // `Stronghold.load` then hangs waiting for a reply that never arrives.
-  // The plugin warms up after a moment, so retry with a short timeout
-  // until it actually responds. HMR rebuilds re-run main.ts after the
-  // plugin is steady-state, which is why those "just worked".
+  // The plugin warms up after a moment, so retry until it actually
+  // responds. The timeout has to comfortably exceed real scrypt work:
+  // iota_stronghold runs scrypt internally during `load()` and on debug
+  // builds (even with `-O3` scrypt in Cargo.toml) that takes ~10 s.
+  // 60 s leaves plenty of headroom for a genuinely slow machine while
+  // still catching an IPC hang in a reasonable time.
   const maxAttempts = 3;
   for (let attempt = 1; ; attempt++) {
     try {
       stronghold = await withTimeout(
         Stronghold.load(unlock.snapshot_path, unlock.password),
-        1500,
+        60_000,
         "Stronghold.load",
       );
       break;

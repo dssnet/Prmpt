@@ -12,6 +12,16 @@ mod ssh;
 mod stronghold;
 mod tab;
 
+// Replace libmalloc with jemalloc on desktop. See Cargo.toml — the
+// motivating case is iota_stronghold's scrypt allocations at startup,
+// which libmalloc strands in its purgeable pool until kernel-level
+// memory pressure hits. jemalloc returns large free'd allocations to
+// the OS aggressively, so the resident set drops in step with iota's
+// internal frees instead of waiting for OS pressure.
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 use std::{
     collections::HashMap,
     sync::{
