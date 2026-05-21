@@ -10,8 +10,6 @@
     "core:window:allow-close",
     "sql:default",
     "sql:allow-execute",
-    "stronghold:default",
-    "stronghold:allow-remove-store-record",
     "updater:default",
     "process:allow-restart",
     "clipboard-manager:allow-read-text"

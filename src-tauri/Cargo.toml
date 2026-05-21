@@ -31,7 +31,13 @@ crossbeam-channel = "0.5"
 directories = "5"
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "macros", "io-util", "time", "net"] }
 tauri-plugin-sql = { version = "2", features = ["sqlite"] }
-tauri-plugin-stronghold = "2"
+# Used to be `tauri-plugin-stronghold` (a JS-callable plugin), but every
+# window's `Stronghold.load()` re-runs scrypt and spikes RAM by ~512 MB.
+# We now own iota_stronghold directly on the Rust side (see
+# src/secret_store.rs) and expose `secret_get`/`secret_set`/`secret_remove`
+# commands, so the snapshot is decrypted at most once per process
+# regardless of window count.
+iota_stronghold = "2"
 # `relaunch()` after an in-place update install. Works on all targets.
 tauri-plugin-process = "2"
 # Read the clipboard via OS APIs (NSPasteboard / Win32) instead of
@@ -61,17 +67,6 @@ portable-pty = "0.8"
 # where app distribution goes through the stores). Keep it off mobile so
 # the plugin and its libsodium/HTTP deps don't get pulled in there.
 tauri-plugin-updater = "2"
-# Swap libmalloc for jemalloc. macOS's libmalloc keeps free'd
-# "MALLOC_LARGE" regions parked in a purgeable pool until the kernel
-# signals real memory pressure — `malloc_zone_pressure_relief` is just
-# a hint and on recent macOS returns 0 bytes released. iota_stronghold's
-# scrypt invocations at startup allocate four ~128 MB buffers and
-# libmalloc strands all of them, leaving ~512 MB resident long after
-# they're freed. jemalloc returns large allocations to the OS promptly,
-# so the post-scrypt RSS drops in step instead of hanging around for a
-# minute. Mobile keeps the system allocator (different platform story
-# and we don't have the same issue there).
-tikv-jemallocator = { version = "0.6", default-features = false, features = ["unprefixed_malloc_on_supported_platforms"] }
 
 # On Windows, select the `link-static` feature. The vendored
 # libghostty-vt-sys build script's *dynamic* matcher only recognizes

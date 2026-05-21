@@ -1,7 +1,7 @@
 //! Boot password + snapshot quarantine for the Stronghold snapshot.
 //!
-//! In the JS-side-plugin architecture, Rust no longer talks to
-//! Stronghold directly. We just:
+//! The actual iota_stronghold instance lives in [`crate::secret_store`]
+//! — this module only manages the on-disk material around it:
 //!
 //! 1. Keep a 32-byte random "boot password" in the platform secret store
 //!    ([`crate::secure_store`]). On systems where that backend is
@@ -10,15 +10,12 @@
 //!    security model as a passphrase-less SSH key.
 //! 2. Detect when a stale snapshot exists alongside a freshly-generated
 //!    boot password (which would be undecryptable with the new key) and
-//!    move it aside before the JS plugin tries — saving the user from
-//!    a multi-second scrypt attempt that's doomed to fail.
-//! 3. Expose both via [`StrongholdUnlock`] for the frontend, which then
-//!    calls `Stronghold.load(snapshot_path, password)` via the plugin's
-//!    JS API.
-//!
-//! The plugin builder in `lib.rs` is configured with a hash function
-//! that decodes the hex password we hand the frontend back into the 32
-//! raw bytes the snapshot's `KeyProvider` expects.
+//!    move it aside on startup — saving the user from a multi-second
+//!    scrypt attempt that's doomed to fail.
+//! 3. Expose [`StrongholdUnlock`] (path + hex password + quarantine
+//!    flag) to the frontend via `get_stronghold_unlock`, and to
+//!    [`crate::secret_store`] which uses it to load the snapshot the
+//!    first time a secret is accessed.
 
 use std::{
     io::Write,
@@ -34,8 +31,8 @@ use crate::{
     secure_store::{PlatformStore, SecureStore, SecureStoreError},
 };
 
-/// What the frontend needs to unlock the Stronghold snapshot via the
-/// `Stronghold.load(snapshot_path, password)` plugin API.
+/// Path + password the secret store (and the frontend, for the
+/// quarantine flag) need to decrypt the snapshot.
 #[derive(Serialize, Clone, Debug)]
 pub struct StrongholdUnlock {
     pub snapshot_path: String,
@@ -46,8 +43,10 @@ pub struct StrongholdUnlock {
     pub was_quarantined: bool,
 }
 
-/// Prepare the on-disk state needed for the JS-side stronghold plugin
-/// to load the snapshot. Run once at startup.
+/// Prepare the on-disk state needed to decrypt the snapshot: ensure a
+/// boot password exists and quarantine the snapshot if the password is
+/// fresh. Called once eagerly at startup, then again lazily by the
+/// secret store on first secret access.
 pub fn prepare_unlock() -> AppResult<StrongholdUnlock> {
     let (password_bytes, password_was_fresh) = load_or_create_boot_password()?;
     let snapshot = snapshot_path()?;

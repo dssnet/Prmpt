@@ -298,11 +298,13 @@ pub fn window_at_screen_point(
 
 // ---------- SSH unlock + connect ----------
 
-/// Return everything the frontend needs to unlock the Stronghold
-/// snapshot via the JS plugin (`Stronghold.load(snapshot_path,
-/// password)`). The snapshot is keyed by a 32-byte CSPRNG password
-/// stored in `stronghold.key`; we encode it as hex for transit, and the
-/// plugin's hash function decodes it back inside the Rust process.
+/// Return the snapshot location + quarantine flag for the frontend.
+/// The `was_quarantined` field is the only piece the frontend actually
+/// uses (to mark previously-saved hosts/keys broken when the boot key
+/// was regenerated); the path and password fields are vestigial from
+/// when the JS-side stronghold plugin owned the unlock and are kept
+/// for the serialized shape only — secret CRUD goes through
+/// `secret_get`/`secret_set`/`secret_remove` now.
 #[tauri::command]
 pub fn get_stronghold_unlock() -> AppResult<StrongholdUnlock> {
     stronghold::prepare_unlock()
@@ -460,4 +462,35 @@ pub fn full_disk_access_granted() -> bool {
 #[tauri::command]
 pub fn open_full_disk_access_settings() -> AppResult<()> {
     Ok(())
+}
+
+/// Read a value from the Rust-owned Stronghold store. Returns `None`
+/// if the key isn't set. First call (process-wide) lazily loads the
+/// snapshot — that's where scrypt runs, once per process regardless
+/// of how many windows are open.
+#[tauri::command]
+pub async fn secret_get(
+    store: tauri::State<'_, crate::secret_store::SecretStore>,
+    key: String,
+) -> AppResult<Option<Vec<u8>>> {
+    store.get(&key).await
+}
+
+/// Store a value under `key`. Commits the snapshot to disk.
+#[tauri::command]
+pub async fn secret_set(
+    store: tauri::State<'_, crate::secret_store::SecretStore>,
+    key: String,
+    value: Vec<u8>,
+) -> AppResult<()> {
+    store.set(&key, value).await
+}
+
+/// Remove a key from the store. Commits the snapshot to disk.
+#[tauri::command]
+pub async fn secret_remove(
+    store: tauri::State<'_, crate::secret_store::SecretStore>,
+    key: String,
+) -> AppResult<()> {
+    store.remove(&key).await
 }

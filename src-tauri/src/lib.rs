@@ -7,20 +7,11 @@ mod macos;
 mod paths;
 mod platform;
 mod protocol;
+mod secret_store;
 mod secure_store;
 mod ssh;
 mod stronghold;
 mod tab;
-
-// Replace libmalloc with jemalloc on desktop. See Cargo.toml — the
-// motivating case is iota_stronghold's scrypt allocations at startup,
-// which libmalloc strands in its purgeable pool until kernel-level
-// memory pressure hits. jemalloc returns large free'd allocations to
-// the OS aggressively, so the resident set drops in step with iota's
-// internal frees instead of waiting for OS pressure.
-#[cfg(not(any(target_os = "ios", target_os = "android")))]
-#[global_allocator]
-static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 use std::{
     collections::HashMap,
@@ -126,9 +117,9 @@ pub fn run() {
     );
 
     // Pre-create boot password + quarantine stale snapshot if needed.
-    // The frontend calls `get_stronghold_unlock` early on, which reads
-    // the same files — doing it here ensures the JS plugin's
-    // `Stronghold.load` won't burn scrypt time on an undecryptable file.
+    // The frontend calls `get_stronghold_unlock` early on to learn the
+    // quarantine flag; the Rust-side SecretStore reads the same files
+    // (lazily, on first secret access) to load the snapshot.
     stronghold::prepare_unlock().expect("prepare stronghold snapshot");
 
     let builder = tauri::Builder::default()
@@ -136,18 +127,6 @@ pub fn run() {
             tauri_plugin_sql::Builder::new()
                 .add_migrations(&db_url, ssh_migrations())
                 .build(),
-        )
-        .plugin(
-            tauri_plugin_stronghold::Builder::new(|password| {
-                // The frontend hands us the boot password as a 64-char
-                // hex string. The plugin's `KeyProvider` wants raw 32
-                // bytes — decode here. An invalid encoding falls through
-                // to a zero key and the snapshot fails to open, which
-                // is the right behavior (don't silently re-encrypt with
-                // a bogus key).
-                hex::decode(password.trim()).unwrap_or_default()
-            })
-            .build(),
         )
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_clipboard_manager::init())
@@ -157,6 +136,7 @@ pub fn run() {
         .manage(pending)
         .manage(runtime)
         .manage(DbUrl(db_url))
+        .manage(secret_store::SecretStore::new())
         .invoke_handler(tauri::generate_handler![
             commands::spawn_tab,
             commands::close_tab,
@@ -177,6 +157,9 @@ pub fn run() {
             commands::connect_ssh_host,
             commands::full_disk_access_granted,
             commands::open_full_disk_access_settings,
+            commands::secret_get,
+            commands::secret_set,
+            commands::secret_remove,
         ]);
 
     // The updater plugin is desktop-only (mobile distributes via the
