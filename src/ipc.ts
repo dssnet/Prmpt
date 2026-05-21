@@ -1,6 +1,24 @@
 import { invoke } from "@tauri-apps/api/core";
-import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { listen, type EventTarget as TauriEventTarget, type UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
+
+// In Tauri 2, the bare `listen(event, handler)` registers a listener with
+// target=`Any`, which matches every emit regardless of its `emit_to` target.
+// That means a hidden reserve window would receive `window:tab_attached`
+// events meant for a different visible window, silently piling tabs into the
+// reserve's state — surfaced only when the reserve was later popped for a
+// real tear-off. Per-window scoping requires an explicit WebviewWindow target.
+const MY_TARGET: TauriEventTarget = {
+  kind: "WebviewWindow",
+  label: getCurrentWebviewWindow().label,
+};
+
+function listenScoped<T>(
+  event: string,
+  handler: (payload: T) => void,
+): Promise<UnlistenFn> {
+  return listen<T>(event, (e) => handler(e.payload), { target: MY_TARGET });
+}
 
 export interface CellWire {
   ch: number;
@@ -130,15 +148,15 @@ export async function showContextMenu(): Promise<void> {
 }
 
 export function onMenuCopy(handler: () => void): Promise<UnlistenFn> {
-  return listen<void>("menu:copy", () => handler());
+  return listenScoped<void>("menu:copy", () => handler());
 }
 
 export function onMenuPaste(handler: () => void): Promise<UnlistenFn> {
-  return listen<void>("menu:paste", () => handler());
+  return listenScoped<void>("menu:paste", () => handler());
 }
 
 export function onMenuSelectAll(handler: () => void): Promise<UnlistenFn> {
-  return listen<void>("menu:selectAll", () => handler());
+  return listenScoped<void>("menu:selectAll", () => handler());
 }
 
 export async function getConfig(): Promise<Config> {
@@ -160,11 +178,11 @@ export async function setTheme(theme: ThemeConfig): Promise<void> {
 }
 
 export function onRender(handler: (payload: RenderPayload) => void): Promise<UnlistenFn> {
-  return listen<RenderPayload>("terminal:render", (e) => handler(e.payload));
+  return listenScoped<RenderPayload>("terminal:render", handler);
 }
 
 export function onExit(handler: (payload: ExitPayload) => void): Promise<UnlistenFn> {
-  return listen<ExitPayload>("terminal:exit", (e) => handler(e.payload));
+  return listenScoped<ExitPayload>("terminal:exit", handler);
 }
 
 export interface TabInfo {
@@ -214,6 +232,35 @@ export async function listTabsForWindow(label: string): Promise<TabInfo[]> {
   return await invoke<TabInfo[]>("list_tabs_for_window", { label });
 }
 
+export type WindowMode = "reserve" | "normal";
+
+export interface WindowBootstrap {
+  mode: WindowMode;
+  tabs: TabInfo[];
+}
+
+/** Tells the caller whether this window is a hidden reserve waiting for
+ *  activation (sit idle, listeners stay subscribed) or a normal window
+ *  that should hydrate listed tabs / spawn a fresh one. The very act of
+ *  invoking this command also marks a `Reserve` window `Ready` on the
+ *  backend so it becomes eligible for the next activation. */
+export async function bootstrapWindow(label: string): Promise<WindowBootstrap> {
+  return await invoke<WindowBootstrap>("bootstrap_window", { label });
+}
+
+/** Cmd+N (Ctrl+Shift+N elsewhere) — pop a reserve and surface it, or fall
+ *  back to building a fresh window. */
+export async function openNewWindow(): Promise<void> {
+  await invoke("open_new_window");
+}
+
+/** Fires on a reserve when it's been popped for a blank activation
+ *  (dock-click / openNewWindow). The frontend reacts by spawning its
+ *  first tab. */
+export function onWindowActivateBlank(handler: () => void): Promise<UnlistenFn> {
+  return listenScoped<void>("window:activate-blank", () => handler());
+}
+
 export async function windowAtScreenPoint(
   x: number,
   y: number,
@@ -225,7 +272,7 @@ export async function windowAtScreenPoint(
 export function onTabAttached(
   handler: (payload: TabAttachedPayload) => void,
 ): Promise<UnlistenFn> {
-  return listen<TabAttachedPayload>("window:tab_attached", (e) => handler(e.payload));
+  return listenScoped<TabAttachedPayload>("window:tab_attached", handler);
 }
 
 // ---------------- SSH connect (the only secret-touching Rust command) ----------------
@@ -303,19 +350,17 @@ export interface SshPortForwardError {
 export function onSshHostKeyMismatch(
   handler: (payload: SshHostKeyMismatch) => void,
 ): Promise<UnlistenFn> {
-  return listen<SshHostKeyMismatch>("ssh:host_key_mismatch", (e) => handler(e.payload));
+  return listenScoped<SshHostKeyMismatch>("ssh:host_key_mismatch", handler);
 }
 
 export function onSshHostKeyFirstConnect(
   handler: (payload: SshHostKeyFirstConnect) => void,
 ): Promise<UnlistenFn> {
-  return listen<SshHostKeyFirstConnect>("ssh:host_key_first_connect", (e) =>
-    handler(e.payload),
-  );
+  return listenScoped<SshHostKeyFirstConnect>("ssh:host_key_first_connect", handler);
 }
 
 export function onSshPortForwardError(
   handler: (payload: SshPortForwardError) => void,
 ): Promise<UnlistenFn> {
-  return listen<SshPortForwardError>("ssh:port_forward_error", (e) => handler(e.payload));
+  return listenScoped<SshPortForwardError>("ssh:port_forward_error", handler);
 }

@@ -12,11 +12,12 @@ mod secure_store;
 mod ssh;
 mod stronghold;
 mod tab;
+mod window_pool;
 
 use std::{
     collections::HashMap,
     sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc,
     },
 };
@@ -52,6 +53,11 @@ impl WindowCounter {
     }
 }
 
+/// Set when an explicit `app.exit(0)` (menu / Cmd+Q) has fired so the
+/// per-window Destroyed handlers know not to respawn a reserve mid-shutdown.
+/// The no-windows-left auto-exit is `prevent_exit`'d, so it never sets this.
+pub static SHUTTING_DOWN: AtomicBool = AtomicBool::new(false);
+
 /// Tab IDs queued for hydration into a window that hasn't yet booted
 /// its frontend. The frontend drains its entry via
 /// `list_tabs_for_window` on init.
@@ -60,6 +66,7 @@ pub struct PendingHydration(pub Mutex<HashMap<String, Vec<u64>>>);
 
 pub type SharedWindowCounter = Arc<WindowCounter>;
 pub type SharedPendingHydration = Arc<PendingHydration>;
+pub use window_pool::SharedWindowPool;
 
 /// Conservative default terminal geometry for a tab the backend
 /// pre-spawns before its window's webview has booted. The frontend
@@ -106,6 +113,7 @@ pub fn run() {
     let cfg: SharedConfig = Arc::new(Mutex::new(Config::load_or_default()));
     let window_counter: SharedWindowCounter = Arc::new(WindowCounter::default());
     let pending: SharedPendingHydration = Arc::new(PendingHydration::default());
+    let window_pool: SharedWindowPool = Arc::new(window_pool::WindowPool::new());
     let db_url = paths::db_url().expect("resolve db url");
 
     let runtime: SharedRuntime = Arc::new(
@@ -134,6 +142,7 @@ pub fn run() {
         .manage(cfg)
         .manage(window_counter)
         .manage(pending)
+        .manage(window_pool)
         .manage(runtime)
         .manage(DbUrl(db_url))
         .manage(secret_store::SecretStore::new())
@@ -151,6 +160,8 @@ pub fn run() {
             commands::tear_off_tab,
             commands::attach_tab,
             commands::list_tabs_for_window,
+            commands::bootstrap_window,
+            commands::open_new_window,
             commands::window_at_screen_point,
             commands::get_stronghold_unlock,
             commands::get_db_url,
@@ -220,6 +231,12 @@ pub fn run() {
                 // via list_tabs_for_window rather than spawning its own.
                 prespawn_tab_for_window(app.handle(), "main");
             }
+            // Prime the reserve pool. The webview boot is async; the
+            // reserve won't be eligible for popping until its frontend
+            // calls bootstrap_window. Activations before then fall back
+            // to building a fresh window — same UX as today.
+            let pool = app.state::<SharedWindowPool>();
+            pool.ensure_filled(app.handle());
             Ok(())
         })
         .build(tauri::generate_context!())
@@ -233,6 +250,12 @@ pub fn run() {
             RunEvent::ExitRequested { code, api, .. } if code.is_none() => {
                 api.prevent_exit();
             }
+            // Explicit quit (`app.exit(0)` from the menu / Cmd+Q). Mark
+            // shutdown so per-window Destroyed handlers don't try to
+            // respawn a reserve as the process tears down.
+            RunEvent::ExitRequested { .. } => {
+                SHUTTING_DOWN.store(true, Ordering::SeqCst);
+            }
             // Dock-icon click on macOS. If the user has visible windows,
             // the OS already focuses one; we only intervene when nothing
             // is open so the click pops a fresh terminal window.
@@ -241,12 +264,44 @@ pub fn run() {
                 has_visible_windows: false,
                 ..
             } => {
-                if let Err(e) = open_blank_window(_app) {
-                    eprintln!("reopen: failed to open new window: {e}");
-                }
+                activate_blank_window(_app);
             }
             _ => {}
         });
+}
+
+/// Pop a Ready reserve and surface it as a blank new window, or fall back
+/// to building a fresh window if the pool isn't ready. Used by the macOS
+/// dock-click handler and the `open_new_window` command (Cmd+N).
+pub(crate) fn activate_blank_window(app: &AppHandle) {
+    let pool = app.state::<SharedWindowPool>();
+    if let Some(label) = pool.pop_for_blank() {
+        if let Some(window) = app.get_webview_window(&label) {
+            let _ = app.emit_to(EventTarget::webview_window(&label), "window:activate-blank", ());
+            let _ = window.show();
+            let _ = window.set_focus();
+            schedule_refill(app);
+            return;
+        }
+        // Pool said Ready but the window vanished (shouldn't normally
+        // happen). Clean up and fall through to the fresh-build path.
+        pool.note_destroyed(&label);
+    }
+    if let Err(e) = open_blank_window(app) {
+        eprintln!("activate_blank_window: fallback build failed: {e}");
+    }
+    schedule_refill(app);
+}
+
+/// Refill the reserve pool on the async runtime, off whatever thread the
+/// caller is on. Building a window inline competes with the main runloop
+/// that's still painting the window we just made visible.
+pub(crate) fn schedule_refill<R: Runtime>(app: &AppHandle<R>) {
+    let app_clone = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let pool = app_clone.state::<SharedWindowPool>();
+        pool.ensure_filled(&app_clone);
+    });
 }
 
 fn open_blank_window(app: &AppHandle) -> tauri::Result<()> {
@@ -415,6 +470,15 @@ pub fn configure_new_window<R: Runtime>(window: &WebviewWindow<R>) {
             }
             let pending = app.state::<SharedPendingHydration>();
             pending.0.lock().remove(&label);
+
+            // Keep the reserve pool in sync. Skip during shutdown so we
+            // don't try to build a replacement window while the app is
+            // tearing down.
+            let pool = app.state::<SharedWindowPool>();
+            pool.note_destroyed(&label);
+            if !SHUTTING_DOWN.load(Ordering::SeqCst) {
+                schedule_refill(&app);
+            }
         }
     });
 }

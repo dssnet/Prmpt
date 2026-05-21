@@ -1,15 +1,16 @@
 <script setup lang="ts">
 import { readText as readClipboardText } from "@tauri-apps/plugin-clipboard-manager";
+import type { UnlistenFn } from "@tauri-apps/api/event";
 import { onMounted, onBeforeUnmount, ref } from "vue";
 
 import { recordHostFingerprint } from "./db";
 import { encodeKey } from "./input";
 import {
   attachTab,
+  bootstrapWindow,
   closeCurrentWindow,
   currentWindowLabel,
   fullDiskAccessGranted,
-  listTabsForWindow,
   onExit,
   onMenuCopy,
   onMenuPaste,
@@ -19,6 +20,8 @@ import {
   onSshHostKeyMismatch,
   onSshPortForwardError,
   onTabAttached,
+  onWindowActivateBlank,
+  openNewWindow,
   scrollTab,
   showContextMenu,
   tearOffTab,
@@ -76,6 +79,12 @@ const myLabel = currentWindowLabel();
 // one). Cleared in onBeforeUnmount so tear-off windows don't leak timers.
 let updateTimer: ReturnType<typeof setInterval> | undefined;
 
+// Tauri event subscriptions installed in onMounted. Without unsubscribing
+// on unmount, Vite HMR (which remounts App.vue on hot-reload) would stack
+// duplicate handlers — one tear-off would then trigger N attachTabLocal +
+// N spawnNewTab calls, polluting the new window with extra shells.
+const unlisteners: UnlistenFn[] = [];
+
 function dismissFda(): void {
   // First-run only: once seen, never nag again on this machine.
   localStorage.setItem("prmpt.fdaOnboardingSeen", "1");
@@ -92,6 +101,32 @@ async function spawnNewTab(): Promise<void> {
     cellHeightPx: Math.round(cellHeightPx * dpr),
   });
   focusCanvas();
+}
+
+// Auto-spawn an initial terminal only if this window has none yet. Guards
+// the bootstrap empty-Normal and activate-blank paths against double-firing
+// (Vite HMR remounting App.vue stacks listeners; a tear-off racing past
+// activate-blank could otherwise pile a fresh shell on top of the attached
+// torn-off tab).
+//
+// The `hasAdoptedTab` flag is sticky: once a tab has been attached via the
+// onTabAttached path (tear-off into this window), the activate-blank
+// listener must NEVER spawn an extra shell on top, even if it fires later
+// due to a stale handler or replay. The in-flight flag covers the rapid
+// double-fire case where the synchronous `tabs.value.some` guard is read
+// twice before either `await spawnTerminal` completes.
+let hasAdoptedTab = false;
+let autoSpawnInFlight = false;
+
+async function autoSpawnInitialTab(): Promise<void> {
+  if (hasAdoptedTab || autoSpawnInFlight) return;
+  if (tabs.value.some((t) => t.kind !== "home")) return;
+  autoSpawnInFlight = true;
+  try {
+    await spawnNewTab();
+  } finally {
+    autoSpawnInFlight = false;
+  }
 }
 
 // The + button dragged over the terminal: spawn a fresh terminal and split it
@@ -296,6 +331,7 @@ async function splitActive(dir: "h" | "v"): Promise<void> {
 // (Cmd+V / Ctrl+Shift+V) via keyboard — we drive it from this table instead.
 const shortcuts: Shortcut[] = [
   { mod: "meta", match: (k) => k === "t", run: () => void spawnNewTab() },
+  { mod: "meta", match: (k) => k === "n", run: () => void openNewWindow() },
   {
     mod: "meta",
     match: (k) => k === "w",
@@ -413,11 +449,11 @@ onMounted(async () => {
   window.addEventListener("paste", onPaste);
   window.addEventListener("contextmenu", onContextMenu);
 
-  await onRender((p) => {
+  unlisteners.push(await onRender((p) => {
     handleRender(p);
     applyTerminalBg(p.default_bg);
-  });
-  await onExit((p) => {
+  }));
+  unlisteners.push(await onExit((p) => {
     handleExit(p);
     // Closing the last terminal closes the window. The home tab stays
     // resident, but a window with no live terminals has no reason to remain
@@ -428,24 +464,34 @@ onMounted(async () => {
         console.error("close window failed:", e),
       );
     }
-  });
-  await onTabAttached((p) => {
+  }));
+  unlisteners.push(await onTabAttached((p) => {
+    // Sticky: once a tab was attached here, never let a stray
+    // activate-blank fire spawn an extra shell on top.
+    hasAdoptedTab = true;
     attachTabLocal(p as TabHydrateInfo);
     // Resize newly-attached tabs to this window's geometry; their dims were
     // sized for the source window and likely no longer match.
     reflowActive(active.value);
-  });
-  await onMenuCopy(() => {
+  }));
+  // Activation for a previously-reserve window: spawn the first tab now
+  // that the user has actually claimed this webview. Must be installed
+  // before bootstrapWindow returns so a pop_for_blank firing immediately
+  // after bootstrap can't race past the listener registration.
+  unlisteners.push(await onWindowActivateBlank(() => {
+    void autoSpawnInitialTab();
+  }));
+  unlisteners.push(await onMenuCopy(() => {
     const el = focusedEditable();
     if (el) void copyFromInput(el);
     else copyCurrentSelection();
-  });
-  await onMenuPaste(() => {
+  }));
+  unlisteners.push(await onMenuPaste(() => {
     const el = focusedEditable();
     if (el) void pasteIntoInput(el);
     else void pasteFromClipboard();
-  });
-  await onMenuSelectAll(() => {
+  }));
+  unlisteners.push(await onMenuSelectAll(() => {
     const el = focusedEditable();
     if (el) {
       try {
@@ -456,31 +502,38 @@ onMounted(async () => {
     } else {
       selectAll();
     }
-  });
-  await onSshHostKeyMismatch((p) => (hostKeyModal.value = p));
-  await onSshHostKeyFirstConnect(async (p) => {
+  }));
+  unlisteners.push(await onSshHostKeyMismatch((p) => (hostKeyModal.value = p)));
+  unlisteners.push(await onSshHostKeyFirstConnect(async (p) => {
     try {
       await recordHostFingerprint(p.host_id, p.fingerprint, p.algorithm);
     } catch (err) {
       console.error("recordHostFingerprint failed:", err);
     }
-  });
-  await onSshPortForwardError((p) => {
+  }));
+  unlisteners.push(await onSshPortForwardError((p) => {
     console.error(
       `[ssh] port-forward error tab=${p.tab_id} host=${p.host_id}: ${p.message}`,
     );
-  });
+  }));
 
-  // Bootstrap: hydrate any tabs the backend has waiting for this window
-  // (tear-off hand-off), or spawn a fresh terminal.
-  const owned = await listTabsForWindow(myLabel);
-  if (owned.length > 0) {
-    hydrateTabs(owned);
-    reflowActive(active.value);
-    focusCanvas();
-  } else {
-    await spawnNewTab();
+  // Bootstrap: ask the backend whether this window is a pre-warmed
+  // reserve (sit idle until activation) or a normal window (hydrate
+  // tabs or spawn a fresh one). Invoking bootstrapWindow is also what
+  // marks a reserve `Ready` on the backend, so it's safe to be popped
+  // for the next activation after this call returns.
+  const boot = await bootstrapWindow(myLabel);
+  if (boot.mode === "normal") {
+    if (boot.tabs.length > 0) {
+      hydrateTabs(boot.tabs);
+      reflowActive(active.value);
+      focusCanvas();
+    } else {
+      await autoSpawnInitialTab();
+    }
   }
+  // mode === "reserve": stay idle. onTabAttached + onWindowActivateBlank
+  // (installed above) handle whichever activation fires.
 
   // First-run macOS Full Disk Access explainer: primary window only, once
   // per machine, and only if it isn't already granted. Off macOS the
@@ -511,6 +564,14 @@ onBeforeUnmount(() => {
   window.removeEventListener("paste", onPaste);
   window.removeEventListener("contextmenu", onContextMenu);
   if (updateTimer !== undefined) clearInterval(updateTimer);
+  for (const fn of unlisteners) {
+    try {
+      fn();
+    } catch (e) {
+      console.error("unlisten failed:", e);
+    }
+  }
+  unlisteners.length = 0;
 });
 </script>
 

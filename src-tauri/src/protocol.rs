@@ -1,5 +1,7 @@
 use serde::Serialize;
 
+use crate::window_pool::WindowMode;
+
 pub const FLAG_BOLD: u8 = 1 << 0;
 pub const FLAG_ITALIC: u8 = 1 << 1;
 pub const FLAG_UNDERLINE: u8 = 1 << 2;
@@ -67,6 +69,15 @@ pub const CURSOR_STYLE_BLOCK: u8 = 0;
 pub const CURSOR_STYLE_BAR: u8 = 1;
 pub const CURSOR_STYLE_UNDERLINE: u8 = 2;
 pub const CURSOR_STYLE_BLOCK_HOLLOW: u8 = 3;
+
+/// Returned by `bootstrap_window` so the frontend knows whether it should
+/// proceed with the normal hydrate/spawn path or sit idle as a pre-warmed
+/// reserve waiting for an activation.
+#[derive(Serialize, Clone, Debug)]
+pub struct WindowBootstrap {
+    pub mode: WindowMode,
+    pub tabs: Vec<TabInfo>,
+}
 
 #[derive(Serialize, Clone, Debug)]
 pub struct SshHostKeyMismatch {
