@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { Palette } from "lucide-vue-next";
-import { computed } from "vue";
+import { computed, ref } from "vue";
+
+import { getVersion } from "@tauri-apps/api/app";
 
 import { applyTheme, useTheme } from "../state/theme";
 import { findPresetMatch, PRESETS } from "../state/themes";
@@ -12,6 +14,11 @@ const { theme } = useTheme();
 const { status: updateStatus } = useUpdate();
 
 const activeName = computed(() => findPresetMatch(theme.value));
+
+const version = ref<string>("");
+void getVersion().then((v) => {
+  version.value = v;
+});
 
 async function pickPreset(idx: number) {
   await applyTheme(PRESETS[idx].theme);
@@ -84,6 +91,9 @@ function classFor(active: boolean): string {
       >
         {{ updateStatus === "checking" ? "Checking…" : "Check for updates" }}
       </Button>
+      <span v-if="version" class="text-xs text-fg-muted">
+        Current version {{ version }}
+      </span>
     </div>
   </div>
 </template>
