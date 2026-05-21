@@ -17,6 +17,7 @@ const visible = computed(
   () =>
     status.value === "available" ||
     status.value === "downloading" ||
+    status.value === "installing" ||
     status.value === "uptodate" ||
     status.value === "error",
 );
@@ -94,6 +95,18 @@ const percent = computed(() =>
         </div>
         <span class="text-[11px] text-fg-muted">
           {{ percent !== null ? `Downloading… ${percent}%` : "Downloading…" }}
+        </span>
+      </div>
+
+      <div
+        v-else-if="status === 'installing'"
+        class="flex flex-col gap-1.5"
+      >
+        <div class="h-1.5 w-full overflow-hidden rounded-full bg-surface-2">
+          <div class="h-full rounded-full bg-accent animate-pulse w-1/3" />
+        </div>
+        <span class="text-[11px] text-fg-muted">
+          Installing… Prmpt will restart.
         </span>
       </div>
 

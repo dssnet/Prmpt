@@ -638,3 +638,19 @@ pub async fn secret_remove(
 ) -> AppResult<()> {
     store.remove(&key).await
 }
+
+/// Called by the frontend right before it spawns the platform installer
+/// for an auto-update. Sets `SHUTTING_DOWN` so the per-window Destroyed
+/// handler stops refilling the reserve pool, then closes every OS-level
+/// webview except the caller (which is still driving the install). The
+/// caller exits / relaunches itself once `install()` returns.
+#[tauri::command]
+pub fn prepare_for_update(app: AppHandle, current_label: String) {
+    crate::SHUTTING_DOWN.store(true, std::sync::atomic::Ordering::SeqCst);
+    for (label, window) in app.webview_windows() {
+        if label == current_label {
+            continue;
+        }
+        let _ = window.close();
+    }
+}

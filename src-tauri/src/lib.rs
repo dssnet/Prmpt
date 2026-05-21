@@ -137,6 +137,7 @@ pub fn run() {
                 .build(),
         )
         .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_os::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .manage(registry)
         .manage(cfg)
@@ -172,6 +173,7 @@ pub fn run() {
             commands::secret_get,
             commands::secret_set,
             commands::secret_remove,
+            commands::prepare_for_update,
         ]);
 
     // The updater plugin is desktop-only (mobile distributes via the

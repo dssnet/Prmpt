@@ -1,4 +1,5 @@
-import { relaunch } from "@tauri-apps/plugin-process";
+import { type } from "@tauri-apps/plugin-os";
+import { exit, relaunch } from "@tauri-apps/plugin-process";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 
 // How often the app re-checks GitHub for a newer release while running,
@@ -23,18 +24,20 @@ export async function checkForUpdate(): Promise<Update | null> {
 }
 
 /**
- * Download + install the given update, reporting download progress as a
- * 0..1 fraction (or `null` while the total size is unknown), then
- * relaunch into the new version. Throws on failure so the caller can
- * surface it; the app stays on the old version until the relaunch.
+ * Download the update bytes to a temp location without installing,
+ * reporting progress as a 0..1 fraction (or `null` while the total size
+ * is unknown). Throws on failure. Kept separate from `installAndExit`
+ * so the caller can close all other OS windows in between — that gives
+ * the user a clean "Installing…" state and, on Windows, ensures no
+ * other window is racing the NSIS installer when it fires.
  */
-export async function downloadAndInstall(
+export async function downloadUpdate(
   update: Update,
   onProgress?: (fraction: number | null) => void,
 ): Promise<void> {
   let total = 0;
   let received = 0;
-  await update.downloadAndInstall((event) => {
+  await update.download((event) => {
     switch (event.event) {
       case "Started":
         total = event.data.contentLength ?? 0;
@@ -49,5 +52,27 @@ export async function downloadAndInstall(
         break;
     }
   });
-  await relaunch();
+}
+
+/**
+ * Run the platform installer for an already-downloaded update, then
+ * leave the current process so the new version can take over.
+ *
+ * On Windows the NSIS installer relaunches the app itself; calling
+ * `relaunch()` here races the installer (re-spawning the old .exe right
+ * as the installer wants to overwrite it, which surfaces as the
+ * "prmpt.exe is still running" install error). On macOS/Linux nothing
+ * else restarts us, so we have to call `relaunch()` ourselves.
+ *
+ * Either branch terminates the process; the return type is `never` to
+ * make that explicit at call sites.
+ */
+export async function installAndExit(update: Update): Promise<never> {
+  await update.install();
+  if (type() === "windows") {
+    await exit(0);
+  } else {
+    await relaunch();
+  }
+  throw new Error("unreachable: process did not exit after install");
 }

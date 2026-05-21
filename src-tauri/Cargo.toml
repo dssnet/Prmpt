@@ -40,6 +40,10 @@ tauri-plugin-sql = { version = "2", features = ["sqlite"] }
 iota_stronghold = "2"
 # `relaunch()` after an in-place update install. Works on all targets.
 tauri-plugin-process = "2"
+# OS detection for the updater path — on Windows the NSIS installer
+# relaunches the app itself, so we need to branch and call exit() instead
+# of relaunch() to avoid racing the installer's restart.
+tauri-plugin-os = "2"
 # Read the clipboard via OS APIs (NSPasteboard / Win32) instead of
 # `navigator.clipboard.readText()`. The webview's clipboard-read API is
 # gated by a per-call user-consent UI in production builds (macOS

@@ -1,14 +1,17 @@
 import { ref, shallowRef } from "vue";
 
+import { invoke } from "@tauri-apps/api/core";
+import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { type Update } from "@tauri-apps/plugin-updater";
 
-import { checkForUpdate, downloadAndInstall } from "../updater";
+import { checkForUpdate, downloadUpdate, installAndExit } from "../updater";
 
 export type UpdateStatus =
   | "idle"
   | "checking"
   | "available"
   | "downloading"
+  | "installing"
   | "uptodate"
   | "error";
 
@@ -41,6 +44,7 @@ export async function runUpdateCheck(announce = false): Promise<void> {
   if (
     status.value === "available" ||
     status.value === "downloading" ||
+    status.value === "installing" ||
     status.value === "checking"
   ) {
     return;
@@ -57,17 +61,29 @@ export async function runUpdateCheck(announce = false): Promise<void> {
   }
 }
 
-/** Download + install the pending update, then relaunch. */
+/**
+ * Download the pending update, then close every other OS window via the
+ * `prepare_for_update` backend command, then run the platform installer
+ * and exit. The other-windows close happens *after* a successful
+ * download so a network failure doesn't tear down the user's session
+ * for nothing; it happens *before* `installAndExit` so the NSIS
+ * installer on Windows isn't fighting other live webviews.
+ */
 export async function installUpdate(): Promise<void> {
   const update = available.value;
   if (!update) return;
   status.value = "downloading";
   progress.value = null;
   try {
-    await downloadAndInstall(update, (f) => {
+    await downloadUpdate(update, (f) => {
       progress.value = f;
     });
-    // relaunch() replaces the process; nothing past here runs.
+    status.value = "installing";
+    await invoke("prepare_for_update", {
+      currentLabel: getCurrentWebviewWindow().label,
+    });
+    await installAndExit(update);
+    // unreachable — installAndExit terminates the process.
   } catch (err) {
     console.error("[updater] install failed:", err);
     errorMessage.value = String(err);
