@@ -401,8 +401,20 @@ fn install_app_menu<R: tauri::Runtime>(
         .item(&quit)
         .build()?;
 
-    let mut copy_builder = IconMenuItemBuilder::with_id("copy", "Copy").accelerator("CmdOrCtrl+C");
-    let mut paste_builder = IconMenuItemBuilder::with_id("paste", "Paste").accelerator("CmdOrCtrl+V");
+    // Windows: the OS-level window-menu accelerator table claims plain
+    // `Ctrl+C`/`Ctrl+V` before WebView2 sees them, so the terminal can
+    // never get SIGINT or paste from the bare chord. Bind the menu to
+    // `Ctrl+Shift+C/V` instead and let the keymap in App.vue handle the
+    // plain chords directly (Windows Terminal convention).
+    #[cfg(target_os = "macos")]
+    let (copy_accel, paste_accel) = ("CmdOrCtrl+C", "CmdOrCtrl+V");
+    #[cfg(target_os = "windows")]
+    let (copy_accel, paste_accel) = ("Ctrl+Shift+C", "Ctrl+Shift+V");
+    #[cfg(target_os = "linux")]
+    let (copy_accel, paste_accel) = ("CmdOrCtrl+C", "CmdOrCtrl+V");
+
+    let mut copy_builder = IconMenuItemBuilder::with_id("copy", "Copy").accelerator(copy_accel);
+    let mut paste_builder = IconMenuItemBuilder::with_id("paste", "Paste").accelerator(paste_accel);
     #[cfg(target_os = "macos")]
     {
         if let Some(img) = macos::sf_symbol_image("doc.on.doc") {

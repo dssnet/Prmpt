@@ -277,6 +277,7 @@ async function pasteIntoInput(el: EditableInput): Promise<void> {
 const IS_MAC =
   /Mac|iPhone|iPod|iPad/.test(navigator.platform) ||
   navigator.userAgent.includes("Mac OS X");
+const IS_WIN = !IS_MAC && /Win/i.test(navigator.platform);
 
 // True when the platform's primary app-shortcut chord is held.
 function isPrimaryMod(e: KeyboardEvent): boolean {
@@ -397,6 +398,21 @@ function onKeyDown(e: KeyboardEvent) {
   const editable = focusedEditable() != null;
   const key = canonicalKey(e);
   const primary = isPrimaryMod(e);
+  // Windows Terminal convention: bare Ctrl+C copies when there's a
+  // selection (falls through to SIGINT otherwise), bare Ctrl+V pastes.
+  // The menu owns Ctrl+Shift+C/V on Windows (see install_app_menu).
+  if (IS_WIN && !editable && e.ctrlKey && !e.shiftKey && !e.altKey && !e.metaKey) {
+    if ((key === "c" || key === "C") && hasSelection()) {
+      e.preventDefault();
+      copyCurrentSelection();
+      return;
+    }
+    if (key === "v" || key === "V") {
+      e.preventDefault();
+      void pasteFromClipboard();
+      return;
+    }
+  }
   for (const s of shortcuts) {
     if (s.mod === "meta" && !primary) continue;
     if (s.mod === "shift" && !(e.shiftKey && !primary)) continue;
