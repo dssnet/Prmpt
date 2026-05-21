@@ -161,6 +161,18 @@ pub fn forget_tab(registry: State<'_, SharedRegistry>, tab_id: u64) {
     registry.forget(tab_id);
 }
 
+/// Forwards a frontend `console.*` call to the Tauri dev console. The
+/// frontend patches `console.log/info/warn/error/debug` to invoke this
+/// in addition to the original (so devtools still shows the message).
+#[tauri::command]
+pub fn frontend_log(window: WebviewWindow, level: String, message: String) {
+    let label = window.label();
+    let lvl = level.to_uppercase();
+    // `eprintln!` so logs aren't interleaved with tauri's own stdout
+    // pipes and so they remain visible when stdout is being captured.
+    eprintln!("[fe:{label}] [{lvl}] {message}");
+}
+
 #[derive(serde::Deserialize)]
 pub struct TearOffArgs {
     pub tab_id: u64,

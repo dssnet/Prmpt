@@ -156,6 +156,7 @@ pub fn run() {
             commands::get_config,
             commands::set_theme,
             commands::forget_tab,
+            commands::frontend_log,
             commands::show_context_menu,
             commands::tear_off_tab,
             commands::attach_tab,
