@@ -135,7 +135,7 @@ pub fn run() {
     // will surface the same error on first secret access (so SSH
     // features fail with a clear message), and the user can retry by
     // relaunching. Panicking here would be strictly worse UX.
-    if let Err(e) = stronghold::prepare_unlock() {
+    if let Err(e) = stronghold::prepare_unlock_cached() {
         eprintln!("[stronghold] startup unlock failed: {e}; continuing with secrets locked");
     }
 

@@ -451,7 +451,7 @@ pub fn window_at_screen_point(
 /// `secret_get`/`secret_set`/`secret_remove` now.
 #[tauri::command]
 pub fn get_stronghold_unlock() -> AppResult<StrongholdUnlock> {
-    stronghold::prepare_unlock()
+    stronghold::prepare_unlock_cached()
 }
 
 /// URL the frontend should pass to `Database.load(...)`. Resolved

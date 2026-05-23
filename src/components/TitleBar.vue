@@ -1,5 +1,8 @@
 <script setup lang="ts">
 import { computed } from "vue";
+import { Lock } from "lucide-vue-next";
+import { Tooltip } from "./ui";
+import { isStrongholdLocked } from "../state/secrets";
 import { useTabs } from "../state/tabs";
 
 const { activeTitle } = useTabs();
@@ -52,6 +55,23 @@ const transitionDuration = computed(() => {
       class="absolute left-0 top-0 bottom-0 bg-bg pointer-events-none"
       :style="{ width: 'var(--spacing-traffic-lights)' }"
     ></div>
+    <!-- Status indicator: secrets store is unreachable (e.g. user dismissed the
+         platform keychain prompt). Hidden when secrets are usable. The next
+         secret IPC (boot openSecrets, SSH connect, save-from-dialog) flips
+         the state via the wrappers in `src/secrets.ts`. -->
+    <span
+      v-if="isStrongholdLocked"
+      class="absolute right-2 top-1/2 -translate-y-1/2 text-fg-muted"
+    >
+      <Tooltip
+        placement="bottom-end"
+        text="Secrets locked — open a saved SSH host to retry the keychain prompt"
+      >
+        <span role="img" aria-label="Secrets locked" class="flex items-center">
+          <Lock :size="12" />
+        </span>
+      </Tooltip>
+    </span>
   </div>
 </template>
 

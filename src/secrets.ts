@@ -12,6 +12,11 @@
 
 import { invoke } from "@tauri-apps/api/core";
 
+import {
+  markStrongholdLocked,
+  markStrongholdUnlocked,
+} from "./state/secrets";
+
 interface StrongholdUnlock {
   snapshot_path: string;
   password: string;
@@ -26,8 +31,14 @@ interface StrongholdUnlock {
  * Resolves to `true` in that case (caller should run `markAllBroken`).
  */
 export async function openSecrets(): Promise<boolean> {
-  const unlock = await invoke<StrongholdUnlock>("get_stronghold_unlock");
-  return unlock.was_quarantined;
+  try {
+    const unlock = await invoke<StrongholdUnlock>("get_stronghold_unlock");
+    markStrongholdUnlocked();
+    return unlock.was_quarantined;
+  } catch (e) {
+    markStrongholdLocked();
+    throw e;
+  }
 }
 
 const encoder = new TextEncoder();
@@ -35,19 +46,40 @@ const decoder = new TextDecoder();
 
 /** Save a UTF-8 string under `key`. Commits the snapshot to disk. */
 export async function saveSecret(key: string, value: string): Promise<void> {
-  await invoke("secret_set", { key, value: Array.from(encoder.encode(value)) });
+  try {
+    await invoke("secret_set", {
+      key,
+      value: Array.from(encoder.encode(value)),
+    });
+    markStrongholdUnlocked();
+  } catch (e) {
+    markStrongholdLocked();
+    throw e;
+  }
 }
 
 /** Read a UTF-8 string previously stored with `saveSecret`. */
 export async function loadSecret(key: string): Promise<string | null> {
-  const bytes = await invoke<number[] | null>("secret_get", { key });
-  if (!bytes) return null;
-  return decoder.decode(new Uint8Array(bytes));
+  try {
+    const bytes = await invoke<number[] | null>("secret_get", { key });
+    markStrongholdUnlocked();
+    if (!bytes) return null;
+    return decoder.decode(new Uint8Array(bytes));
+  } catch (e) {
+    markStrongholdLocked();
+    throw e;
+  }
 }
 
 /** Remove a secret. Commits the snapshot to disk. */
 export async function deleteSecret(key: string): Promise<void> {
-  await invoke("secret_remove", { key });
+  try {
+    await invoke("secret_remove", { key });
+    markStrongholdUnlocked();
+  } catch (e) {
+    markStrongholdLocked();
+    throw e;
+  }
 }
 
 // ---------- record-key helpers ----------

@@ -121,13 +121,17 @@ mod backend {
 #[cfg(test)]
 pub mod testing {
     use super::*;
-    use std::sync::Mutex;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Mutex,
+    };
 
     /// In-memory `SecureStore` for unit tests. Optionally simulates a
     /// backend that's unavailable (so the file-fallback branches can be
     /// exercised).
     pub struct MockStore {
         inner: Mutex<MockState>,
+        load_calls: AtomicUsize,
     }
 
     struct MockState {
@@ -144,6 +148,7 @@ pub mod testing {
                     load_err: None,
                     store_err: None,
                 }),
+                load_calls: AtomicUsize::new(0),
             }
         }
         pub fn with_key(k: [u8; 32]) -> Self {
@@ -177,10 +182,16 @@ pub mod testing {
         pub fn stored_key(&self) -> Option<[u8; 32]> {
             self.inner.lock().unwrap().key
         }
+        /// How many times `load()` has been invoked. Used by cache tests
+        /// to verify the keychain isn't re-read after a result is cached.
+        pub fn load_count(&self) -> usize {
+            self.load_calls.load(Ordering::SeqCst)
+        }
     }
 
     impl SecureStore for MockStore {
         fn load(&self) -> Result<Option<[u8; 32]>, SecureStoreError> {
+            self.load_calls.fetch_add(1, Ordering::SeqCst);
             let st = self.inner.lock().unwrap();
             if let Some(e) = &st.load_err {
                 return Err(match e {

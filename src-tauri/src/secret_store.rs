@@ -22,7 +22,7 @@ use tokio::sync::Mutex;
 use zeroize::Zeroizing;
 
 use crate::error::{AppError, AppResult};
-use crate::stronghold::prepare_unlock;
+use crate::stronghold::prepare_unlock_refresh;
 
 /// Matches the `CLIENT_NAME` constant in the old JS-side `secrets.ts`
 /// so we keep reading the same client out of pre-existing snapshots.
@@ -53,7 +53,11 @@ impl SecretStore {
             return Ok(guard);
         }
 
-        let unlock = prepare_unlock()?;
+        // Use the refresh variant so a user who declined the boot-time
+        // keychain prompt gets a fresh chance to approve when they open
+        // an SSH host, rather than staying locked out for the process
+        // lifetime. A cached success short-circuits — no extra prompt.
+        let unlock = prepare_unlock_refresh()?;
         let password_bytes = hex::decode(&unlock.password)
             .map_err(|e| AppError::Crypto(format!("decode boot password: {e}")))?;
         let path = SnapshotPath::from_path(&unlock.snapshot_path);

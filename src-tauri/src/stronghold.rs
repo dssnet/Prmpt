@@ -16,10 +16,18 @@
 //!    flag) to the frontend via `get_stronghold_unlock`, and to
 //!    [`crate::secret_store`] which uses it to load the snapshot the
 //!    first time a secret is accessed.
+//!
+//! The keychain itself is hit at most once per process per outcome:
+//! a static [`UnlockCache`] memoizes both successes and failures so the
+//! boot-time call sites (Rust startup + per-window IPC) share one
+//! prompt. [`prepare_unlock_refresh`] is the only path that re-prompts
+//! on a cached failure — used by the secret store so a user who
+//! declined at boot can retry by initiating an SSH connect.
 
 use std::{
     io::Write,
     path::{Path, PathBuf},
+    sync::{Mutex, OnceLock},
 };
 
 use rand::RngCore;
@@ -43,28 +51,114 @@ pub struct StrongholdUnlock {
     pub was_quarantined: bool,
 }
 
+/// Process-wide cache for the boot-time unlock. Ensures the platform
+/// keychain is hit at most once per process for a given outcome — the
+/// boot-eager call, the per-window `get_stronghold_unlock` IPC, and the
+/// SSH-credential-fetch path all share the same cached state instead of
+/// each triggering their own keychain prompt.
+///
+/// `Pending` is the initial state. A first successful attempt populates
+/// `Success`; a failure populates `Failed`. [`prepare_unlock_cached`]
+/// returns either cached variant without re-prompting; the secret store
+/// uses [`prepare_unlock_refresh`] which re-attempts on `Failed` so a
+/// user who declined at boot can retry by initiating an SSH connect.
+enum UnlockCache {
+    Pending,
+    Success(StrongholdUnlock),
+    Failed(String),
+}
+
+static CACHE: OnceLock<Mutex<UnlockCache>> = OnceLock::new();
+
+fn cache_lock() -> std::sync::MutexGuard<'static, UnlockCache> {
+    let m = CACHE.get_or_init(|| Mutex::new(UnlockCache::Pending));
+    m.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Return the cached unlock if any prior attempt this process has
+/// resolved (success **or** failure). Only if the cache is still
+/// `Pending` do we actually hit the keychain.
+///
+/// Use this from boot-time call sites — Rust startup
+/// (`lib.rs::run`) and the per-window `get_stronghold_unlock` IPC —
+/// where the goal is to learn the result without re-prompting.
+pub fn prepare_unlock_cached() -> AppResult<StrongholdUnlock> {
+    prepare_unlock_cached_inner(&PlatformStore, &boot_password_path()?, &snapshot_path()?)
+}
+
+/// Return the cached unlock if a prior attempt succeeded; otherwise
+/// re-attempt (which on macOS triggers the keychain prompt). Use this
+/// from user-initiated paths — specifically `SecretStore::ensure_loaded`
+/// when an SSH connect needs a credential — so a user who declined the
+/// boot-time prompt gets a fresh chance to approve rather than being
+/// locked out for the process lifetime.
+pub fn prepare_unlock_refresh() -> AppResult<StrongholdUnlock> {
+    prepare_unlock_refresh_inner(&PlatformStore, &boot_password_path()?, &snapshot_path()?)
+}
+
+fn prepare_unlock_cached_inner<S: SecureStore>(
+    store: &S,
+    boot_password_path: &Path,
+    snapshot_path: &Path,
+) -> AppResult<StrongholdUnlock> {
+    let mut guard = cache_lock();
+    match &*guard {
+        UnlockCache::Success(u) => return Ok(u.clone()),
+        UnlockCache::Failed(msg) => return Err(AppError::Crypto(msg.clone())),
+        UnlockCache::Pending => {}
+    }
+    let result = do_prepare_unlock(store, boot_password_path, snapshot_path);
+    *guard = match &result {
+        Ok(u) => UnlockCache::Success(u.clone()),
+        Err(e) => UnlockCache::Failed(e.to_string()),
+    };
+    result
+}
+
+fn prepare_unlock_refresh_inner<S: SecureStore>(
+    store: &S,
+    boot_password_path: &Path,
+    snapshot_path: &Path,
+) -> AppResult<StrongholdUnlock> {
+    let mut guard = cache_lock();
+    if let UnlockCache::Success(u) = &*guard {
+        return Ok(u.clone());
+    }
+    let result = do_prepare_unlock(store, boot_password_path, snapshot_path);
+    *guard = match &result {
+        Ok(u) => UnlockCache::Success(u.clone()),
+        Err(e) => UnlockCache::Failed(e.to_string()),
+    };
+    result
+}
+
 /// Prepare the on-disk state needed to decrypt the snapshot: ensure a
 /// boot password exists and quarantine the snapshot if the password is
-/// fresh. Called once eagerly at startup, then again lazily by the
-/// secret store on first secret access.
-pub fn prepare_unlock() -> AppResult<StrongholdUnlock> {
-    let (password_bytes, password_was_fresh) = load_or_create_boot_password()?;
-    let snapshot = snapshot_path()?;
+/// fresh. The store and paths are parameters so unit tests can exercise
+/// the logic against `MockStore` + temp dirs without touching the real
+/// keychain or app data directory.
+fn do_prepare_unlock<S: SecureStore>(
+    store: &S,
+    boot_password_path: &Path,
+    snapshot_path: &Path,
+) -> AppResult<StrongholdUnlock> {
+    let (password_bytes, password_was_fresh) =
+        load_or_create_boot_password_with(store, boot_password_path)?;
     let mut quarantined = false;
 
     // Fresh boot password + existing snapshot ⇒ snapshot was encrypted
     // with some other key and can't be decrypted with what we have.
     // Move it aside before the JS plugin wastes seconds of scrypt
     // trying to open it.
-    if password_was_fresh && snapshot.exists() {
-        let aside = quarantine_path(&snapshot);
+    if password_was_fresh && snapshot_path.exists() {
+        let aside = quarantine_path(snapshot_path);
         eprintln!(
             "[stronghold] fresh boot password but snapshot exists; \
              quarantining {} → {} (old secrets are unrecoverable)",
-            snapshot.display(),
+            snapshot_path.display(),
             aside.display(),
         );
-        std::fs::rename(&snapshot, &aside).map_err(|e| {
+        std::fs::rename(snapshot_path, &aside).map_err(|e| {
             AppError::Crypto(format!(
                 "rename orphan snapshot to {}: {e}",
                 aside.display()
@@ -74,10 +168,17 @@ pub fn prepare_unlock() -> AppResult<StrongholdUnlock> {
     }
 
     Ok(StrongholdUnlock {
-        snapshot_path: snapshot.display().to_string(),
+        snapshot_path: snapshot_path.display().to_string(),
         password: hex::encode(&password_bytes),
         was_quarantined: quarantined,
     })
+}
+
+/// Drop the cache back to `Pending`. Test-only — production callers
+/// rely on the once-per-process semantics.
+#[cfg(test)]
+fn reset_cache_for_tests() {
+    *cache_lock() = UnlockCache::Pending;
 }
 
 /// `(password_bytes, freshly_generated)`. `freshly_generated` is `true`
@@ -86,12 +187,6 @@ pub fn prepare_unlock() -> AppResult<StrongholdUnlock> {
 /// decrypted with what we have. Migrating an existing key from the file
 /// into the secret store does *not* count as freshly-generated: the key
 /// itself is unchanged.
-fn load_or_create_boot_password() -> AppResult<(Vec<u8>, bool)> {
-    let path = boot_password_path()?;
-    let store = PlatformStore;
-    load_or_create_boot_password_with(&store, &path)
-}
-
 fn load_or_create_boot_password_with<S: SecureStore>(
     store: &S,
     file: &Path,
@@ -390,5 +485,85 @@ mod tests {
         let res = load_or_create_boot_password_with(&store, &path);
         assert!(res.is_err(), "wrong-length file must error, not generate fresh");
         let _ = std::fs::remove_file(&path);
+    }
+
+    // All cache assertions live in a single test because the cache is a
+    // process-wide static; `cargo test` runs tests in parallel and any
+    // sibling test exercising the cache would race. Sub-sections use
+    // `reset_cache_for_tests` to start each one from `Pending`.
+    #[test]
+    fn cache_behavior() {
+        // Section 1: cached path serves repeated callers from one keychain hit.
+        {
+            reset_cache_for_tests();
+            let snap = tmpfile("cache-1-snap"); // never created → no quarantine
+            let pw_path = tmpfile("cache-1-pw");
+            let store = MockStore::empty();
+
+            let u1 = prepare_unlock_cached_inner(&store, &pw_path, &snap).unwrap();
+            let u2 = prepare_unlock_cached_inner(&store, &pw_path, &snap).unwrap();
+            assert_eq!(u1.password, u2.password);
+            assert_eq!(
+                store.load_count(),
+                1,
+                "second cached call must not hit the keychain"
+            );
+            let _ = std::fs::remove_file(&pw_path);
+        }
+
+        // Section 2: cached failure stays cached — no retry, no re-prompt.
+        {
+            reset_cache_for_tests();
+            let snap = tmpfile("cache-2-snap");
+            let pw_path = tmpfile("cache-2-pw");
+            let store = MockStore::denied();
+
+            assert!(prepare_unlock_cached_inner(&store, &pw_path, &snap).is_err());
+            assert!(prepare_unlock_cached_inner(&store, &pw_path, &snap).is_err());
+            assert_eq!(
+                store.load_count(),
+                1,
+                "cached Failed must not re-attempt"
+            );
+        }
+
+        // Section 3: refresh re-attempts after a cached failure — that's
+        // what gives the SSH-connect path a fresh keychain prompt.
+        {
+            reset_cache_for_tests();
+            let snap = tmpfile("cache-3-snap");
+            let pw_path = tmpfile("cache-3-pw");
+            let store = MockStore::denied();
+
+            assert!(prepare_unlock_cached_inner(&store, &pw_path, &snap).is_err());
+            assert_eq!(store.load_count(), 1);
+            assert!(prepare_unlock_refresh_inner(&store, &pw_path, &snap).is_err());
+            assert_eq!(
+                store.load_count(),
+                2,
+                "refresh after Failed must re-prompt"
+            );
+        }
+
+        // Section 4: refresh after a cached success skips the keychain.
+        {
+            reset_cache_for_tests();
+            let snap = tmpfile("cache-4-snap");
+            let pw_path = tmpfile("cache-4-pw");
+            let store = MockStore::empty();
+
+            let u1 = prepare_unlock_cached_inner(&store, &pw_path, &snap).unwrap();
+            let u2 = prepare_unlock_refresh_inner(&store, &pw_path, &snap).unwrap();
+            assert_eq!(u1.password, u2.password);
+            assert_eq!(
+                store.load_count(),
+                1,
+                "refresh after Success must return cached value"
+            );
+            let _ = std::fs::remove_file(&pw_path);
+        }
+
+        // Leave the cache empty for any subsequent test invocations.
+        reset_cache_for_tests();
     }
 }
