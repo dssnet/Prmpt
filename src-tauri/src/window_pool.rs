@@ -155,6 +155,8 @@ impl WindowPool {
         let builder = builder
             .title_bar_style(platform::title_bar_style())
             .hidden_title(platform::hidden_title());
+        #[cfg(any(target_os = "windows", target_os = "linux"))]
+        let builder = builder.decorations(false);
         let window = builder.visible(false).build()?;
         configure_new_window(&window);
 

@@ -272,6 +272,8 @@ pub fn tear_off_tab(
     let builder = builder
         .title_bar_style(platform::title_bar_style())
         .hidden_title(platform::hidden_title());
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    let builder = builder.decorations(false);
     #[cfg(not(any(target_os = "ios", target_os = "android")))]
     let builder = builder.focused(true);
     let window = builder

@@ -337,6 +337,10 @@ fn open_blank_window(app: &AppHandle) -> tauri::Result<()> {
     let builder = builder
         .title_bar_style(platform::title_bar_style())
         .hidden_title(platform::hidden_title());
+    // Windows/Linux have no overlay-titlebar mode, so drop the native
+    // chrome entirely — `TitleBar.vue` provides the draggable region.
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    let builder = builder.decorations(false);
     #[cfg(not(any(target_os = "ios", target_os = "android")))]
     let builder = builder.focused(true);
     let win = builder.visible(true).build()?;

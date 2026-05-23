@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { computed } from "vue";
-import { Lock } from "lucide-vue-next";
+import { computed, onMounted, onUnmounted, ref } from "vue";
+import { Lock, Minus, Square, Copy, X } from "lucide-vue-next";
+import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { Tooltip } from "./ui";
 import { isStrongholdLocked } from "../state/secrets";
 import { useTabs } from "../state/tabs";
@@ -25,6 +26,40 @@ const transitionDuration = computed(() => {
     leave: LEAVE_MS,
   };
 });
+
+// macOS keeps its native traffic lights via the overlay titlebar; everywhere
+// else the native chrome is hidden (`decorations(false)` in the Rust window
+// builders) so we draw our own minimize/maximize/close.
+const IS_MAC =
+  typeof navigator !== "undefined" && /Mac|iPhone|iPod|iPad/.test(navigator.platform);
+const showWindowControls = !IS_MAC;
+
+const win = showWindowControls ? getCurrentWebviewWindow() : null;
+const isMaximized = ref(false);
+let unlistenResize: (() => void) | null = null;
+
+onMounted(async () => {
+  if (!win) return;
+  isMaximized.value = await win.isMaximized();
+  unlistenResize = await win.onResized(async () => {
+    isMaximized.value = await win.isMaximized();
+  });
+});
+
+onUnmounted(() => {
+  unlistenResize?.();
+  unlistenResize = null;
+});
+
+const onMinimize = () => {
+  void win?.minimize();
+};
+const onToggleMaximize = () => {
+  void win?.toggleMaximize();
+};
+const onClose = () => {
+  void win?.close();
+};
 </script>
 
 <template>
@@ -61,7 +96,8 @@ const transitionDuration = computed(() => {
          the state via the wrappers in `src/secrets.ts`. -->
     <span
       v-if="isStrongholdLocked"
-      class="absolute right-2 top-1/2 -translate-y-1/2 text-fg-muted"
+      class="absolute top-1/2 -translate-y-1/2 text-fg-muted"
+      :class="showWindowControls ? 'right-[128px]' : 'right-2'"
     >
       <Tooltip
         placement="bottom-end"
@@ -72,6 +108,39 @@ const transitionDuration = computed(() => {
         </span>
       </Tooltip>
     </span>
+    <!-- Windows/Linux window controls. Native chrome is off on those
+         platforms; macOS uses overlay traffic lights instead. The cluster
+         has `bg-bg` so the centered title slides behind it instead of
+         under the buttons. -->
+    <div
+      v-if="showWindowControls"
+      class="absolute right-0 top-0 bottom-0 flex items-stretch bg-bg"
+    >
+      <button
+        type="button"
+        class="w-10 flex items-center justify-center text-fg-muted hover:bg-surface-2 transition-colors"
+        aria-label="Minimize"
+        @click="onMinimize"
+      >
+        <Minus :size="14" />
+      </button>
+      <button
+        type="button"
+        class="w-10 flex items-center justify-center text-fg-muted hover:bg-surface-2 transition-colors"
+        :aria-label="isMaximized ? 'Restore' : 'Maximize'"
+        @click="onToggleMaximize"
+      >
+        <component :is="isMaximized ? Copy : Square" :size="12" />
+      </button>
+      <button
+        type="button"
+        class="w-10 flex items-center justify-center text-fg-muted hover:bg-danger hover:text-white transition-colors"
+        aria-label="Close"
+        @click="onClose"
+      >
+        <X :size="14" />
+      </button>
+    </div>
   </div>
 </template>
 
