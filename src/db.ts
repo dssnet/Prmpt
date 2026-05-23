@@ -191,6 +191,13 @@ export async function clearHostPasswordFlag(id: number): Promise<void> {
   );
 }
 
+export async function markHostHasPassword(id: number, value: boolean): Promise<void> {
+  await ensure().execute(
+    `UPDATE ssh_hosts SET has_password = $1, broken = 0, updated_at = $2 WHERE id = $3`,
+    [value ? 1 : 0, nowIso(), id],
+  );
+}
+
 export async function deleteHost(id: number): Promise<void> {
   await ensure().execute(`DELETE FROM ssh_port_forwards WHERE host_id = $1`, [id]);
   await ensure().execute(`DELETE FROM ssh_hosts WHERE id = $1`, [id]);
@@ -222,6 +229,22 @@ export async function listKeys(): Promise<SshKeyRow[]> {
      FROM ssh_keys ORDER BY label COLLATE NOCASE`,
   );
   return rows.map(keyFromRow);
+}
+
+export async function getKey(id: number): Promise<SshKeyRow | null> {
+  const rows = await ensure().select<RawKeyRow[]>(
+    `SELECT id, label, has_passphrase, public_key, broken, created_at, updated_at
+     FROM ssh_keys WHERE id = $1`,
+    [id],
+  );
+  return rows[0] ? keyFromRow(rows[0]) : null;
+}
+
+export async function markKeyHasPassphrase(id: number, value: boolean): Promise<void> {
+  await ensure().execute(
+    `UPDATE ssh_keys SET has_passphrase = $1, broken = 0, updated_at = $2 WHERE id = $3`,
+    [value ? 1 : 0, nowIso(), id],
+  );
 }
 
 function keyFromRow(r: RawKeyRow): SshKeyRow {

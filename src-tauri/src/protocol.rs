@@ -106,3 +106,19 @@ pub struct SshPortForwardError {
     pub forward_id: Option<i64>,
     pub message: String,
 }
+
+/// Emitted when the SSH session task could not establish or sustain a
+/// connection — wraps the bubbled-up error so the frontend can show a
+/// dismissable dialog (otherwise the tab just disappears and the user
+/// has no chance to read the error written to the PTY).
+#[derive(Serialize, Clone, Debug)]
+pub struct SshConnectError {
+    pub tab_id: u64,
+    pub host_id: i64,
+    pub host_label: String,
+    pub hostname: String,
+    pub message: String,
+    /// Coarse classification so the frontend can pick a good title.
+    /// One of: "connect", "auth", "channel", "other".
+    pub kind: String,
+}

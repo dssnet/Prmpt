@@ -36,7 +36,7 @@ use zeroize::ZeroizeOnDrop;
 
 use crate::{
     error::{AppError, AppResult},
-    protocol::{SshHostKeyFirstConnect, SshHostKeyMismatch, SshPortForwardError},
+    protocol::{SshConnectError, SshHostKeyFirstConnect, SshHostKeyMismatch, SshPortForwardError},
     tab::{PtyEvent, SshIoCmd},
 };
 
@@ -245,13 +245,69 @@ async fn session_task(
     cols: u16,
     rows: u16,
 ) {
-    if let Err(e) = run_session(app, owner_window, tab_id, config, &pty_tx, out_rx, cols, rows)
-        .await
+    // Preserve host identity for the error event; `config` is moved into
+    // `run_session`.
+    let host_id = config.host_id;
+    let host_label = config.label.clone();
+    let hostname = config.hostname.clone();
+    if let Err(e) = run_session(
+        app.clone(),
+        owner_window.clone(),
+        tab_id,
+        config,
+        &pty_tx,
+        out_rx,
+        cols,
+        rows,
+    )
+    .await
     {
-        let msg = format!("\r\n\x1b[31mSSH error:\x1b[0m {}\r\n", e);
+        let raw = e.to_string();
+        let msg = format!("\r\n\x1b[31mSSH error:\x1b[0m {}\r\n", raw);
         let _ = pty_tx.send(PtyEvent::Data(msg.into_bytes()));
+        let _ = app.emit_to(
+            EventTarget::webview_window(&owner_window),
+            "ssh:connect_error",
+            SshConnectError {
+                tab_id,
+                host_id,
+                host_label,
+                hostname,
+                kind: classify_connect_error(&raw).to_string(),
+                message: raw,
+            },
+        );
     }
     let _ = pty_tx.send(PtyEvent::Eof);
+}
+
+/// Coarse classification of an SSH error string so the frontend can pick
+/// a sensible title. The prefixes here mirror the `format!` calls in
+/// `run_session` / `authenticate`.
+fn classify_connect_error(msg: &str) -> &'static str {
+    let lower = msg.to_lowercase();
+    if lower.contains("authentication failed")
+        || lower.contains("password auth")
+        || lower.contains("publickey auth")
+        || lower.contains("parse private key")
+        || lower.contains("key wrap")
+        || lower.contains("agent auth")
+    {
+        "auth"
+    } else if lower.starts_with("connect:")
+        || lower.contains("could not resolve")
+        || lower.contains("io error")
+        || lower.contains("connection refused")
+    {
+        "connect"
+    } else if lower.contains("channel open")
+        || lower.contains("request pty")
+        || lower.contains("request shell")
+    {
+        "channel"
+    } else {
+        "other"
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

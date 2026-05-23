@@ -521,6 +521,40 @@ pub fn connect_ssh_host(
     Ok(id)
 }
 
+#[derive(serde::Serialize)]
+pub struct SshKeyInfo {
+    /// True if the key text parsed (with or without a passphrase being needed).
+    pub valid: bool,
+    /// True iff the key requires a passphrase to decode.
+    pub encrypted: bool,
+    /// Parser error string when `valid` is false. None otherwise.
+    pub error: Option<String>,
+}
+
+/// Inspects a PEM/OpenSSH-formatted private key without storing it. Used by
+/// the key add/edit dialog to surface a "password-protected" note, and by
+/// the connect flow to decide whether to prompt for a passphrase.
+#[tauri::command]
+pub fn inspect_ssh_key(private_key: String) -> SshKeyInfo {
+    match russh::keys::decode_secret_key(&private_key, None) {
+        Ok(_) => SshKeyInfo {
+            valid: true,
+            encrypted: false,
+            error: None,
+        },
+        Err(russh::keys::Error::KeyIsEncrypted) => SshKeyInfo {
+            valid: true,
+            encrypted: true,
+            error: None,
+        },
+        Err(e) => SshKeyInfo {
+            valid: false,
+            encrypted: false,
+            error: Some(e.to_string()),
+        },
+    }
+}
+
 #[cfg(not(any(target_os = "ios", target_os = "android")))]
 #[tauri::command]
 #[allow(unused_mut)] // `mut` is needed on macOS where the icon path reassigns the builders

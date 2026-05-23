@@ -325,6 +325,22 @@ export async function connectSshHost(args: SshConnectArgs): Promise<number> {
   });
 }
 
+export interface SshKeyInfo {
+  /** True if the key text parsed (with or without a passphrase being needed). */
+  valid: boolean;
+  /** True iff the key requires a passphrase to decode. */
+  encrypted: boolean;
+  /** Parser error string when `valid` is false. */
+  error: string | null;
+}
+
+/** Cheap parse-only probe of a private-key text; reveals whether the key is
+ *  encrypted so the UI can prompt for a passphrase. The key is not stored
+ *  by the backend. */
+export async function inspectSshKey(privateKey: string): Promise<SshKeyInfo> {
+  return await invoke<SshKeyInfo>("inspect_ssh_key", { privateKey });
+}
+
 export interface SshHostKeyMismatch {
   tab_id: number;
   host_id: number;
@@ -347,6 +363,17 @@ export interface SshPortForwardError {
   message: string;
 }
 
+export type SshConnectErrorKind = "connect" | "auth" | "channel" | "other";
+
+export interface SshConnectError {
+  tab_id: number;
+  host_id: number;
+  host_label: string;
+  hostname: string;
+  message: string;
+  kind: SshConnectErrorKind;
+}
+
 export function onSshHostKeyMismatch(
   handler: (payload: SshHostKeyMismatch) => void,
 ): Promise<UnlistenFn> {
@@ -363,4 +390,10 @@ export function onSshPortForwardError(
   handler: (payload: SshPortForwardError) => void,
 ): Promise<UnlistenFn> {
   return listenScoped<SshPortForwardError>("ssh:port_forward_error", handler);
+}
+
+export function onSshConnectError(
+  handler: (payload: SshConnectError) => void,
+): Promise<UnlistenFn> {
+  return listenScoped<SshConnectError>("ssh:connect_error", handler);
 }

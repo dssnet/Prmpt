@@ -16,6 +16,7 @@ import {
   onMenuPaste,
   onMenuSelectAll,
   onRender,
+  onSshConnectError,
   onSshHostKeyFirstConnect,
   onSshHostKeyMismatch,
   onSshPortForwardError,
@@ -28,6 +29,7 @@ import {
   windowAtScreenPoint,
   writeInput,
   type Config,
+  type SshConnectError,
   type SshHostKeyMismatch,
 } from "./ipc";
 import {
@@ -60,7 +62,10 @@ import {
 import FullDiskAccessModal from "./components/FullDiskAccessModal.vue";
 import HomeView from "./components/HomeView.vue";
 import HostKeyMismatchModal from "./components/HostKeyMismatchModal.vue";
+import PassphrasePromptModal from "./components/PassphrasePromptModal.vue";
+import SshConnectErrorModal from "./components/SshConnectErrorModal.vue";
 import UpdateModal from "./components/UpdateModal.vue";
+import { passphrasePromptState } from "./state/passphrase-prompt";
 import { runUpdateCheck } from "./state/update";
 import { UPDATE_CHECK_INTERVAL_MS } from "./updater";
 import TabBar from "./components/TabBar.vue";
@@ -71,6 +76,7 @@ const props = defineProps<{ config: Config }>();
 
 const { tabs, active } = useTabs();
 const hostKeyModal = ref<SshHostKeyMismatch | null>(null);
+const connectErrorModal = ref<SshConnectError | null>(null);
 const fdaModal = ref(false);
 
 const myLabel = currentWindowLabel();
@@ -89,6 +95,19 @@ function dismissFda(): void {
   // First-run only: once seen, never nag again on this machine.
   localStorage.setItem("prmpt.fdaOnboardingSeen", "1");
   fdaModal.value = false;
+}
+
+function dismissConnectError(): void {
+  connectErrorModal.value = null;
+  // The window-close-on-empty branch in `onExit` skipped its close while
+  // this modal was open. Re-run that check now so the window doesn't sit
+  // empty after the user dismisses the error.
+  const liveTerminals = tabs.value.filter((t) => t.kind !== "home");
+  if (liveTerminals.length === 0) {
+    closeCurrentWindow().catch((e) =>
+      console.error("close window failed:", e),
+    );
+  }
 }
 
 async function spawnNewTab(): Promise<void> {
@@ -470,16 +489,23 @@ onMounted(async () => {
     applyTerminalBg(p.default_bg);
   }));
   unlisteners.push(await onExit((p) => {
+    // Was this an SSH tab? If so, give the matching `ssh:connect_error`
+    // event a moment to land before we consider closing the window — event
+    // delivery order across the two channels (the direct `emit_to` and the
+    // PTY → tab thread → exit chain) isn't guaranteed, and we don't want
+    // to kill the window before the error modal mounts.
+    const wasSsh = tabs.value.find((t) => t.id === p.tab_id)?.kind === "ssh";
     handleExit(p);
-    // Closing the last terminal closes the window. The home tab stays
-    // resident, but a window with no live terminals has no reason to remain
-    // (matches iTerm2 / Terminal.app behavior).
-    const liveTerminals = tabs.value.filter((t) => t.kind !== "home");
-    if (liveTerminals.length === 0) {
-      closeCurrentWindow().catch((e) =>
-        console.error("close window failed:", e),
-      );
-    }
+    const maybeCloseWindow = () => {
+      const liveTerminals = tabs.value.filter((t) => t.kind !== "home");
+      if (liveTerminals.length === 0 && !connectErrorModal.value) {
+        closeCurrentWindow().catch((e) =>
+          console.error("close window failed:", e),
+        );
+      }
+    };
+    if (wasSsh) window.setTimeout(maybeCloseWindow, 200);
+    else maybeCloseWindow();
   }));
   unlisteners.push(await onTabAttached((p) => {
     // Sticky: once a tab was attached here, never let a stray
@@ -531,6 +557,9 @@ onMounted(async () => {
     console.error(
       `[ssh] port-forward error tab=${p.tab_id} host=${p.host_id}: ${p.message}`,
     );
+  }));
+  unlisteners.push(await onSshConnectError((p) => {
+    connectErrorModal.value = p;
   }));
 
   // Bootstrap: ask the backend whether this window is a pre-warmed
@@ -608,5 +637,14 @@ onBeforeUnmount(() => {
     @close="hostKeyModal = null"
   />
   <FullDiskAccessModal v-if="fdaModal" @close="dismissFda" />
+  <PassphrasePromptModal
+    v-if="passphrasePromptState"
+    :state="passphrasePromptState"
+  />
+  <SshConnectErrorModal
+    v-if="connectErrorModal"
+    :payload="connectErrorModal"
+    @close="dismissConnectError"
+  />
   <UpdateModal />
 </template>

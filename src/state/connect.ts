@@ -1,11 +1,19 @@
-import { listPortForwards, type SshHostRow } from "../db";
+import {
+  getKey,
+  listPortForwards,
+  markHostHasPassword,
+  markKeyHasPassphrase,
+  type SshHostRow,
+} from "../db";
+import { inspectSshKey, type SshAuthConfig } from "../ipc";
 import {
   hostPasswordKey,
   keyPassphraseKey,
   keyPrivateKey,
   loadSecret,
+  saveSecret,
 } from "../secrets";
-import { type SshAuthConfig } from "../ipc";
+import { promptPassphrase } from "./passphrase-prompt";
 import {
   computeDims,
   focusCanvas,
@@ -16,13 +24,25 @@ import { spawnSsh, useTabs } from "./tabs";
 
 export async function resolveAuth(host: SshHostRow): Promise<SshAuthConfig> {
   if (host.auth_method === "agent") return { kind: "agent" };
+
   if (host.auth_method === "password") {
-    const pw = await loadSecret(hostPasswordKey(host.id));
+    let pw = await loadSecret(hostPasswordKey(host.id));
     if (pw == null) {
-      throw new Error("Password missing from Stronghold — edit the host and re-enter.");
+      const result = await promptPassphrase({
+        title: `Enter password for ${host.label}`,
+        hint: `${host.username}@${host.hostname}`,
+        savable: true,
+      });
+      if (result == null) throw new Error("Connection cancelled.");
+      pw = result.value;
+      if (result.save) {
+        await saveSecret(hostPasswordKey(host.id), pw);
+        await markHostHasPassword(host.id, true);
+      }
     }
     return { kind: "password", password: pw };
   }
+
   if (host.key_id == null) {
     throw new Error("Host configured for key auth but no key is linked.");
   }
@@ -30,7 +50,30 @@ export async function resolveAuth(host: SshHostRow): Promise<SshAuthConfig> {
   if (privateKey == null) {
     throw new Error("Private key missing from Stronghold — edit the key and re-paste.");
   }
-  const passphrase = await loadSecret(keyPassphraseKey(host.key_id));
+  let passphrase = await loadSecret(keyPassphraseKey(host.key_id));
+  if (passphrase == null) {
+    // No saved passphrase. The key might be unencrypted (then we can connect
+    // as-is) or encrypted (then we need to ask the user). Probe via the
+    // backend so we use the actual russh parser rather than a fragile
+    // text/base64 check.
+    const info = await inspectSshKey(privateKey);
+    if (info.encrypted) {
+      const keyId = host.key_id;
+      const keyRow = await getKey(keyId);
+      const keyLabel = keyRow?.label ?? `#${keyId}`;
+      const result = await promptPassphrase({
+        title: `Enter passphrase for key "${keyLabel}"`,
+        hint: "This SSH key is password-protected.",
+        savable: true,
+      });
+      if (result == null) throw new Error("Connection cancelled.");
+      passphrase = result.value;
+      if (result.save) {
+        await saveSecret(keyPassphraseKey(keyId), passphrase);
+        await markKeyHasPassphrase(keyId, true);
+      }
+    }
+  }
   return { kind: "key", private_key: privateKey, passphrase };
 }
 

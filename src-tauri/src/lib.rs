@@ -168,6 +168,7 @@ pub fn run() {
             commands::get_stronghold_unlock,
             commands::get_db_url,
             commands::connect_ssh_host,
+            commands::inspect_ssh_key,
             commands::full_disk_access_granted,
             commands::open_full_disk_access_settings,
             commands::secret_get,

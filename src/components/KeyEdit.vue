@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { onMounted, reactive, ref } from "vue";
+import { onMounted, onUnmounted, reactive, ref, watch } from "vue";
 
 import { saveKey, type SshKeyRow } from "../db";
+import { inspectSshKey } from "../ipc";
 import { deleteSecret, keyPassphraseKey, keyPrivateKey, saveSecret } from "../secrets";
 import {
   Button,
@@ -27,6 +28,43 @@ const errorText = ref<string | null>(null);
 const saving = ref(false);
 const fileInput = ref<HTMLInputElement | null>(null);
 
+// Tracks whether the *pasted/imported* private key in the textarea requires
+// a passphrase. null means "no key text to inspect yet". Updated via a
+// debounced call to the backend so typing doesn't fire an IPC per keystroke.
+const keyEncrypted = ref<boolean | null>(null);
+let inspectTimer: number | null = null;
+let inspectSeq = 0;
+
+watch(
+  () => form.privateKey,
+  (text) => {
+    const trimmed = text.trim();
+    if (inspectTimer != null) {
+      window.clearTimeout(inspectTimer);
+      inspectTimer = null;
+    }
+    if (!trimmed) {
+      keyEncrypted.value = null;
+      return;
+    }
+    const seq = ++inspectSeq;
+    inspectTimer = window.setTimeout(async () => {
+      try {
+        const info = await inspectSshKey(trimmed);
+        if (seq !== inspectSeq) return;
+        keyEncrypted.value = info.valid ? info.encrypted : null;
+      } catch {
+        if (seq !== inspectSeq) return;
+        keyEncrypted.value = null;
+      }
+    }, 200);
+  },
+);
+
+onUnmounted(() => {
+  if (inspectTimer != null) window.clearTimeout(inspectTimer);
+});
+
 onMounted(() => {
   const k = props.keyRow;
   form.label = k?.label ?? "";
@@ -35,6 +73,7 @@ onMounted(() => {
   form.clearPassphrase = false;
   form.publicKey = k?.public_key ?? "";
   errorText.value = null;
+  keyEncrypted.value = null;
 });
 
 function onImportClick() {
@@ -132,8 +171,18 @@ async function onSubmit() {
 (Leave blank when editing to keep existing.)"
           v-model="form.privateKey"
         />
+        <p v-if="keyEncrypted === true" class="m-0 mt-1 text-xs text-fg-muted">
+          🔒 This key is password-protected — set the passphrase below, or
+          leave it empty and you'll be asked when you connect.
+        </p>
       </FormRow>
       <FormRow label="Passphrase" html-for="ssh-key-passphrase">
+        <p
+          v-if="keyEncrypted !== true && !form.privateKey.trim() && keyRow?.has_passphrase"
+          class="m-0 text-xs text-fg-subtle"
+        >
+          A passphrase is currently saved for this key.
+        </p>
         <Input
           id="ssh-key-passphrase"
           type="password"
