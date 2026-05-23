@@ -128,7 +128,16 @@ pub fn run() {
     // The frontend calls `get_stronghold_unlock` early on to learn the
     // quarantine flag; the Rust-side SecretStore reads the same files
     // (lazily, on first secret access) to load the snapshot.
-    stronghold::prepare_unlock().expect("prepare stronghold snapshot");
+    //
+    // A non-fatal failure here means we couldn't unlock the boot key —
+    // the most common cause is the user denying the platform keychain
+    // prompt. The snapshot is left untouched on disk, the SecretStore
+    // will surface the same error on first secret access (so SSH
+    // features fail with a clear message), and the user can retry by
+    // relaunching. Panicking here would be strictly worse UX.
+    if let Err(e) = stronghold::prepare_unlock() {
+        eprintln!("[stronghold] startup unlock failed: {e}; continuing with secrets locked");
+    }
 
     let builder = tauri::Builder::default()
         .plugin(

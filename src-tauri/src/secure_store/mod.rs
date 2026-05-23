@@ -159,6 +159,21 @@ pub mod testing {
             drop(st);
             s
         }
+        /// Backend present but operations fail with `Backend(_)` — models
+        /// the user cancelling the macOS keychain prompt or entering the
+        /// wrong account password. `load()` errors; if the caller would
+        /// later try to `store()` a fresh key, that fails too (a real
+        /// denied keychain rejects writes for the same reason it rejects
+        /// reads). `stored_key` returns whatever was previously set so
+        /// tests can assert the keychain wasn't clobbered.
+        pub fn denied() -> Self {
+            let s = Self::empty();
+            let mut st = s.inner.lock().unwrap();
+            st.load_err = Some(SecureStoreError::Backend("mock denied".into()));
+            st.store_err = Some(SecureStoreError::Backend("mock denied".into()));
+            drop(st);
+            s
+        }
         pub fn stored_key(&self) -> Option<[u8; 32]> {
             self.inner.lock().unwrap().key
         }

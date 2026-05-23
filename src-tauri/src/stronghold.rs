@@ -96,6 +96,15 @@ fn load_or_create_boot_password_with<S: SecureStore>(
     store: &S,
     file: &Path,
 ) -> AppResult<(Vec<u8>, bool)> {
+    // Tracks the user-denied / keychain-locked case (e.g. user cancels
+    // the macOS keychain auth prompt). The key may still live in the
+    // keychain — we just couldn't read it this session. Critically
+    // different from `Ok(None)` (no key) and `Unavailable` (no backend):
+    // we must NOT generate a fresh key here, because doing so would
+    // quarantine the existing snapshot (rendering all saved SSH secrets
+    // unrecoverable) over a recoverable, retry-on-relaunch error.
+    let mut keychain_denied = false;
+
     // 1. Platform secret store first.
     match store.load() {
         Ok(Some(k)) => {
@@ -123,6 +132,7 @@ fn load_or_create_boot_password_with<S: SecureStore>(
             eprintln!(
                 "[secure_store] backend error on load ({reason}); falling back to legacy file"
             );
+            keychain_denied = true;
         }
     }
 
@@ -156,6 +166,19 @@ fn load_or_create_boot_password_with<S: SecureStore>(
         }
         // Key itself is unchanged; snapshot still decrypts. Not fresh.
         return Ok((bytes, false));
+    }
+
+    // Bail before generating a fresh key when the keychain refused
+    // access and there's no legacy file to fall back on. The existing
+    // snapshot stays untouched on disk so the next launch (with a
+    // successful keychain prompt) recovers the user's saved secrets.
+    if keychain_denied {
+        return Err(AppError::Crypto(
+            "platform keychain refused access; not generating a fresh boot key \
+             to avoid quarantining the existing snapshot — relaunch and approve \
+             the keychain prompt"
+                .into(),
+        ));
     }
 
     // 3. Generate fresh.
@@ -309,6 +332,53 @@ mod tests {
         assert!(!fresh2, "second boot must not quarantine the snapshot");
         assert_eq!(k1, k2);
 
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn keychain_denied_with_no_legacy_returns_err_and_does_not_touch_store() {
+        // Models: user cancels macOS keychain prompt at startup and
+        // there's no legacy stronghold.key file to fall back on. The
+        // call MUST fail rather than silently generate fresh, because
+        // `prepare_unlock` reads the fresh flag to decide whether to
+        // quarantine the (still-good) snapshot.
+        let path = tmpfile("denied");
+        let store = MockStore::denied();
+
+        let res = load_or_create_boot_password_with(&store, &path);
+        assert!(res.is_err(), "denied keychain + no legacy file must error");
+        assert!(
+            !path.exists(),
+            "must not write a legacy file on the denied path"
+        );
+        assert!(
+            store.stored_key().is_none(),
+            "denied keychain must not be clobbered with a fresh key"
+        );
+    }
+
+    #[test]
+    fn keychain_denied_with_legacy_uses_legacy_and_is_not_fresh() {
+        // Models: user cancels keychain prompt but a legacy
+        // stronghold.key file from a pre-keychain install is on disk.
+        // Loading must succeed against the legacy file and return
+        // `fresh = false` so prepare_unlock doesn't quarantine.
+        let path = tmpfile("denied_legacy");
+        let mut legacy_key = [0u8; 32];
+        for (i, b) in legacy_key.iter_mut().enumerate() {
+            *b = (i as u8).wrapping_mul(3);
+        }
+        std::fs::write(&path, legacy_key).unwrap();
+
+        let store = MockStore::denied();
+        let (k, fresh) = load_or_create_boot_password_with(&store, &path).unwrap();
+
+        assert!(!fresh, "legacy-file load must not flag fresh");
+        assert_eq!(k.as_slice(), legacy_key.as_slice());
+        assert!(
+            path.exists(),
+            "denied store can't migrate, legacy file must stay in place"
+        );
         let _ = std::fs::remove_file(&path);
     }
 

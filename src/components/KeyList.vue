@@ -1,10 +1,10 @@
 <script setup lang="ts">
-import { Plus, Trash2 } from "lucide-vue-next";
+import { AlertTriangle, Plus, Trash2 } from "lucide-vue-next";
 import { onMounted, ref } from "vue";
 
 import { deleteKey, listKeys, type SshKeyRow } from "../db";
 import { deleteSecret, keyPassphraseKey, keyPrivateKey } from "../secrets";
-import { Badge, Button, EmptyState, PageHeader } from "./ui";
+import { Button, EmptyState, PageHeader } from "./ui";
 
 const emit = defineEmits<{ back: []; addKey: []; editKey: [k: SshKeyRow] }>();
 
@@ -56,9 +56,16 @@ function publicSnippet(pub: string): string {
         class="flex items-center justify-between gap-3 px-3.5 py-3 border border-border rounded-lg bg-surface-1 hover:border-border-strong transition-colors duration-150"
       >
         <div class="flex flex-col gap-0.5 min-w-0 flex-1">
-          <div class="font-medium text-fg">{{ k.label }}</div>
+          <div class="font-medium text-fg flex items-center gap-1.5">
+            <span>{{ k.label }}</span>
+            <AlertTriangle
+              v-if="k.broken"
+              :size="14"
+              class="text-danger shrink-0 cursor-help"
+              title="Stored passphrase / private key could not be unlocked. Edit this key to re-enter it."
+            />
+          </div>
           <div class="text-xs text-fg-muted font-mono">{{ k.has_passphrase ? "passphrase saved" : "no passphrase" }}</div>
-          <Badge v-if="k.broken" tone="danger">needs re-entry</Badge>
           <div v-if="k.public_key" class="text-[11px] text-fg-subtle font-mono mt-1 break-all">
             {{ publicSnippet(k.public_key) }}
           </div>

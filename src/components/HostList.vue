@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { KeyRound, Plus, Settings, Trash2 } from "lucide-vue-next";
+import { AlertTriangle, KeyRound, Plus, Settings, Trash2 } from "lucide-vue-next";
 import { onMounted, ref } from "vue";
 
 import { deleteHost, listHosts, type SshHostRow } from "../db";
@@ -84,10 +84,17 @@ function badgeText(h: SshHostRow): string {
         class="flex items-center justify-between gap-3 px-3.5 py-3 border border-border rounded-lg bg-surface-1 hover:border-border-strong transition-colors duration-150"
       >
         <div class="flex flex-col gap-0.5 min-w-0 flex-1">
-          <div class="font-medium text-fg">{{ h.label }}</div>
+          <div class="font-medium text-fg flex items-center gap-1.5">
+            <span>{{ h.label }}</span>
+            <AlertTriangle
+              v-if="h.broken"
+              :size="14"
+              class="text-danger shrink-0 cursor-help"
+              title="Stored credentials could not be unlocked. Edit this host to re-enter the password."
+            />
+          </div>
           <div class="text-xs text-fg-muted font-mono">{{ h.username }}@{{ h.hostname }}:{{ h.port }}</div>
           <Badge>{{ badgeText(h) }}</Badge>
-          <Badge v-if="h.broken" tone="danger">needs re-entry</Badge>
           <div v-if="h.host_fp_sha256" class="text-[11px] text-fg-subtle font-mono mt-0.5">
             fp {{ h.host_key_alg ?? "" }} {{ h.host_fp_sha256.slice(0, 24) }}…
           </div>
