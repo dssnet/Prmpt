@@ -954,10 +954,13 @@ fn emit_render<'a>(
 
     // Selection coordinates on the frontend are screen-absolute (relative to
     // top of scrollback), so we ship the viewport's scrollback offset every
-    // frame. The scrollbar query is documented as "may be expensive" but only
-    // when viewport pins are arbitrary; the bottom-anchored common case is
-    // cheap, and the 8ms debounce caps frequency.
-    let viewport_top = terminal.scrollbar().map(|s| s.offset).unwrap_or(0);
+    // frame. `scrollback_total` lets the frontend size the scrollbar thumb.
+    // The scrollbar query is documented as "may be expensive" but only when
+    // viewport pins are arbitrary; the bottom-anchored common case is cheap,
+    // and the 8ms debounce caps frequency.
+    let sb = terminal.scrollbar().ok();
+    let viewport_top = sb.map(|s| s.offset).unwrap_or(0);
+    let scrollback_total = sb.map(|s| s.total).unwrap_or(rows as u64);
 
     let payload = RenderPayload {
         tab_id,
@@ -970,6 +973,7 @@ fn emit_render<'a>(
         generation,
         title,
         viewport_top,
+        scrollback_total,
     };
     let _ = app.emit_to(
         EventTarget::webview_window(owner_window),

@@ -2,10 +2,11 @@
 import { AlertTriangle, KeyRound, Plus, Settings, Trash2 } from "lucide-vue-next";
 import { onMounted, ref } from "vue";
 
+import { useDomScroll } from "../composables/useDomScroll";
 import { deleteHost, listHosts, type SshHostRow } from "../db";
 import { deleteSecret, hostPasswordKey } from "../secrets";
 import { connectHost } from "../state/connect";
-import { Badge, Button, EmptyState, PageHeader } from "./ui";
+import { Badge, Button, EmptyState, PageHeader, Scrollbar } from "./ui";
 
 const emit = defineEmits<{
   addHost: [];
@@ -17,6 +18,10 @@ const emit = defineEmits<{
 const hosts = ref<SshHostRow[]>([]);
 const errorText = ref<string | null>(null);
 const connecting = ref<number | null>(null);
+
+const scrollRoot = ref<HTMLElement | null>(null);
+const { position, range, viewportSize, onScrollTo, onPageBy } =
+  useDomScroll(scrollRoot);
 
 async function refresh() {
   errorText.value = null;
@@ -69,7 +74,8 @@ function badgeText(h: SshHostRow): string {
 </script>
 
 <template>
-  <div class="absolute inset-0 flex flex-col gap-3.5 px-9 pt-8 pb-6 overflow-y-auto text-fg">
+  <div class="absolute inset-0 text-fg">
+    <div ref="scrollRoot" class="absolute inset-0 flex flex-col gap-3.5 px-9 pt-8 pb-6 overflow-y-auto scrollbar-none">
     <PageHeader title="SSH hosts">
       <template #actions>
         <Button :icon="Plus" @click="emit('addHost')">Add host</Button>
@@ -118,7 +124,11 @@ function badgeText(h: SshHostRow): string {
     <EmptyState v-if="hosts.length === 0 || errorText">
       {{ errorText ?? "No SSH hosts yet. Click \"Add host\" to save your first connection." }}
     </EmptyState>
+    </div>
 
+    <!-- Settings button + custom scrollbar live outside the scroll container
+         so they stay pinned to the visible viewport rather than scrolling
+         with the list. -->
     <button
       type="button"
       title="Theme settings"
@@ -128,5 +138,12 @@ function badgeText(h: SshHostRow): string {
     >
       <Settings :size="20" />
     </button>
+    <Scrollbar
+      :position="position"
+      :range="range"
+      :viewport-size="viewportSize"
+      @scroll-to="onScrollTo"
+      @page-by="onPageBy"
+    />
   </div>
 </template>

@@ -2,14 +2,19 @@
 import { AlertTriangle, Plus, Trash2 } from "lucide-vue-next";
 import { onMounted, ref } from "vue";
 
+import { useDomScroll } from "../composables/useDomScroll";
 import { deleteKey, listKeys, type SshKeyRow } from "../db";
 import { deleteSecret, keyPassphraseKey, keyPrivateKey } from "../secrets";
-import { Button, EmptyState, PageHeader } from "./ui";
+import { Button, EmptyState, PageHeader, Scrollbar } from "./ui";
 
 const emit = defineEmits<{ back: []; addKey: []; editKey: [k: SshKeyRow] }>();
 
 const keys = ref<SshKeyRow[]>([]);
 const errorText = ref<string | null>(null);
+
+const scrollRoot = ref<HTMLElement | null>(null);
+const { position, range, viewportSize, onScrollTo, onPageBy } =
+  useDomScroll(scrollRoot);
 
 async function refresh() {
   errorText.value = null;
@@ -42,7 +47,8 @@ function publicSnippet(pub: string): string {
 </script>
 
 <template>
-  <div class="absolute inset-0 flex flex-col gap-3.5 px-9 pt-8 pb-6 overflow-y-auto text-fg">
+  <div class="absolute inset-0 text-fg">
+    <div ref="scrollRoot" class="absolute inset-0 flex flex-col gap-3.5 px-9 pt-8 pb-6 overflow-y-auto scrollbar-none">
     <Button variant="ghost" @click="emit('back')">← Hosts</Button>
     <PageHeader title="Saved keys">
       <template #actions>
@@ -81,5 +87,13 @@ function publicSnippet(pub: string): string {
     <EmptyState v-if="keys.length === 0 || errorText">
       {{ errorText ?? "No keys saved yet." }}
     </EmptyState>
+    </div>
+    <Scrollbar
+      :position="position"
+      :range="range"
+      :viewport-size="viewportSize"
+      @scroll-to="onScrollTo"
+      @page-by="onPageBy"
+    />
   </div>
 </template>

@@ -10,5 +10,6 @@ export { default as Input } from "./Input.vue";
 export { default as Label } from "./Label.vue";
 export { default as Modal } from "./Modal.vue";
 export { default as PageHeader } from "./PageHeader.vue";
+export { default as Scrollbar } from "./Scrollbar.vue";
 export { default as Textarea } from "./Textarea.vue";
 export { default as Tooltip } from "./Tooltip.vue";

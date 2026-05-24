@@ -48,6 +48,9 @@ export interface RenderPayload {
   /** Screen-absolute row index of viewport row 0. Add to viewport row to get
    *  a coordinate that survives resize and scrollback motion. */
   viewport_top: number;
+  /** Total scrollable rows (scrollback + visible viewport). Used by the
+   *  scrollbar component to size and position the thumb. */
+  scrollback_total: number;
 }
 
 export interface ExitPayload {

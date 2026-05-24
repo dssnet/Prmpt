@@ -3,6 +3,7 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { X } from "lucide-vue-next";
 
 import { scrollTab, showContextMenu, type Config } from "../ipc";
+import TerminalScrollbar from "./TerminalScrollbar.vue";
 import {
   applyRendererTheme,
   commitDividerDrag,
@@ -391,6 +392,18 @@ watch(theme, (next) => {
         width: `${dropHi.w}px`,
         height: `${dropHi.h}px`,
       }"
+    />
+    <!-- Scrollbars. In a workspace each pane gets its own (positioned at its
+         rect); a plain terminal/ssh tab gets a single one filling the host. -->
+    <TerminalScrollbar
+      v-for="p in panes"
+      :key="`sb-${p.tabId}`"
+      :tab-id="p.tabId"
+      :rect="{ x: p.x, y: p.y, w: p.w, h: p.h }"
+    />
+    <TerminalScrollbar
+      v-if="panes.length === 0 && active && (active.kind === 'terminal' || active.kind === 'ssh')"
+      :tab-id="active.id"
     />
     <slot />
   </div>

@@ -104,3 +104,13 @@ input[type="color"]::-webkit-color-swatch {
   border: none;
   border-radius: 3px;
 }
+
+/* Hide the native browser scrollbar on overflow containers that mount our
+   custom <Scrollbar> overlay. Keeps the element scrollable (wheel, keyboard,
+   programmatic scrollTop) without the OS-styled gutter showing through. */
+.scrollbar-none {
+  scrollbar-width: none;
+}
+.scrollbar-none::-webkit-scrollbar {
+  display: none;
+}

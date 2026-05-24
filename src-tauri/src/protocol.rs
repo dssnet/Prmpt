@@ -44,6 +44,10 @@ pub struct RenderPayload {
     /// and scrolling so the frontend can pin selection to content rather than
     /// to a viewport slot.
     pub viewport_top: u64,
+    /// Total scrollable rows (scrollback + visible viewport). The scrollbar
+    /// thumb spans `rows / scrollback_total` of the track, and the visible
+    /// region starts at `viewport_top / (scrollback_total - rows)` along it.
+    pub scrollback_total: u64,
 }
 
 #[derive(Serialize, Clone, Debug)]
