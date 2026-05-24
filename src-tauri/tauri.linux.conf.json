@@ -6,9 +6,8 @@
         "title": "Prmpt",
         "width": 960,
         "height": 600,
-        "transparent": true,
         "dragDropEnabled": false,
-        "decorations": false
+        "decorations": true
       }
     ]
   }

@@ -2,6 +2,7 @@
 import { computed, onMounted, onUnmounted, ref } from "vue";
 import { Lock, Minus, Square, Copy, X } from "lucide-vue-next";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
+import { type as osType } from "@tauri-apps/plugin-os";
 import { Tooltip } from "./ui";
 import { isStrongholdLocked } from "../state/secrets";
 import { useTabs } from "../state/tabs";
@@ -27,12 +28,22 @@ const transitionDuration = computed(() => {
   };
 });
 
-// macOS keeps its native traffic lights via the overlay titlebar; everywhere
-// else the native chrome is hidden (`decorations(false)` in the Rust window
-// builders) so we draw our own minimize/maximize/close.
+// macOS keeps its native traffic lights via the overlay titlebar; Linux
+// uses the desktop environment's native window chrome (GNOME/Wayland +
+// webkit2gtk can't paint the transparent corners the CSS-rounded trick
+// needs — see styles.css), so on Linux we render nothing and let the OS
+// titlebar handle title/drag/controls. Windows hides native chrome via
+// `decorations(false)` and gets our custom buttons.
 const IS_MAC =
   typeof navigator !== "undefined" && /Mac|iPhone|iPod|iPad/.test(navigator.platform);
-const showWindowControls = !IS_MAC;
+let IS_LINUX = false;
+try {
+  IS_LINUX = osType() === "linux";
+} catch {
+  // osType() can throw if the OS plugin isn't ready yet; assume non-Linux.
+}
+const renderTitleBar = !IS_LINUX;
+const showWindowControls = !IS_MAC && !IS_LINUX;
 
 const win = showWindowControls ? getCurrentWebviewWindow() : null;
 const isMaximized = ref(false);
@@ -64,6 +75,7 @@ const onClose = () => {
 
 <template>
   <div
+    v-if="renderTitleBar"
     data-tauri-drag-region
     class="flex-none h-titlebar relative bg-transparent select-none text-[11px] text-fg-subtle"
   >

@@ -155,9 +155,10 @@ impl WindowPool {
             .background_color(tauri::window::Color(0x1e, 0x1e, 0x2e, 0xff))
             .title_bar_style(platform::title_bar_style())
             .hidden_title(platform::hidden_title());
-        // Match open_blank_window on Win/Linux: no native chrome + transparent
+        // Match open_blank_window on Windows: no native chrome + transparent
         // so the CSS-rounded corners aren't framed by a square OS background.
-        #[cfg(any(target_os = "windows", target_os = "linux"))]
+        // Linux keeps native decorations (see open_blank_window for why).
+        #[cfg(target_os = "windows")]
         let builder = builder.decorations(false).transparent(true);
         let window = builder.visible(false).build()?;
         configure_new_window(&window);

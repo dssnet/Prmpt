@@ -80,20 +80,19 @@ body {
   min-height: 0;
 }
 
-/* Windows/Linux: native chrome is off and the window is transparent
-   (see tauri.{windows,linux}.conf.json and lib.rs / window_pool.rs). Let
-   the OS see through html/body and round #app so the window edge has the
-   same curvature as macOS's native corners. macOS keeps OS-drawn corners
-   and is unaffected. */
+/* Windows: native chrome is off and the window is transparent
+   (see tauri.windows.conf.json and lib.rs / window_pool.rs). Let the OS
+   see through html/body and round #app so the window edge has the same
+   curvature as macOS's native corners. macOS keeps OS-drawn corners and
+   is unaffected. Linux keeps native decorations (webkit2gtk's Wayland
+   DMA-BUF renderer ignores the alpha channel), so this trick isn't
+   applied there — the desktop environment draws the rounded chrome. */
 html.platform-windows,
-html.platform-linux,
-html.platform-windows body,
-html.platform-linux body {
+html.platform-windows body {
   background: transparent;
 }
 
-html.platform-windows #app,
-html.platform-linux #app {
+html.platform-windows #app {
   background: var(--bg);
   border-radius: var(--window-radius);
   overflow: hidden;
