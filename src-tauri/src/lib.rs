@@ -355,10 +355,6 @@ fn open_blank_window(app: &AppHandle) -> tauri::Result<()> {
     let builder = WebviewWindowBuilder::new(app, &label, WebviewUrl::default())
         .title("Prmpt")
         .inner_size(960.0, 600.0)
-        // Paint the native window the terminal background up front so the
-        // brief webview cold-start shows a dark terminal-colored frame
-        // instead of a white flash, rather than delaying the whole window.
-        .background_color(tauri::window::Color(0x1e, 0x1e, 0x2e, 0xff))
         // Let HTML5 drag-and-drop work inside the webview (tab → terminal
         // workspace drops). Tauri's OS-level drag-drop handler otherwise
         // swallows dragover/drop events; tab tear-off only needs dragend.
@@ -367,12 +363,19 @@ fn open_blank_window(app: &AppHandle) -> tauri::Result<()> {
     // `WebviewWindowBuilder`; `focused(bool)` is desktop-only.
     #[cfg(target_os = "macos")]
     let builder = builder
+        // Paint the native window the terminal background up front so the
+        // brief webview cold-start shows a dark terminal-colored frame
+        // instead of a white flash, rather than delaying the whole window.
+        .background_color(tauri::window::Color(0x1e, 0x1e, 0x2e, 0xff))
         .title_bar_style(platform::title_bar_style())
         .hidden_title(platform::hidden_title());
     // Windows/Linux have no overlay-titlebar mode, so drop the native
-    // chrome entirely — `TitleBar.vue` provides the draggable region.
+    // chrome entirely — `TitleBar.vue` provides the draggable region —
+    // and run the window transparent so CSS can round the corners.
+    // (The terminal background is painted by `#app` in styles.css; a
+    // brief cold-start flash of the desktop is the cost of rounding.)
     #[cfg(any(target_os = "windows", target_os = "linux"))]
-    let builder = builder.decorations(false);
+    let builder = builder.decorations(false).transparent(true);
     #[cfg(not(any(target_os = "ios", target_os = "android")))]
     let builder = builder.focused(true);
     let win = builder.visible(true).build()?;

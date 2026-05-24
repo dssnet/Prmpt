@@ -1,6 +1,7 @@
 import "./console-forward";
 
 import { createApp } from "vue";
+import { type as osType } from "@tauri-apps/plugin-os";
 
 import App from "./App.vue";
 import { markAllBroken, openDb } from "./db";
@@ -8,6 +9,17 @@ import { getConfig } from "./ipc";
 import { openSecrets } from "./secrets";
 import { initTheme } from "./state/theme";
 import nerdFontUrl from "./assets/fonts/NotoMonoNerdFontMono-Regular.ttf?url";
+
+// Tag <html> with the OS so platform-specific CSS (rounded corners +
+// transparent body on Windows/Linux, where we have no native chrome) can
+// branch without runtime JS. Done synchronously, as early as possible, so
+// the first paint already has the right styling and we don't flash an
+// unrounded rectangle.
+try {
+  document.documentElement.classList.add(`platform-${osType()}`);
+} catch (e) {
+  console.error("[platform] osType failed:", e);
+}
 
 // WKWebView inherits macOS's autocorrect / smart-quote / capitalization unless
 // each input opts out at the element level. There are many form fields (host

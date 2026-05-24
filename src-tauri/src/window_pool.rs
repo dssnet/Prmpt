@@ -149,14 +149,16 @@ impl WindowPool {
         let builder = WebviewWindowBuilder::new(app, &label, WebviewUrl::default())
             .title("Prmpt")
             .inner_size(960.0, 600.0)
-            .background_color(tauri::window::Color(0x1e, 0x1e, 0x2e, 0xff))
             .disable_drag_drop_handler();
         #[cfg(target_os = "macos")]
         let builder = builder
+            .background_color(tauri::window::Color(0x1e, 0x1e, 0x2e, 0xff))
             .title_bar_style(platform::title_bar_style())
             .hidden_title(platform::hidden_title());
+        // Match open_blank_window on Win/Linux: no native chrome + transparent
+        // so the CSS-rounded corners aren't framed by a square OS background.
         #[cfg(any(target_os = "windows", target_os = "linux"))]
-        let builder = builder.decorations(false);
+        let builder = builder.decorations(false).transparent(true);
         let window = builder.visible(false).build()?;
         configure_new_window(&window);
 

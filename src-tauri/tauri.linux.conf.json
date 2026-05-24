@@ -6,8 +6,7 @@
         "title": "Prmpt",
         "width": 960,
         "height": 600,
-        "transparent": false,
-        "backgroundColor": "#1e1e2e",
+        "transparent": true,
         "dragDropEnabled": false,
         "decorations": false
       }

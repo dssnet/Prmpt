@@ -28,6 +28,10 @@
   /* Workspace pane corner radius. Single source of truth: the `.pane-overlay`
      CSS border and the WebGL content clip both read this. */
   --pane-radius: 12px;
+  /* Window corner radius applied on Windows/Linux (where decorations are
+     off) so the window edge matches macOS's native rounding. macOS keeps
+     its OS-drawn corners and ignores this. */
+  --window-radius: 10px;
 }
 
 /* Bridge runtime CSS variables into Tailwind theme tokens. Tailwind v4
@@ -74,6 +78,25 @@ body {
   display: flex;
   flex-direction: column;
   min-height: 0;
+}
+
+/* Windows/Linux: native chrome is off and the window is transparent
+   (see tauri.{windows,linux}.conf.json and lib.rs / window_pool.rs). Let
+   the OS see through html/body and round #app so the window edge has the
+   same curvature as macOS's native corners. macOS keeps OS-drawn corners
+   and is unaffected. */
+html.platform-windows,
+html.platform-linux,
+html.platform-windows body,
+html.platform-linux body {
+  background: transparent;
+}
+
+html.platform-windows #app,
+html.platform-linux #app {
+  background: var(--bg);
+  border-radius: var(--window-radius);
+  overflow: hidden;
 }
 
 /* Suppress macOS's text-context affordances on the canvas: Writing Tools,
