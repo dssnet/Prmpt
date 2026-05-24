@@ -8,7 +8,6 @@ import { getConfig } from "./ipc";
 import { openSecrets } from "./secrets";
 import { initTheme } from "./state/theme";
 import nerdFontUrl from "./assets/fonts/NotoMonoNerdFontMono-Regular.ttf?url";
-import emojiFontUrl from "./assets/fonts/NotoColorEmoji.ttf?url";
 
 // WKWebView inherits macOS's autocorrect / smart-quote / capitalization unless
 // each input opts out at the element level. There are many form fields (host
@@ -60,26 +59,18 @@ function loadFont(family: string, url: string): Promise<void> {
     });
 }
 
-// Only the primary monospace face has to be ready before the renderer
-// mounts — cell metrics (advance width, baseline) are measured from it.
-// The Noto Color Emoji file is ~10MB and is only a lazy atlas fallback
-// for emoji codepoints (rare in an initial shell prompt), so blocking
-// first paint on its download was the single biggest startup stall.
-// Kick it off in the background instead; the glyph atlas bakes lazily,
-// so emoji just fall back for the brief window until it lands.
+// The primary monospace face has to be ready before the renderer mounts —
+// cell metrics (advance width, baseline) are measured from it.
 async function loadBundledFonts() {
-  void loadFont("Noto Color Emoji", emojiFontUrl);
   await loadFont("Noto Nerd Font Mono", nerdFontUrl);
 }
 
 function ensureBundledFonts(stack: string): string {
   const needs = (name: string) => !stack.toLowerCase().includes(name.toLowerCase());
-  const extras: string[] = [];
   if (needs("Noto Nerd Font Mono") && needs("NotoMono NFM")) {
-    extras.push('"Noto Nerd Font Mono"');
+    return `${stack}, "Noto Nerd Font Mono"`;
   }
-  if (needs("Noto Color Emoji")) extras.push('"Noto Color Emoji"');
-  return extras.length ? `${stack}, ${extras.join(", ")}` : stack;
+  return stack;
 }
 
 async function init() {
@@ -110,9 +101,9 @@ async function init() {
 
   initTheme(config.theme);
 
-  // Always append the bundled fonts so Nerd Font icons / Powerline glyphs /
-  // color emoji are available regardless of what's in the user's config.
-  // The user's chosen font still wins for codepoints it provides.
+  // Always append the bundled Nerd Font so icons / Powerline glyphs are
+  // available regardless of what's in the user's config. The user's chosen
+  // font still wins for codepoints it provides.
   config.font_family = ensureBundledFonts(config.font_family);
 
   createApp(App, { config }).mount("#app");

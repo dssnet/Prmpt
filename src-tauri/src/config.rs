@@ -28,9 +28,7 @@ pub struct Theme {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            font_family:
-                "\"Noto Nerd Font Mono\", \"Noto Color Emoji\", Menlo, ui-monospace, monospace"
-                    .into(),
+            font_family: "\"Noto Nerd Font Mono\", Menlo, ui-monospace, monospace".into(),
             font_size: 13.0,
             line_height: 1.2,
             shell: None,

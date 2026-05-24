@@ -40,7 +40,6 @@ Tauri backend (Rust)                                        ▼
 | `src/renderer/shaders.ts` | GLSL |
 | `src/ipc.ts`, `src/input.ts`, `src/tabs.ts` | IPC bindings, keymap, tab bar |
 | `src/assets/fonts/NotoMonoNerdFontMono-Regular.ttf` | Bundled primary mono font, patched with Powerline + Nerd Font icons (SIL OFL 1.1; Nerd Fonts patches are MIT). License at `NerdFonts-OFL.txt`. |
-| `src/assets/fonts/NotoColorEmoji.ttf` | Bundled color emoji fallback (SIL OFL 1.1, `OFL.txt` in same dir) |
 
 ## Build / run
 
@@ -80,8 +79,8 @@ Commands frontend → backend: `spawn_tab`, `close_tab`, `write_input`, `resize_
 
 - The cell flags byte from the backend uses bits 0..7 (`FLAG_BOLD`..`FLAG_SPACER_TAIL`). The WebGL pipeline ORs **bit 8 (256)** in JS when the glyph atlas detects a color glyph (via pixel chroma sampling) so the fragment shader can paint the texture RGB instead of tinting `fg`. Keep that contract if you touch the shader.
 - Glyph atlas is 2048×2048 RGBA, lazy-baked. Variants are tagged by `(codepoint, styleVariant)`; styleVariant is a 2-bit (bold, italic) tuple. Atlas exhaustion is logged but recycles slot 0 — that's a known limitation.
-- Font preload: `main.ts` awaits `document.fonts.load(...)` for **both** bundled fonts (Noto Nerd Font Mono + Noto Color Emoji) before constructing the renderer, so cell metrics and atlas baking use real metrics rather than transient fallback fonts.
-- Font stack default (in `Config::default()`): `"Noto Nerd Font Mono", "Noto Color Emoji", Menlo, ui-monospace, monospace`. Nerd Font supplies Latin + Powerline glyphs + icons (U+E000–U+F8FF PUA); Noto Color Emoji handles emoji codepoints; system mono catches anything else. **Do not switch the primary off the Nerd Font without checking that oh-my-zsh / starship / Powerlevel10k themes still render** — they rely heavily on PUA glyphs.
+- Font preload: `main.ts` awaits `document.fonts.load(...)` for the bundled Noto Nerd Font Mono before constructing the renderer, so cell metrics and atlas baking use real metrics rather than transient fallback fonts.
+- Font stack default (in `Config::default()`): `"Noto Nerd Font Mono", Menlo, ui-monospace, monospace`. Nerd Font supplies Latin + Powerline glyphs + icons (U+E000–U+F8FF PUA); system mono catches anything else. Emoji rely on whatever color-emoji font the OS provides (Apple Color Emoji on macOS, Segoe UI Emoji on Windows, Noto Color Emoji on most Linux desktops). **Do not switch the primary off the Nerd Font without checking that oh-my-zsh / starship / Powerlevel10k themes still render** — they rely heavily on PUA glyphs.
 
 ## Where things live at runtime
 

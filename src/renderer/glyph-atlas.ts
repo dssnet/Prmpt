@@ -149,9 +149,9 @@ export class GlyphAtlas {
   }
 
   // Sample a few points in the rasterized cell; if any pixel has chroma
-  // (R/G/B not equal), this is a color glyph (e.g. emoji rendered from
-  // Noto Color Emoji's CBDT bitmaps). White-on-transparent monochrome glyphs
-  // have R == G == B and can be tinted with the cell foreground color.
+  // (R/G/B not equal), this is a color glyph (e.g. an emoji from a system
+  // color-emoji font). White-on-transparent monochrome glyphs have
+  // R == G == B and can be tinted with the cell foreground color.
   private detectColor(x: number, y: number, w: number, h: number): boolean {
     let data: Uint8ClampedArray;
     try {

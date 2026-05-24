@@ -8,12 +8,6 @@
   font-display: block;
 }
 
-@font-face {
-  font-family: "Noto Color Emoji";
-  src: url("./assets/fonts/NotoColorEmoji.ttf") format("truetype");
-  font-display: block;
-}
-
 /* Runtime-mutated tokens. state/theme.ts updates --bg/--fg/--accent whenever
    the user picks a preset or edits the custom theme; everything else derives
    from them via color-mix so a single preset switch repaints the whole UI. */
