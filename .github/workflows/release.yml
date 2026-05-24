@@ -108,16 +108,42 @@ jobs:
           # if a single-arch build is preferred.
           - label: macOS (universal)
             os: macos-14
+            family: macos
+            arch: universal
             args: '--target universal-apple-darwin'
             extra_rust_targets: 'x86_64-apple-darwin,aarch64-apple-darwin'
 
           - label: Linux x86_64
             os: ubuntu-22.04
+            family: linux
+            arch: x86_64
+            args: ''
+            extra_rust_targets: ''
+
+          # Native ARM Linux runner (no cross-compile gymnastics with
+          # webkit2gtk / Zig). Host triple is aarch64-unknown-linux-gnu,
+          # so dtolnay/rust-toolchain installs that as default.
+          - label: Linux aarch64
+            os: ubuntu-22.04-arm
+            family: linux
+            arch: aarch64
             args: ''
             extra_rust_targets: ''
 
           - label: Windows x86_64
             os: windows-latest
+            family: windows
+            arch: x86_64
+            args: ''
+            extra_rust_targets: ''
+
+          # Native ARM Windows runner. Host triple is
+          # aarch64-pc-windows-msvc; WebView2 ARM64 runtime is bundled
+          # in Windows 11, and tauri-bundler emits ARM64 MSI/NSIS.
+          - label: Windows aarch64
+            os: windows-11-arm
+            family: windows
+            arch: aarch64
             args: ''
             extra_rust_targets: ''
 
@@ -142,7 +168,7 @@ jobs:
           submodules: recursive
 
       - name: Install Linux build dependencies
-        if: matrix.platform.os == 'ubuntu-22.04'
+        if: matrix.platform.family == 'linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -227,7 +253,7 @@ jobs:
       # Materialize that body into a 0600 temp file and point
       # APPLE_API_KEY_PATH at the file instead.
       - name: Provision Apple notarization key
-        if: matrix.platform.os == 'macos-14'
+        if: matrix.platform.family == 'macos'
         env:
           APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_PATH }}
         run: |
@@ -294,12 +320,12 @@ jobs:
       # (im-wayland*.so are GTK input-method modules, NOT libwayland —
       # leave them.) Verified end-to-end in a Linux container repro.
       - name: Fix AppImage (strip bundled libwayland, repack, replace)
-        if: matrix.platform.os == 'ubuntu-22.04'
+        if: matrix.platform.family == 'linux'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VERSION: ${{ needs.create-release.outputs.version }}
           APPIMAGE_EXTRACT_AND_RUN: 1
-          ARCH: x86_64
+          ARCH: ${{ matrix.platform.arch }}
           # The repack rewrites the AppImage bytes, so tauri-action's
           # signature no longer verifies. Re-sign with the same key
           # (the signer reads these env vars automatically).
@@ -319,7 +345,7 @@ jobs:
           echo "stripping: ${before:-<none found>}"
           rm -f "$work"/squashfs-root/usr/lib/libwayland-*.so*
           curl -sSfL -o "$work/appimagetool" \
-            "https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage"
+            "https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-${ARCH}.AppImage"
           chmod +x "$work/appimagetool"
           # Overwrite in place so the asset name is unchanged.
           "$work/appimagetool" --no-appstream "$work/squashfs-root" "$appimage"
@@ -339,11 +365,15 @@ jobs:
     needs: [create-release, build]
     runs-on: ubuntu-latest
     steps:
-      # tauri-action wrote latest.json with the signature of the AppImage
+      # tauri-action wrote latest.json with the signature of each AppImage
       # *before* the libwayland repack. Now that all matrix legs are done
-      # (no clobber race), re-point linux-x86_64 at the re-signed sig the
-      # Linux leg uploaded. jq + gh are preinstalled on ubuntu-latest.
-      - name: Patch latest.json with re-signed Linux signature
+      # (no clobber race), re-point each linux-* platform key at the
+      # re-signed sig that the corresponding Linux leg uploaded. jq + gh
+      # are preinstalled on ubuntu-latest. Filename → key mapping covers
+      # both tauri-bundler naming styles (`_amd64` / `_aarch64` for AppImage,
+      # `_x86_64` / `_arm64` historically) so a future bundler change
+      # doesn't silently leave stale signatures.
+      - name: Patch latest.json with re-signed Linux signatures
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # No actions/checkout in this job, so gh can't infer the repo
@@ -355,9 +385,21 @@ jobs:
           work=$(mktemp -d)
           cd "$work"
           gh release download "v${VERSION}" -p latest.json -p "*.AppImage.sig" --clobber
-          sig=$(cat ./*.AppImage.sig)
-          jq --arg s "$sig" '.platforms["linux-x86_64"].signature = $s' latest.json > latest.json.new
-          mv latest.json.new latest.json
+          for sig in ./*.AppImage.sig; do
+            name=$(basename "$sig")
+            case "$name" in
+              *amd64*|*x86_64*) key="linux-x86_64" ;;
+              *aarch64*|*arm64*) key="linux-aarch64" ;;
+              *)
+                echo "::warning::cannot infer arch from $name, skipping"
+                continue ;;
+            esac
+            sigval=$(cat "$sig")
+            jq --arg s "$sigval" --arg k "$key" \
+              '.platforms[$k].signature = $s' latest.json > latest.json.new
+            mv latest.json.new latest.json
+            echo "patched $key from $name"
+          done
           gh release upload "v${VERSION}" latest.json --clobber
 
       - name: Mark release as non-draft
