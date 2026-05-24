@@ -1,0 +1,18 @@
+# Statically link the MSVC C runtime on Windows so prmpt.exe runs on a
+# stock Windows install without the user first installing the Microsoft
+# Visual C++ Redistributable (which provides VCRUNTIME140.dll). Without
+# this, `prmpt.exe` exits immediately on machines that don't have the
+# redist with a "VCRUNTIME140.dll not found" loader error — and because
+# the binary is GUI-subsystem, there is no console output to explain it.
+#
+# Trade-off: ~200 KB larger .exe. Only affects the Rust-side CRT; the
+# Zig-built ghostty-vt.dll bundled alongside uses UCRT (which ships with
+# Windows 10+) and is unaffected.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
+
+[target.aarch64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
+
+[target.i686-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
