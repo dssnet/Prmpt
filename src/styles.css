@@ -98,6 +98,16 @@ html.platform-windows #app {
   overflow: hidden;
 }
 
+/* AtlasOS and Windows users who disable Settings -> Personalization -> Colors
+   -> Transparency effects: the OS draws an opaque square instead of honoring
+   `transparent: true`, so the rounded #app clip leaves a visibly rounded
+   close-button hover floating inside a square window. Match the OS shape. */
+@media (prefers-reduced-transparency: reduce) {
+  html.platform-windows #app {
+    border-radius: 0;
+  }
+}
+
 /* Suppress macOS's text-context affordances on the canvas: Writing Tools,
    Autofill, Look Up, etc. are injected by WKWebView when the system thinks
    the focus is in editable/selectable text. tabindex="0" + synthetic focus
