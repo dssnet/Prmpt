@@ -6,6 +6,7 @@ A desktop terminal emulator. Tauri 2 shell, Ghostty's VT engine driving terminal
 
 - **Do not run `bun tauri dev` in the background, monitor it, or otherwise launch the GUI from an agent session.** The user runs it manually for visual testing. Compiling (`cargo check`, `bun run build`) is fine; launching the windowed app is not.
 - **Do not modify the user's config file** at `~/Library/Application Support/Prmpt/config.toml` (macOS) / `~/.config/Prmpt/config.toml` (Linux) / `%APPDATA%\Prmpt\config.toml` (Windows). If a new default needs to apply, instruct the user to delete that file (it auto-regenerates) — do not overwrite it.
+- **Do not bump the version** in `src-tauri/tauri.conf.json` / `src-tauri/Cargo.toml` / `package.json`. The user owns the release version and bumps it manually before dispatching the release workflow. Leave the version field alone even when the change you just made is the headline fix for the next release.
 - **libghostty-vt** types are `!Send + !Sync`. All terminal state access happens on a per-tab dedicated thread. Tauri command handlers post messages via `crossbeam-channel`; they never touch `Terminal` directly. Keep it that way.
 
 ## Architecture (one diagram)

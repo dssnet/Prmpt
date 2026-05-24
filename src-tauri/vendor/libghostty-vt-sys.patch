@@ -1,8 +1,8 @@
 diff --git a/crates/libghostty-vt-sys/build.rs b/crates/libghostty-vt-sys/build.rs
-index 4a54faf..c590b05 100644
+index 4a54faf..60ab624 100644
 --- a/crates/libghostty-vt-sys/build.rs
 +++ b/crates/libghostty-vt-sys/build.rs
-@@ -2,6 +2,20 @@ use std::env;
+@@ -2,6 +2,27 @@ use std::env;
  use std::path::{Path, PathBuf};
  use std::process::Command;
  
@@ -12,6 +12,13 @@ index 4a54faf..c590b05 100644
 +//     cross-compile attempt doesn't panic (upstream: Linux + macOS only).
 +//   * iOS cross builds pin `-Dcpu=apple_a14` (simulator SDK headers
 +//     reject the `baseline` CPU Zig would otherwise default to).
++//   * Linux native builds also pass `-Dtarget` so Zig pins
++//     `-mcpu=baseline` instead of `-mcpu=native`. The Linux release
++//     legs run on GitHub Actions runners whose CPU (Cobalt 100 /
++//     Neoverse-N2 for aarch64, recent Xeon for x86_64) is newer than
++//     the common user floor; without this pin Zig's compiler-rt picks
++//     instructions (SVE2 on aarch64, AVX on x86_64) that SIGILL on
++//     Apple Silicon under Linux, Raspberry Pi 4 / Cortex-A72, etc.
 +//   * iOS links a self-contained static archive: `merge_ios_cpp_deps`
 +//     folds simdutf/highway/utfcpp into `libghostty-vt-ios.a`.
 +//   * Re-exports `cargo:libdir` / `cargo:lib_filename` so prmpt's own
@@ -23,8 +30,25 @@ index 4a54faf..c590b05 100644
  /// Pinned ghostty commit. Update this to pull a newer version.
  const GHOSTTY_REPO: &str = "https://github.com/ghostty-org/ghostty.git";
  const GHOSTTY_COMMIT: &str = "6590196661f769dd8f2b3e85d6c98262c4ec5b3b";
-@@ -161,6 +175,20 @@ fn build_vendored(link_mode: LinkMode) {
-     if target != host {
+@@ -156,11 +177,34 @@ fn build_vendored(link_mode: LinkMode) {
+             .arg(&zig_global_cache_dir);
+     }
+ 
+-    // Only pass -Dtarget when cross-compiling. For native builds, let zig
+-    // auto-detect the host (matches how ghostty's own CMakeLists.txt works).
+-    if target != host {
++    // Pass -Dtarget when cross-compiling, and also for native Linux
++    // builds. On Linux the Zig output is statically linked into the
++    // shipped binary, and the release runners (Cobalt 100 / Neoverse-N2
++    // for aarch64, recent Intel Xeon for x86_64) have CPU features
++    // (SVE2, AVX2/AVX-512) that common user hardware lacks; letting
++    // Zig auto-detect `-mcpu=native` then bakes those into compiler-rt
++    // (e.g. `memset`) and the binary SIGILLs on user machines. Passing
++    // -Dtarget without -Dcpu makes Zig default to `baseline`, which is
++    // the safe portable floor. For native macOS / Windows we keep the
++    // upstream auto-detect behavior — the runner/user CPU floors there
++    // overlap closely.
++    if target != host || target.contains("linux") {
          let zig_target = zig_target(&target);
          build.arg(format!("-Dtarget={zig_target}"));
 +
@@ -44,7 +68,7 @@ index 4a54faf..c590b05 100644
      }
  
      run(build, "zig build");
-@@ -169,22 +197,21 @@ fn build_vendored(link_mode: LinkMode) {
+@@ -169,22 +213,21 @@ fn build_vendored(link_mode: LinkMode) {
      let include_dir = install_prefix.join("include");
      warn_unused_xcframework(&lib_dir);
  
@@ -81,7 +105,7 @@ index 4a54faf..c590b05 100644
          link_mode.artifact_kind(),
          lib_dir.display()
      );
-@@ -195,11 +222,132 @@ fn build_vendored(link_mode: LinkMode) {
+@@ -195,11 +238,132 @@ fn build_vendored(link_mode: LinkMode) {
      );
  
      println!("cargo:rustc-link-search=native={}", lib_dir.display());
@@ -217,7 +241,7 @@ index 4a54faf..c590b05 100644
  }
  
  fn warn_unused_xcframework(lib_dir: &Path) {
-@@ -364,6 +512,23 @@ fn zig_target(target: &str) -> String {
+@@ -364,6 +528,23 @@ fn zig_target(target: &str) -> String {
          "aarch64-unknown-linux-musl" => "aarch64-linux-musl",
          "aarch64-apple-darwin" => "aarch64-macos-none",
          "x86_64-apple-darwin" => "x86_64-macos-none",
