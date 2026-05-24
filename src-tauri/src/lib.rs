@@ -101,8 +101,34 @@ fn ssh_migrations() -> Vec<Migration> {
     ]
 }
 
+/// Attach to the parent console on Windows so a release build launched from
+/// PowerShell / cmd actually surfaces panic messages and `eprintln!` output.
+/// Release builds are `windows_subsystem = "windows"` (so we don't pop a
+/// console on Start-Menu launches), which means stderr/stdout are detached by
+/// default — without this, a panic during startup exits silently with nothing
+/// for the user to paste back.
+#[cfg(target_os = "windows")]
+fn try_attach_parent_console() {
+    extern "system" {
+        fn AttachConsole(dw_process_id: u32) -> i32;
+    }
+    // ATTACH_PARENT_PROCESS = (DWORD)-1. Failure is benign (no parent
+    // console available, e.g. Explorer / shortcut launch).
+    unsafe {
+        let _ = AttachConsole(u32::MAX);
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn try_attach_parent_console() {}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    try_attach_parent_console();
+    // Force backtraces so any startup panic prints a stack, not just the
+    // bare message — the difference between "explain it" and "guess it".
+    std::env::set_var("RUST_BACKTRACE", "1");
+
     // Move any pre-unification on-disk state into the new `Prmpt` data
     // dir before anything else reads or writes it. See
     // `data_migrations/` for the framework and `v001_unify_data_dir.rs`
