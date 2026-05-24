@@ -1,6 +1,6 @@
 [package]
 name = "prmpt"
-version = "0.2.7"
+version = "0.2.8"
 description = "A terminal emulator built on Tauri + libghostty-vt"
 authors = ["Yanick"]
 edition = "2021"
