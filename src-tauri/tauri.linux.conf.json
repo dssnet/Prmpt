@@ -12,10 +12,5 @@
         "decorations": false
       }
     ]
-  },
-  "bundle": {
-    "resources": {
-      "native/ghostty-vt.dll": "ghostty-vt.dll"
-    }
   }
 }

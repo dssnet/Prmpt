@@ -25,7 +25,7 @@ use std::{
 use config::Config;
 use parking_lot::Mutex;
 use tab::TabRegistry;
-#[cfg(not(any(target_os = "ios", target_os = "android")))]
+#[cfg(target_os = "macos")]
 use tauri::menu::{IconMenuItemBuilder, MenuBuilder, MenuItemBuilder, PredefinedMenuItem, SubmenuBuilder};
 use tauri::{
     AppHandle, Emitter, EventTarget, Manager, RunEvent, Runtime, WebviewUrl, WebviewWindow,
@@ -260,7 +260,13 @@ pub fn run() {
 
     builder
         .setup(|app| {
-            #[cfg(not(any(target_os = "ios", target_os = "android")))]
+            // macOS uses an app-wide menu bar at the top of the screen, which
+            // is where Cmd+Q / Cmd+C / Cmd+V accelerators are anchored.
+            // Windows/Linux would render the same menu *attached to every
+            // window* ("Prmpt | Edit" strip), which we don't want — the
+            // terminal keymap in App.vue handles those chords directly, and
+            // right-click → context menu still covers copy/paste/select-all.
+            #[cfg(target_os = "macos")]
             install_app_menu(app.handle())?;
             if let Some(window) = app.get_webview_window("main") {
                 configure_new_window(&window);
@@ -417,7 +423,7 @@ fn prespawn_tab_for_window(app: &AppHandle, label: &str) {
     }
 }
 
-#[cfg(not(any(target_os = "ios", target_os = "android")))]
+#[cfg(target_os = "macos")]
 #[allow(unused_mut)] // `mut` is needed on macOS where the icon path reassigns the builders
 fn install_app_menu<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
