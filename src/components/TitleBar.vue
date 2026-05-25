@@ -29,11 +29,10 @@ const transitionDuration = computed(() => {
 });
 
 // macOS keeps its native traffic lights via the overlay titlebar; Linux
-// uses the desktop environment's native window chrome (GNOME/Wayland +
-// webkit2gtk can't paint the transparent corners the CSS-rounded trick
-// needs — see styles.css), so on Linux we render nothing and let the OS
-// titlebar handle title/drag/controls. Windows hides native chrome via
-// `decorations(false)` and gets our custom buttons.
+// uses the desktop environment's native window chrome, so on Linux we
+// render nothing and let the OS titlebar handle title/drag/controls.
+// Windows hides native chrome via `decorations(false)` and gets our
+// custom buttons.
 const IS_MAC =
   typeof navigator !== "undefined" && /Mac|iPhone|iPod|iPad/.test(navigator.platform);
 let IS_LINUX = false;

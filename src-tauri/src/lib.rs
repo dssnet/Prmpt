@@ -370,17 +370,12 @@ fn open_blank_window(app: &AppHandle) -> tauri::Result<()> {
         .title_bar_style(platform::title_bar_style())
         .hidden_title(platform::hidden_title());
     // Windows has no overlay-titlebar mode, so drop the native chrome
-    // entirely — `TitleBar.vue` provides the draggable region — and run
-    // the window transparent so CSS can round the corners. (The terminal
-    // background is painted by `#app` in styles.css; a brief cold-start
-    // flash of the desktop is the cost of rounding.) Linux keeps native
-    // decorations: the GNOME/Wayland webkit2gtk DMA-BUF renderer ignores
-    // the alpha channel, so `.transparent(true)` paints an opaque square
-    // anyway, and the env-var workaround breaks the WebGL2 terminal. We
-    // let the desktop environment (Adwaita, KWin, …) draw the chrome,
-    // which already gives us rounded corners and shadows.
+    // entirely — `TitleBar.vue` provides the draggable region. Linux
+    // keeps native decorations: we let the desktop environment (Adwaita,
+    // KWin, …) draw the chrome, which already gives us rounded corners
+    // and shadows.
     #[cfg(target_os = "windows")]
-    let builder = builder.decorations(false).transparent(true);
+    let builder = builder.decorations(false);
     #[cfg(not(any(target_os = "ios", target_os = "android")))]
     let builder = builder.focused(true);
     let win = builder.visible(true).build()?;

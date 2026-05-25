@@ -6,7 +6,7 @@
         "title": "Prmpt",
         "width": 960,
         "height": 600,
-        "transparent": true,
+        "transparent": false,
         "dragDropEnabled": false,
         "decorations": false
       }
