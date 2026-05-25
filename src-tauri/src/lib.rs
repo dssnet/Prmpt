@@ -260,6 +260,13 @@ pub fn run() {
 
     builder
         .setup(|app| {
+            // tauri-plugin-sql unconditionally creates `app_config_dir()` in
+            // its own setup hook (the bundle-id folder, e.g.
+            // `~/.config/de.dss-net.prmpt`). We don't use it — our DB lives
+            // in the unified Prmpt/ dir — so reap the empty husk now that
+            // plugin setups have run.
+            data_migrations::cleanup_unused_app_config_dir(app.handle());
+
             // macOS uses an app-wide menu bar at the top of the screen, which
             // is where Cmd+Q / Cmd+C / Cmd+V accelerators are anchored.
             // Windows/Linux would render the same menu *attached to every
