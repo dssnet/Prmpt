@@ -11,16 +11,17 @@
 //! torn-off window) without wasting a shell process per reserve.
 //!
 //! Race-prevention design:
-//! - The `Building → Ready` lifecycle is flipped by the reserve's frontend
-//!   calling `bootstrap_window`. Until then `pop_*` returns `None` and the
-//!   caller falls back to building a fresh window — same behavior as today.
-//! - Activation never relies on a fire-and-forget Tauri event reaching a
-//!   not-yet-mounted listener; the bootstrap call is what gates Ready.
+//! - The slot is flipped to `Building(label)` *before* the slow
+//!   `WebviewWindowBuilder::build()` runs, while the lock is still held. A
+//!   second concurrent `ensure_filled` therefore sees a non-`Empty` slot and
+//!   bails out — without this, both callers would race past the check,
+//!   build two hidden windows, and the second's slot write would orphan the
+//!   first (a hidden WKWebView nobody can pop or destroy).
+//! - `Building → Ready` is flipped by the reserve's frontend calling
+//!   `bootstrap_window`. Until then `pop_*` returns `None` and the caller
+//!   falls back to building a fresh window — same behavior as today.
 
-use std::{
-    collections::HashMap,
-    sync::{atomic::Ordering, Arc},
-};
+use std::sync::{atomic::Ordering, Arc};
 
 use parking_lot::Mutex;
 use serde::Serialize;
@@ -41,21 +42,34 @@ pub enum WindowMode {
     Normal,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ReserveState {
-    Building,
-    Ready,
+/// Reserve-pool slot lifecycle. Transitions:
+///   `Empty` → `Building(label)` → `Ready(label)` → `Empty`
+///
+/// The slot is moved into `Building` while the lock is still held in
+/// `ensure_filled`, so a second concurrent caller observes a non-`Empty`
+/// slot and skips its own build. `Ready` is the only state `pop_*` will
+/// take from; `note_destroyed` resets the slot if the destroyed label
+/// matches the slot's current label.
+#[derive(Default)]
+enum ReserveSlot {
+    #[default]
+    Empty,
+    Building(String),
+    Ready(String),
+}
+
+impl ReserveSlot {
+    fn label(&self) -> Option<&str> {
+        match self {
+            ReserveSlot::Empty => None,
+            ReserveSlot::Building(l) | ReserveSlot::Ready(l) => Some(l.as_str()),
+        }
+    }
 }
 
 #[derive(Default)]
 pub struct WindowPool {
-    // The single reserve label, or None.
-    reserve: Mutex<Option<String>>,
-    // Per-label state, populated only while a label is in `reserve`.
-    states: Mutex<HashMap<String, ReserveState>>,
-    // Per-label mode. Used by bootstrap_window to tell the frontend what to
-    // do. Defaults to Normal for unknown labels.
-    modes: Mutex<HashMap<String, WindowMode>>,
+    slot: Mutex<ReserveSlot>,
 }
 
 pub type SharedWindowPool = Arc<WindowPool>;
@@ -66,23 +80,29 @@ impl WindowPool {
     }
 
     /// What the frontend should do on bootstrap. Returns `Reserve` only for
-    /// labels currently held in the pool; everything else (main, torn-off
-    /// fresh windows, already-activated reserves) is `Normal`.
+    /// the label currently held in the pool (either still Building or
+    /// already Ready); everything else (main, torn-off fresh windows,
+    /// already-activated reserves) is `Normal`.
     pub fn mode_for(&self, label: &str) -> WindowMode {
-        self.modes
-            .lock()
-            .get(label)
-            .copied()
-            .unwrap_or(WindowMode::Normal)
+        if self.slot.lock().label() == Some(label) {
+            WindowMode::Reserve
+        } else {
+            WindowMode::Normal
+        }
     }
 
-    /// Flip a reserve from `Building` to `Ready`. Called when its frontend
+    /// Flip the reserve from `Building` to `Ready`. Called when its frontend
     /// invokes `bootstrap_window` (which is also the moment we know all the
     /// reserve's event listeners are installed and it can receive activation
-    /// events / tab attachments without losing them).
+    /// events / tab attachments without losing them). No-op if the slot's
+    /// label doesn't match (e.g., already popped, or this is a different
+    /// reserve from a later refill cycle).
     pub fn mark_ready(&self, label: &str) {
-        if let Some(s) = self.states.lock().get_mut(label) {
-            *s = ReserveState::Ready;
+        let mut slot = self.slot.lock();
+        if let ReserveSlot::Building(l) = &*slot {
+            if l == label {
+                *slot = ReserveSlot::Ready(label.to_string());
+            }
         }
     }
 
@@ -99,54 +119,62 @@ impl WindowPool {
     }
 
     fn pop_ready(&self) -> Option<String> {
-        let mut reserve = self.reserve.lock();
-        let label = reserve.as_ref()?.clone();
-        let mut states = self.states.lock();
-        if states.get(&label) != Some(&ReserveState::Ready) {
+        let mut slot = self.slot.lock();
+        if !matches!(*slot, ReserveSlot::Ready(_)) {
             return None;
         }
-        states.remove(&label);
-        self.modes.lock().remove(&label);
-        *reserve = None;
-        Some(label)
+        match std::mem::take(&mut *slot) {
+            ReserveSlot::Ready(label) => Some(label),
+            _ => unreachable!(),
+        }
     }
 
-    /// Clear pool entries for a destroyed window. Does NOT spawn a
-    /// replacement — `ensure_filled` is the caller's responsibility. (Kept
-    /// separate so the Destroyed handler can skip respawn during shutdown.)
+    /// Clear the slot if the destroyed window was the one we were tracking.
+    /// Does NOT spawn a replacement — `ensure_filled` is the caller's
+    /// responsibility. (Kept separate so the Destroyed handler can skip
+    /// respawn during shutdown.)
     pub fn note_destroyed(&self, label: &str) {
-        let mut reserve = self.reserve.lock();
-        if reserve.as_deref() == Some(label) {
-            *reserve = None;
+        let mut slot = self.slot.lock();
+        if slot.label() == Some(label) {
+            *slot = ReserveSlot::Empty;
         }
-        self.states.lock().remove(label);
-        self.modes.lock().remove(label);
     }
 
     /// Idempotent: spawn one reserve if the pool is empty and we're not
-    /// shutting down. Tolerant of build failures — logs and bails so the
-    /// next trigger can retry.
+    /// shutting down. The slot is claimed (set to `Building(label)`) while
+    /// the lock is still held, so two concurrent callers cannot both kick
+    /// off `spawn_reserve` and orphan one of the resulting hidden windows.
+    /// Tolerant of build failures — logs, rolls the slot back to `Empty`,
+    /// and bails so the next trigger can retry.
     pub fn ensure_filled<R: Runtime>(&self, app: &AppHandle<R>) {
         if SHUTTING_DOWN.load(Ordering::SeqCst) {
             return;
         }
-        if self.reserve.lock().is_some() {
-            return;
-        }
-        if let Err(e) = self.spawn_reserve(app) {
+        let label = {
+            let mut slot = self.slot.lock();
+            if !matches!(*slot, ReserveSlot::Empty) {
+                return;
+            }
+            let counter = app.state::<SharedWindowCounter>();
+            let label = format!("window-{}", counter.next());
+            *slot = ReserveSlot::Building(label.clone());
+            label
+        };
+        if let Err(e) = self.spawn_reserve(app, &label) {
             eprintln!("window_pool: failed to spawn reserve: {e}");
+            let mut slot = self.slot.lock();
+            if matches!(&*slot, ReserveSlot::Building(l) if l == &label) {
+                *slot = ReserveSlot::Empty;
+            }
         }
     }
 
-    fn spawn_reserve<R: Runtime>(&self, app: &AppHandle<R>) -> tauri::Result<()> {
-        let counter = app.state::<SharedWindowCounter>();
-        let label = format!("window-{}", counter.next());
-
+    fn spawn_reserve<R: Runtime>(&self, app: &AppHandle<R>, label: &str) -> tauri::Result<()> {
         // Mirror open_blank_window's builder chain exactly, minus
         // `.focused(true)` (focus is applied on activation) and with
         // `.visible(false)` so the reserve never flashes onto the user's
         // screen at construction time.
-        let builder = WebviewWindowBuilder::new(app, &label, WebviewUrl::default())
+        let builder = WebviewWindowBuilder::new(app, label, WebviewUrl::default())
             .title("Prmpt")
             .inner_size(960.0, 600.0)
             .disable_drag_drop_handler();
@@ -163,17 +191,13 @@ impl WindowPool {
         let window = builder.visible(false).build()?;
         configure_new_window(&window);
 
-        // Insert pool entries AFTER build so a Destroyed event firing
-        // during construction can't race ahead of us. The webview hasn't
-        // booted yet, so a bootstrap_window call from it is impossible
-        // before we return.
-        self.modes
-            .lock()
-            .insert(label.clone(), WindowMode::Reserve);
-        self.states
-            .lock()
-            .insert(label.clone(), ReserveState::Building);
-        *self.reserve.lock() = Some(label);
+        // If shutdown fired during the (slow) build, tear the just-built
+        // window down. The Destroyed handler installed by
+        // `configure_new_window` calls `note_destroyed`, which resets the
+        // slot back to Empty.
+        if SHUTTING_DOWN.load(Ordering::SeqCst) {
+            let _ = window.close();
+        }
         Ok(())
     }
 }

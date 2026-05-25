@@ -521,6 +521,24 @@ pub fn configure_new_window<R: Runtime>(window: &WebviewWindow<R>) {
     {
         let _ = window.with_webview(|webview| {
             macos::disable_writing_tools(webview.inner());
+            // tauri-runtime-wry 2.11.1 builds the `PlatformWebview` passed
+            // here by calling `Retained::into_raw` on the WKWebView, its
+            // WKUserContentController, and the NSWindow — and never
+            // reclaims those retains. Each call therefore leaks +1 retain
+            // on each of those three objects; the NSWindow leak alone keeps
+            // the whole chain (NSWindow → contentView → WKWebView → its
+            // WebContent process) alive forever, so opening + closing a
+            // window in a loop bloats Activity Monitor with stale
+            // `localhost:1420` processes. Reclaim ownership via
+            // `Retained::from_raw` and let it drop to restore the proper
+            // refcount.
+            unsafe {
+                use objc2::rc::Retained;
+                use objc2::runtime::NSObject;
+                let _ = Retained::<NSObject>::from_raw(webview.inner() as *mut NSObject);
+                let _ = Retained::<NSObject>::from_raw(webview.controller() as *mut NSObject);
+                let _ = Retained::<NSObject>::from_raw(webview.ns_window() as *mut NSObject);
+            }
         });
     }
 
