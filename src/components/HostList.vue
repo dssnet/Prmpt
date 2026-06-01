@@ -465,6 +465,20 @@ async function confirmDeleteGroup() {
           button to create one, then assign hosts to it from the host editor.
         </div>
       </div>
+
+      <!-- Footer: settings -->
+      <div class="flex-none border-t border-border p-2">
+        <button
+          type="button"
+          title="Theme settings"
+          aria-label="Open settings"
+          class="w-full flex items-center gap-1.5 px-1.5 py-1.5 rounded-md text-fg-muted hover:text-fg hover:bg-surface-2 cursor-pointer transition-colors duration-150"
+          @click="emit('openSettings')"
+        >
+          <Settings :size="15" class="shrink-0" />
+          <span class="text-sm">Settings</span>
+        </button>
+      </div>
     </aside>
 
     <!-- Right column: filtered host list -->
@@ -550,18 +564,8 @@ async function confirmDeleteGroup() {
         </EmptyState>
       </div>
 
-      <!-- Settings button + custom scrollbar live outside the scroll container
-           so they stay pinned to the host pane rather than scrolling with the
-           list. -->
-      <button
-        type="button"
-        title="Theme settings"
-        aria-label="Open settings"
-        class="absolute right-4 bottom-4 w-11 h-11 rounded-full border border-border bg-surface-1 text-fg-muted hover:bg-surface-2 hover:text-fg hover:border-border-strong text-xl flex items-center justify-center cursor-pointer transition-colors duration-150"
-        @click="emit('openSettings')"
-      >
-        <Settings :size="20" />
-      </button>
+      <!-- Custom scrollbar lives outside the scroll container so it stays
+           pinned to the host pane rather than scrolling with the list. -->
       <Scrollbar
         :position="position"
         :range="range"
