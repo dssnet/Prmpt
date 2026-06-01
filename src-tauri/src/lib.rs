@@ -1,3 +1,4 @@
+mod backup;
 mod commands;
 mod config;
 mod data_migrations;
@@ -141,6 +142,14 @@ pub fn run() {
     // bare message — the difference between "explain it" and "guess it".
     std::env::set_var("RUST_BACKTRACE", "1");
 
+    // Apply a staged backup import, if one is pending, before anything
+    // reads the data dir or opens the DB. This is the destructive swap
+    // half of the import flow (see `backup.rs`); doing it here — ahead of
+    // the SQL plugin — sidesteps the file lock on the open `prmpt.db`.
+    if let Err(e) = backup::apply_pending_import() {
+        eprintln!("[backup] apply pending import failed: {e}");
+    }
+
     // Move any pre-unification on-disk state into the new `Prmpt` data
     // dir before anything else reads or writes it. See
     // `data_migrations/` for the framework and `v001_unify_data_dir.rs`
@@ -185,6 +194,7 @@ pub fn run() {
         )
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_os::init())
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .manage(registry)
         .manage(cfg)
@@ -224,6 +234,8 @@ pub fn run() {
             commands::secret_set,
             commands::secret_remove,
             commands::prepare_for_update,
+            backup::export_backup,
+            backup::import_backup,
         ]);
 
     // The updater plugin is desktop-only (mobile distributes via the

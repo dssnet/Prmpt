@@ -61,6 +61,14 @@ russh-keys = "0.49"
 async-trait = "0.1"
 bytes = "1"
 zeroize = { version = "1.8", features = ["zeroize_derive", "alloc"] }
+# Backup import/export: bundle the data dir into a single archive, with
+# optional passphrase encryption of the whole archive (age, scrypt
+# recipient). `zip` uses Stored (no compression) — the payload is small
+# and the stronghold snapshot is already encrypted, so deflate buys
+# nothing. Native save/open dialogs come from tauri-plugin-dialog.
+zip = "2"
+age = "0.10"
+tauri-plugin-dialog = "2"
 
 # portable-pty's transitive `termios 0.2.2` has no iOS/Android support,
 # and there is no local-PTY story on those targets anyway (sandbox

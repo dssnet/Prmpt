@@ -426,3 +426,36 @@ export function onSshConnectError(
 ): Promise<UnlistenFn> {
   return listenScoped<SshConnectError>("ssh:connect_error", handler);
 }
+
+// ---- Backup (import / export) ----
+
+export interface BackupSummary {
+  /** Whether the backup file was passphrase-encrypted. */
+  encrypted: boolean;
+  /** Whether the backup carries decryptable SSH secrets (snapshot + key). */
+  has_secrets: boolean;
+}
+
+/** Sentinel error string from `import_backup` when the file is encrypted
+ *  but no passphrase was supplied — matched so the UI can prompt and retry,
+ *  distinct from a wrong-passphrase error. Mirrors `backup::ERR_NEEDS_PASSPHRASE`. */
+export const BACKUP_ENCRYPTED_NEEDS_PASSPHRASE = "BACKUP_ENCRYPTED_NEEDS_PASSPHRASE";
+
+/** Write a backup of all app data to `path`. A non-empty `passphrase`
+ *  age-encrypts the whole archive; omit it for a plain (unencrypted) backup. */
+export async function exportBackup(path: string, passphrase?: string): Promise<void> {
+  await invoke("export_backup", { path, passphrase: passphrase ?? null });
+}
+
+/** Stage a backup for import (decrypt + unzip + mark pending). The caller
+ *  must relaunch the app afterwards so the staged data is applied at the next
+ *  startup, before the DB is opened. */
+export async function importBackup(
+  path: string,
+  passphrase?: string,
+): Promise<BackupSummary> {
+  return await invoke<BackupSummary>("import_backup", {
+    path,
+    passphrase: passphrase ?? null,
+  });
+}
