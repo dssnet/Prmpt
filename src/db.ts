@@ -26,9 +26,26 @@ export interface SshHostRow {
   key_label: string | null;
   host_fp_sha256: string | null;
   host_key_alg: string | null;
+  group_id: number | null;
   broken: boolean;
   created_at: string;
   updated_at: string;
+}
+
+export interface SshGroupRow {
+  id: number;
+  label: string;
+  parent_id: number | null;
+  open: boolean;
+  hidden: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface SshGroupInput {
+  id?: number | null;
+  label: string;
+  parent_id?: number | null;
 }
 
 export interface SshKeyRow {
@@ -60,6 +77,7 @@ export interface SshHostInput {
   username: string;
   auth_method: SshAuthMethod;
   key_id?: number | null;
+  group_id?: number | null;
   /** Mark `has_password` and clear `broken` if `true`. The actual
    *  password bytes live in Stronghold; we just bookkeep the flag. */
   has_password: boolean;
@@ -85,6 +103,11 @@ type RawKeyRow = Omit<SshKeyRow, "has_passphrase" | "broken"> & {
 };
 
 type RawForwardRow = Omit<SshPortForwardRow, "enabled"> & { enabled: number };
+
+type RawGroupRow = Omit<SshGroupRow, "open" | "hidden"> & {
+  open: number;
+  hidden: number;
+};
 
 let db: Database | null = null;
 
@@ -114,7 +137,7 @@ export async function listHosts(): Promise<SshHostRow[]> {
   const rows = await ensure().select<RawHostRow[]>(
     `SELECT h.id, h.label, h.hostname, h.port, h.username, h.auth_method,
             h.has_password, h.key_id, k.label AS key_label,
-            h.host_fp_sha256, h.host_key_alg, h.broken,
+            h.host_fp_sha256, h.host_key_alg, h.group_id, h.broken,
             h.created_at, h.updated_at
      FROM ssh_hosts h
      LEFT JOIN ssh_keys k ON k.id = h.key_id
@@ -127,7 +150,7 @@ export async function getHost(id: number): Promise<SshHostRow | null> {
   const rows = await ensure().select<RawHostRow[]>(
     `SELECT h.id, h.label, h.hostname, h.port, h.username, h.auth_method,
             h.has_password, h.key_id, k.label AS key_label,
-            h.host_fp_sha256, h.host_key_alg, h.broken,
+            h.host_fp_sha256, h.host_key_alg, h.group_id, h.broken,
             h.created_at, h.updated_at
      FROM ssh_hosts h
      LEFT JOIN ssh_keys k ON k.id = h.key_id
@@ -147,8 +170,8 @@ export async function saveHost(input: SshHostInput): Promise<number> {
     const res = await ensure().execute(
       `INSERT INTO ssh_hosts
          (label, hostname, port, username, auth_method,
-          has_password, key_id, broken, created_at, updated_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, 0, $8, $9)`,
+          has_password, key_id, group_id, broken, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 0, $9, $10)`,
       [
         input.label,
         input.hostname,
@@ -157,6 +180,7 @@ export async function saveHost(input: SshHostInput): Promise<number> {
         input.auth_method,
         input.has_password ? 1 : 0,
         input.key_id ?? null,
+        input.group_id ?? null,
         now,
         now,
       ],
@@ -167,8 +191,8 @@ export async function saveHost(input: SshHostInput): Promise<number> {
     `UPDATE ssh_hosts
        SET label = $1, hostname = $2, port = $3, username = $4,
            auth_method = $5, has_password = $6, key_id = $7,
-           broken = 0, updated_at = $8
-     WHERE id = $9`,
+           group_id = $8, broken = 0, updated_at = $9
+     WHERE id = $10`,
     [
       input.label,
       input.hostname,
@@ -177,11 +201,37 @@ export async function saveHost(input: SshHostInput): Promise<number> {
       input.auth_method,
       input.has_password ? 1 : 0,
       input.key_id ?? null,
+      input.group_id ?? null,
       now,
       input.id,
     ],
   );
   return input.id;
+}
+
+/** Create a copy of an existing host (new row + copied port forwards) and
+ *  return its id. The label gets a " (copy)" suffix. The stored password
+ *  secret is NOT copied here — it lives in Stronghold and is handled by the
+ *  caller (the `has_password` flag is carried over so the caller knows whether
+ *  to duplicate the secret). The host-key fingerprint is intentionally left
+ *  unset so the copy re-runs TOFU on first connect. */
+export async function duplicateHost(source: SshHostRow): Promise<number> {
+  const newId = await saveHost({
+    id: null,
+    label: `${source.label} (copy)`,
+    hostname: source.hostname,
+    port: source.port,
+    username: source.username,
+    auth_method: source.auth_method,
+    key_id: source.key_id,
+    group_id: source.group_id,
+    has_password: source.has_password,
+  });
+  const forwards = await listPortForwards(source.id);
+  for (const f of forwards) {
+    await savePortForward({ ...f, id: null, host_id: newId });
+  }
+  return newId;
 }
 
 export async function clearHostPasswordFlag(id: number): Promise<void> {
@@ -219,6 +269,78 @@ export async function resetHostFingerprint(id: number): Promise<void> {
     `UPDATE ssh_hosts SET host_fp_sha256 = NULL, host_key_alg = NULL, updated_at = $1 WHERE id = $2`,
     [nowIso(), id],
   );
+}
+
+// ---------- groups ----------
+
+function groupFromRow(r: RawGroupRow): SshGroupRow {
+  return { ...r, open: !!r.open, hidden: !!r.hidden };
+}
+
+export async function listGroups(): Promise<SshGroupRow[]> {
+  const rows = await ensure().select<RawGroupRow[]>(
+    `SELECT id, label, parent_id, open, hidden, created_at, updated_at
+     FROM ssh_groups ORDER BY label COLLATE NOCASE`,
+  );
+  return rows.map(groupFromRow);
+}
+
+/** Persist a group's expanded/collapsed state in the sidebar tree. */
+export async function setGroupOpen(id: number, open: boolean): Promise<void> {
+  await ensure().execute(`UPDATE ssh_groups SET open = $1 WHERE id = $2`, [
+    open ? 1 : 0,
+    id,
+  ]);
+}
+
+/** Toggle whether a group (and its subtree) is concealed behind the PIN lock. */
+export async function setGroupHidden(id: number, hidden: boolean): Promise<void> {
+  await ensure().execute(`UPDATE ssh_groups SET hidden = $1, updated_at = $2 WHERE id = $3`, [
+    hidden ? 1 : 0,
+    nowIso(),
+    id,
+  ]);
+}
+
+export async function saveGroup(input: SshGroupInput): Promise<number> {
+  const now = nowIso();
+  if (input.id == null) {
+    const res = await ensure().execute(
+      `INSERT INTO ssh_groups (label, parent_id, created_at, updated_at)
+       VALUES ($1, $2, $3, $4)`,
+      [input.label, input.parent_id ?? null, now, now],
+    );
+    return res.lastInsertId ?? 0;
+  }
+  await ensure().execute(
+    `UPDATE ssh_groups SET label = $1, parent_id = $2, updated_at = $3 WHERE id = $4`,
+    [input.label, input.parent_id ?? null, now, input.id],
+  );
+  return input.id;
+}
+
+/** Delete a group, reparenting its hosts and subgroups up one level.
+ *  The FK ON DELETE clauses are inert (PRAGMA foreign_keys is OFF), so the
+ *  cascade is done manually here — same pattern as `deleteKey`. Child
+ *  subgroups inherit this group's parent (NULL → top level) and member
+ *  hosts move to that parent too (NULL → ungrouped). Nothing is destroyed. */
+export async function deleteGroup(id: number): Promise<void> {
+  const rows = await ensure().select<{ parent_id: number | null }[]>(
+    `SELECT parent_id FROM ssh_groups WHERE id = $1`,
+    [id],
+  );
+  if (rows.length === 0) return;
+  const parent = rows[0].parent_id;
+  const now = nowIso();
+  await ensure().execute(
+    `UPDATE ssh_groups SET parent_id = $1, updated_at = $2 WHERE parent_id = $3`,
+    [parent, now, id],
+  );
+  await ensure().execute(
+    `UPDATE ssh_hosts SET group_id = $1, updated_at = $2 WHERE group_id = $3`,
+    [parent, now, id],
+  );
+  await ensure().execute(`DELETE FROM ssh_groups WHERE id = $1`, [id]);
 }
 
 // ---------- keys ----------

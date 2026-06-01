@@ -5,7 +5,7 @@ import { onMounted, ref } from "vue";
 import { useDomScroll } from "../composables/useDomScroll";
 import { deleteKey, listKeys, type SshKeyRow } from "../db";
 import { deleteSecret, keyPassphraseKey, keyPrivateKey } from "../secrets";
-import { Button, EmptyState, PageHeader, Scrollbar } from "./ui";
+import { Button, ConfirmDialog, EmptyState, PageHeader, Scrollbar } from "./ui";
 
 const emit = defineEmits<{ back: []; addKey: []; editKey: [k: SshKeyRow] }>();
 
@@ -29,15 +29,25 @@ async function refresh() {
 onMounted(refresh);
 defineExpose({ refresh });
 
-async function onDelete(k: SshKeyRow) {
-  if (!confirm(`Delete key "${k.label}"? Hosts referencing it will lose the link.`)) return;
+const deleteTarget = ref<SshKeyRow | null>(null);
+
+function requestDelete(k: SshKeyRow) {
+  deleteTarget.value = k;
+}
+
+async function confirmDelete() {
+  const k = deleteTarget.value;
+  if (!k) return;
   try {
     await deleteKey(k.id);
     await deleteSecret(keyPrivateKey(k.id)).catch(() => undefined);
     await deleteSecret(keyPassphraseKey(k.id)).catch(() => undefined);
+    deleteTarget.value = null;
     await refresh();
   } catch (err) {
-    alert(`Delete failed: ${err}`);
+    console.error("deleteKey failed:", err);
+    errorText.value = `Delete failed: ${err}`;
+    deleteTarget.value = null;
   }
 }
 
@@ -105,7 +115,7 @@ async function copyPublic(k: SshKeyRow) {
             <Copy v-else :size="14" />
           </Button>
           <Button size="sm" variant="secondary" @click="emit('editKey', k)">Edit</Button>
-          <Button size="sm" variant="danger" title="Delete key" @click="onDelete(k)">
+          <Button size="sm" variant="danger" title="Delete key" @click="requestDelete(k)">
             <Trash2 :size="14" />
           </Button>
         </div>
@@ -121,6 +131,16 @@ async function copyPublic(k: SshKeyRow) {
       :viewport-size="viewportSize"
       @scroll-to="onScrollTo"
       @page-by="onPageBy"
+    />
+
+    <ConfirmDialog
+      :open="deleteTarget != null"
+      title="Delete key?"
+      :message="deleteTarget ? `Delete “${deleteTarget.label}”? Hosts referencing it will lose the link.` : ''"
+      confirm-label="Delete key"
+      cancel-label="Cancel"
+      @confirm="confirmDelete"
+      @cancel="deleteTarget = null"
     />
   </div>
 </template>

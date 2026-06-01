@@ -95,3 +95,8 @@ export function keyPrivateKey(keyId: number): string {
 export function keyPassphraseKey(keyId: number): string {
   return `key:${keyId}:passphrase`;
 }
+
+/** PIN that gates revealing hidden groups in the hosts sidebar. */
+export function hidePinKey(): string {
+  return "app:hide-pin";
+}

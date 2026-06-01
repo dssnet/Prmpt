@@ -13,16 +13,19 @@ import { computed, onMounted, reactive, ref } from "vue";
 
 import {
   deletePortForward,
+  listGroups,
   listKeys,
   listPortForwards,
   saveHost,
   savePortForward,
   type SshAuthMethod,
   type SshForwardKind,
+  type SshGroupRow,
   type SshHostRow,
   type SshKeyRow,
   type SshPortForwardRow,
 } from "../db";
+import { flattenForPicker } from "../lib/groupTree";
 import { deleteSecret, hostPasswordKey, saveSecret } from "../secrets";
 import {
   Badge,
@@ -49,12 +52,14 @@ const form = reactive({
   auth_method: "agent" as SshAuthMethod,
   password: "",
   key_id: "" as string,
+  group_id: "" as string,
 });
 
 const pwMode = ref<PwMode>("replace");
 const showPw = ref(false);
 
 const keys = ref<SshKeyRow[]>([]);
+const groups = ref<SshGroupRow[]>([]);
 const forwards = ref<WorkingForward[]>([]);
 const errorText = ref<string | null>(null);
 const saving = ref(false);
@@ -123,6 +128,11 @@ const FWD: Record<
   },
 };
 
+const groupOptions = computed(() => [
+  { value: "", label: "Ungrouped" },
+  ...flattenForPicker(groups.value),
+]);
+
 const keyOptions = computed(() => [
   {
     value: "",
@@ -157,6 +167,7 @@ function serialize(): string {
     username: form.username,
     auth_method: form.auth_method,
     key_id: form.key_id,
+    group_id: form.group_id,
     password: form.password,
     pwMode: pwMode.value,
     forwards: forwards.value
@@ -226,6 +237,7 @@ async function load() {
   form.auth_method = h?.auth_method ?? "agent";
   form.password = "";
   form.key_id = h?.key_id ? String(h.key_id) : "";
+  form.group_id = h?.group_id ? String(h.group_id) : "";
   pwMode.value = h?.has_password ? "saved" : "replace";
   showPw.value = false;
   errorText.value = null;
@@ -235,6 +247,13 @@ async function load() {
   } catch (err) {
     console.error("listKeys failed:", err);
     keys.value = [];
+  }
+
+  try {
+    groups.value = await listGroups();
+  } catch (err) {
+    console.error("listGroups failed:", err);
+    groups.value = [];
   }
 
   forwards.value = [];
@@ -332,6 +351,7 @@ async function onSubmit() {
       username: form.username.trim(),
       auth_method: auth,
       key_id: auth === "key" ? keyId : null,
+      group_id: form.group_id ? Number(form.group_id) : null,
       has_password: hasPassword,
     });
 
@@ -413,6 +433,19 @@ async function onSubmit() {
               <Input id="ssh-host-username" v-model="form.username" placeholder="root" />
               <p v-if="errors.username" class="flex items-center gap-1 text-danger text-xs mt-1">
                 <AlertTriangle :size="12" /> {{ errors.username }}
+              </p>
+            </FormRow>
+
+            <FormRow stack label="Group" html-for="ssh-host-group">
+              <DropdownMenu
+                id="ssh-host-group"
+                :options="groupOptions"
+                :model-value="form.group_id"
+                @update:model-value="form.group_id = String($event)"
+              />
+              <p class="text-xs text-fg-subtle mt-1">
+                Organize this host under a group. Create and manage groups in the
+                sidebar of the hosts list.
               </p>
             </FormRow>
           </div>

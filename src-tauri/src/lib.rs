@@ -98,6 +98,18 @@ fn ssh_migrations() -> Vec<Migration> {
             sql: include_str!("../migrations/0003_broken_flag.sql"),
             kind: MigrationKind::Up,
         },
+        Migration {
+            version: 4,
+            description: "groups",
+            sql: include_str!("../migrations/0004_groups.sql"),
+            kind: MigrationKind::Up,
+        },
+        Migration {
+            version: 5,
+            description: "group_flags",
+            sql: include_str!("../migrations/0005_group_flags.sql"),
+            kind: MigrationKind::Up,
+        },
     ]
 }
 

@@ -1,12 +1,52 @@
 <script setup lang="ts">
-import { AlertTriangle, KeyRound, Plus, Settings, Trash2 } from "lucide-vue-next";
-import { onMounted, ref } from "vue";
+import {
+  AlertTriangle,
+  Copy,
+  FolderPlus,
+  KeyRound,
+  Lock,
+  LockOpen,
+  Plus,
+  Server,
+  Settings,
+  Trash2,
+} from "lucide-vue-next";
+import { computed, onMounted, ref } from "vue";
 
 import { useDomScroll } from "../composables/useDomScroll";
-import { deleteHost, listHosts, type SshHostRow } from "../db";
-import { deleteSecret, hostPasswordKey } from "../secrets";
+import {
+  clearHostPasswordFlag,
+  deleteGroup,
+  deleteHost,
+  duplicateHost,
+  listGroups,
+  listHosts,
+  saveGroup,
+  setGroupHidden,
+  setGroupOpen,
+  type SshGroupRow,
+  type SshHostRow,
+} from "../db";
+import { buildGroupTree, concealedGroupIds, descendantGroupIds } from "../lib/groupTree";
+import {
+  deleteSecret,
+  hidePinKey,
+  hostPasswordKey,
+  loadSecret,
+  saveSecret,
+} from "../secrets";
 import { connectHost } from "../state/connect";
-import { Badge, Button, EmptyState, PageHeader, Scrollbar } from "./ui";
+import GroupTree from "./GroupTree.vue";
+import {
+  Badge,
+  Button,
+  ConfirmDialog,
+  EmptyState,
+  Input,
+  Modal,
+  PageHeader,
+  Scrollbar,
+} from "./ui";
 
 const emit = defineEmits<{
   addHost: [];
@@ -16,24 +56,77 @@ const emit = defineEmits<{
 }>();
 
 const hosts = ref<SshHostRow[]>([]);
+const groups = ref<SshGroupRow[]>([]);
 const errorText = ref<string | null>(null);
 const connecting = ref<number | null>(null);
+
+// null === "All hosts". Otherwise the selected group id.
+const selectedGroupId = ref<number | null>(null);
+const expanded = ref<Set<number>>(new Set());
+
+// Hidden-group lock. `locked` starts true every session so hidden groups stay
+// concealed until the PIN is entered; `pinSet` controls whether the lock
+// affordance is shown at all (it appears once the user has set a PIN).
+const locked = ref(true);
+const pinSet = ref(false);
 
 const scrollRoot = ref<HTMLElement | null>(null);
 const { position, range, viewportSize, onScrollTo, onPageBy } =
   useDomScroll(scrollRoot);
 
+// While locked, hidden groups (and their subtrees) are concealed entirely.
+const concealed = computed(() =>
+  locked.value ? concealedGroupIds(groups.value) : new Set<number>(),
+);
+
+const groupTree = computed(() =>
+  buildGroupTree(groups.value.filter((g) => !concealed.value.has(g.id))),
+);
+
+const visibleHosts = computed(() => {
+  let list = hosts.value;
+  if (concealed.value.size > 0) {
+    list = list.filter((h) => h.group_id == null || !concealed.value.has(h.group_id));
+  }
+  if (selectedGroupId.value == null) return list;
+  const ids = descendantGroupIds(groups.value, selectedGroupId.value);
+  return list.filter((h) => h.group_id != null && ids.has(h.group_id));
+});
+
+const selectedGroupLabel = computed(() =>
+  selectedGroupId.value == null
+    ? "All hosts"
+    : (groups.value.find((g) => g.id === selectedGroupId.value)?.label ?? "All hosts"),
+);
+
 async function refresh() {
   errorText.value = null;
   try {
-    hosts.value = await listHosts();
+    [hosts.value, groups.value] = await Promise.all([listHosts(), listGroups()]);
+    // Mirror the persisted expand/collapse state into the live set.
+    expanded.value = new Set(groups.value.filter((g) => g.open).map((g) => g.id));
+    // Drop a stale selection if its group was deleted or is now concealed.
+    if (
+      selectedGroupId.value != null &&
+      (!groups.value.some((g) => g.id === selectedGroupId.value) ||
+        concealed.value.has(selectedGroupId.value))
+    ) {
+      selectedGroupId.value = null;
+    }
   } catch (err) {
-    console.error("listHosts failed:", err);
+    console.error("refresh failed:", err);
     errorText.value = `Failed to load hosts: ${err}`;
   }
 }
 
-onMounted(refresh);
+onMounted(async () => {
+  await refresh();
+  try {
+    pinSet.value = (await loadSecret(hidePinKey())) != null;
+  } catch {
+    pinSet.value = false;
+  }
+});
 defineExpose({ refresh });
 
 async function onConnect(h: SshHostRow) {
@@ -42,23 +135,58 @@ async function onConnect(h: SshHostRow) {
     await connectHost(h);
   } catch (err) {
     console.error("connect failed:", err);
-    alert(`Connect failed: ${err}`);
+    errorText.value = `Connect failed: ${err}`;
   } finally {
     connecting.value = null;
   }
 }
 
-async function onDelete(h: SshHostRow) {
-  if (!confirm(`Delete host "${h.label}"?`)) return;
+const duplicating = ref<number | null>(null);
+
+async function onDuplicate(h: SshHostRow) {
+  duplicating.value = h.id;
+  try {
+    const newId = await duplicateHost(h);
+    // Carry the stored password over to the copy. If it can't be read
+    // (locked/missing), clear the flag so the copy isn't marked broken.
+    if (h.has_password) {
+      try {
+        const pw = await loadSecret(hostPasswordKey(h.id));
+        if (pw != null) await saveSecret(hostPasswordKey(newId), pw);
+        else await clearHostPasswordFlag(newId);
+      } catch {
+        await clearHostPasswordFlag(newId);
+      }
+    }
+    await refresh();
+  } catch (err) {
+    console.error("duplicateHost failed:", err);
+    errorText.value = `Duplicate failed: ${err}`;
+  } finally {
+    duplicating.value = null;
+  }
+}
+
+const deleteHostTarget = ref<SshHostRow | null>(null);
+
+function requestDeleteHost(h: SshHostRow) {
+  deleteHostTarget.value = h;
+}
+
+async function confirmDeleteHost() {
+  const h = deleteHostTarget.value;
+  if (!h) return;
   try {
     await deleteHost(h.id);
     if (h.has_password) {
       await deleteSecret(hostPasswordKey(h.id)).catch(() => undefined);
     }
+    deleteHostTarget.value = null;
     await refresh();
   } catch (err) {
     console.error("deleteHost failed:", err);
-    alert(`Delete failed: ${err}`);
+    errorText.value = `Delete failed: ${err}`;
+    deleteHostTarget.value = null;
   }
 }
 
@@ -71,79 +199,452 @@ function badgeText(h: SshHostRow): string {
   }
   return "agent";
 }
+
+// ---------- group tree interactions ----------
+
+function toggleGroup(id: number) {
+  const willOpen = !expanded.value.has(id);
+  if (willOpen) expanded.value.add(id);
+  else expanded.value.delete(id);
+  void setGroupOpen(id, willOpen).catch((err) =>
+    console.error("setGroupOpen failed:", err),
+  );
+}
+
+// ---------- hide / PIN lock ----------
+
+// When the user opens the set-PIN dialog by hiding a group, remember which
+// group to hide once the PIN is saved.
+const pendingHideGroupId = ref<number | null>(null);
+
+const setPinOpen = ref(false);
+const setPinValue = ref("");
+const setPinConfirm = ref("");
+const setPinError = ref<string | null>(null);
+
+const enterPinOpen = ref(false);
+const enterPinValue = ref("");
+const enterPinError = ref<string | null>(null);
+
+async function onToggleHidden(group: SshGroupRow) {
+  // First time hiding anything: require a PIN to be set first.
+  if (!group.hidden && !pinSet.value) {
+    pendingHideGroupId.value = group.id;
+    setPinValue.value = "";
+    setPinConfirm.value = "";
+    setPinError.value = null;
+    setPinOpen.value = true;
+    return;
+  }
+  try {
+    await setGroupHidden(group.id, !group.hidden);
+    await refresh();
+  } catch (err) {
+    console.error("setGroupHidden failed:", err);
+    errorText.value = `Hide failed: ${err}`;
+  }
+}
+
+async function submitSetPin() {
+  const pin = setPinValue.value.trim();
+  if (!pin) {
+    setPinError.value = "Enter a PIN.";
+    return;
+  }
+  if (pin !== setPinConfirm.value.trim()) {
+    setPinError.value = "PINs don't match.";
+    return;
+  }
+  try {
+    await saveSecret(hidePinKey(), pin);
+    pinSet.value = true;
+    if (pendingHideGroupId.value != null) {
+      await setGroupHidden(pendingHideGroupId.value, true);
+      pendingHideGroupId.value = null;
+    }
+    locked.value = true; // conceal immediately
+    setPinOpen.value = false;
+    await refresh();
+  } catch (err) {
+    console.error("set PIN failed:", err);
+    setPinError.value = `Could not save PIN: ${err}`;
+  }
+}
+
+function cancelSetPin() {
+  setPinOpen.value = false;
+  pendingHideGroupId.value = null;
+}
+
+function onLockClick() {
+  if (locked.value) {
+    enterPinValue.value = "";
+    enterPinError.value = null;
+    enterPinOpen.value = true;
+  } else {
+    // Re-lock: conceal hidden groups again and drop a now-hidden selection.
+    locked.value = true;
+    if (
+      selectedGroupId.value != null &&
+      concealedGroupIds(groups.value).has(selectedGroupId.value)
+    ) {
+      selectedGroupId.value = null;
+    }
+  }
+}
+
+async function submitEnterPin() {
+  try {
+    const stored = await loadSecret(hidePinKey());
+    if (stored != null && enterPinValue.value.trim() === stored) {
+      locked.value = false;
+      enterPinOpen.value = false;
+    } else {
+      enterPinError.value = "Incorrect PIN.";
+    }
+  } catch (err) {
+    console.error("verify PIN failed:", err);
+    enterPinError.value = `Could not verify PIN: ${err}`;
+  }
+}
+
+// ---------- group create / rename modal ----------
+
+type GroupModalMode = "create-top" | "create-sub" | "rename";
+
+const groupModalOpen = ref(false);
+const groupModalMode = ref<GroupModalMode>("create-top");
+const groupModalLabel = ref("");
+const groupModalParentId = ref<number | null>(null);
+const groupModalEditId = ref<number | null>(null);
+const groupSaving = ref(false);
+
+const groupModalTitle = computed(() =>
+  groupModalMode.value === "rename"
+    ? "Rename group"
+    : groupModalMode.value === "create-sub"
+      ? "New subgroup"
+      : "New group",
+);
+
+function openCreateTop() {
+  groupModalMode.value = "create-top";
+  groupModalLabel.value = "";
+  groupModalParentId.value = null;
+  groupModalEditId.value = null;
+  groupModalOpen.value = true;
+}
+
+function openCreateSub(parentId: number) {
+  groupModalMode.value = "create-sub";
+  groupModalLabel.value = "";
+  groupModalParentId.value = parentId;
+  groupModalEditId.value = null;
+  expanded.value.add(parentId); // reveal the new child once saved
+  groupModalOpen.value = true;
+}
+
+function openRename(group: SshGroupRow) {
+  groupModalMode.value = "rename";
+  groupModalLabel.value = group.label;
+  groupModalParentId.value = group.parent_id;
+  groupModalEditId.value = group.id;
+  groupModalOpen.value = true;
+}
+
+function closeGroupModal() {
+  groupModalOpen.value = false;
+}
+
+async function submitGroupModal() {
+  const label = groupModalLabel.value.trim();
+  if (!label) return;
+  groupSaving.value = true;
+  try {
+    await saveGroup({
+      id: groupModalEditId.value,
+      label,
+      parent_id: groupModalParentId.value,
+    });
+    groupModalOpen.value = false;
+    await refresh();
+  } catch (err) {
+    console.error("saveGroup failed:", err);
+    errorText.value = `Save group failed: ${err}`;
+  } finally {
+    groupSaving.value = false;
+  }
+}
+
+// ---------- group delete ----------
+
+const deleteGroupTarget = ref<SshGroupRow | null>(null);
+
+function requestDeleteGroup(group: SshGroupRow) {
+  deleteGroupTarget.value = group;
+}
+
+async function confirmDeleteGroup() {
+  const g = deleteGroupTarget.value;
+  if (!g) return;
+  try {
+    await deleteGroup(g.id);
+    if (selectedGroupId.value === g.id) selectedGroupId.value = null;
+    deleteGroupTarget.value = null;
+    await refresh();
+  } catch (err) {
+    console.error("deleteGroup failed:", err);
+    errorText.value = `Delete group failed: ${err}`;
+  }
+}
 </script>
 
 <template>
-  <div class="absolute inset-0 text-fg">
-    <div ref="scrollRoot" class="absolute inset-0 flex flex-col gap-3.5 px-9 pt-2 pb-6 overflow-y-auto scrollbar-none">
-    <PageHeader title="SSH hosts">
-      <template #actions>
-        <Button :icon="Plus" @click="emit('addHost')">Add host</Button>
-        <Button variant="secondary" :icon="KeyRound" @click="emit('manageKeys')">Manage keys</Button>
-      </template>
-    </PageHeader>
-
-    <div class="flex flex-col gap-2">
-      <div
-        v-for="h in hosts"
-        :key="h.id"
-        class="flex items-center justify-between gap-3 px-3.5 py-3 border border-border rounded-lg bg-surface-1 hover:border-border-strong transition-colors duration-150"
-      >
-        <div class="flex flex-col gap-0.5 min-w-0 flex-1">
-          <div class="font-medium text-fg flex items-center gap-1.5">
-            <span>{{ h.label }}</span>
-            <AlertTriangle
-              v-if="h.broken"
-              :size="14"
-              class="text-danger shrink-0 cursor-help"
-              title="Stored credentials could not be unlocked. Edit this host to re-enter the password."
-            />
-          </div>
-          <div class="text-xs text-fg-muted font-mono">{{ h.username }}@{{ h.hostname }}:{{ h.port }}</div>
-          <Badge>{{ badgeText(h) }}</Badge>
-          <div v-if="h.host_fp_sha256" class="text-[11px] text-fg-subtle font-mono mt-0.5">
-            fp {{ h.host_key_alg ?? "" }} {{ h.host_fp_sha256.slice(0, 24) }}…
-          </div>
+  <div class="absolute inset-0 flex text-fg">
+    <!-- Sidebar: group tree (floating card, like the host entries) -->
+    <aside class="flex-none w-60 my-4 ml-4 flex flex-col border border-border rounded-lg bg-surface-1 overflow-hidden">
+      <!-- All hosts, separated from the group tree below. -->
+      <div class="flex items-center gap-1 px-2 py-2 flex-none border-b border-border">
+        <div
+          class="flex items-center gap-1.5 flex-1 min-w-0 px-1.5 py-1 rounded-md cursor-pointer transition-colors duration-150"
+          :class="
+            selectedGroupId == null
+              ? 'bg-surface-3 text-fg'
+              : 'text-fg-muted hover:text-fg hover:bg-surface-2'
+          "
+          @click="selectedGroupId = null"
+        >
+          <Server :size="14" class="shrink-0" />
+          <span class="flex-1 min-w-0 truncate text-sm font-medium">All hosts</span>
         </div>
-        <div class="flex gap-1.5">
-          <Button
-            size="sm"
-            :disabled="h.broken || connecting === h.id"
-            @click="onConnect(h)"
-          >
-            Connect
-          </Button>
-          <Button size="sm" variant="secondary" @click="emit('editHost', h)">Edit</Button>
-          <Button size="sm" variant="danger" title="Delete host" @click="onDelete(h)">
-            <Trash2 :size="14" />
-          </Button>
+        <button
+          v-if="pinSet"
+          type="button"
+          :title="locked ? 'Locked — click to reveal hidden groups' : 'Unlocked — click to hide again'"
+          :aria-label="locked ? 'Unlock hidden groups' : 'Lock hidden groups'"
+          class="shrink-0 grid place-items-center w-6 h-6 rounded-md cursor-pointer transition-colors duration-150"
+          :class="
+            locked
+              ? 'text-fg-muted hover:text-fg hover:bg-surface-2'
+              : 'text-accent hover:bg-surface-2'
+          "
+          @click="onLockClick"
+        >
+          <Lock v-if="locked" :size="15" />
+          <LockOpen v-else :size="15" />
+        </button>
+        <button
+          type="button"
+          title="Add group"
+          aria-label="Add group"
+          class="shrink-0 grid place-items-center w-6 h-6 rounded-md text-fg-muted hover:text-fg hover:bg-surface-2 cursor-pointer transition-colors duration-150"
+          @click="openCreateTop"
+        >
+          <FolderPlus :size="15" />
+        </button>
+      </div>
+
+      <div class="flex-1 min-h-0 overflow-y-auto px-2 py-2 flex flex-col gap-0.5">
+        <GroupTree
+          :nodes="groupTree"
+          :selected-id="selectedGroupId"
+          :expanded="expanded"
+          @select="selectedGroupId = $event"
+          @toggle="toggleGroup"
+          @add-sub="openCreateSub"
+          @rename="openRename"
+          @delete="requestDeleteGroup"
+          @toggle-hidden="onToggleHidden"
+        />
+
+        <div v-if="groups.length === 0" class="px-1.5 py-2 text-[11px] text-fg-subtle leading-relaxed">
+          No groups yet. Use the
+          <FolderPlus :size="11" class="inline align-text-bottom" />
+          button to create one, then assign hosts to it from the host editor.
         </div>
       </div>
+    </aside>
+
+    <!-- Right column: filtered host list -->
+    <div class="relative flex-1 min-w-0 h-full">
+      <div ref="scrollRoot" class="absolute inset-0 flex flex-col gap-3.5 px-9 pt-2 pb-6 overflow-y-auto scrollbar-none">
+        <PageHeader :title="selectedGroupLabel">
+          <template #actions>
+            <Button :icon="Plus" @click="emit('addHost')">Add host</Button>
+            <Button variant="secondary" :icon="KeyRound" @click="emit('manageKeys')">Manage keys</Button>
+          </template>
+        </PageHeader>
+
+        <div class="flex flex-col gap-2">
+          <div
+            v-for="h in visibleHosts"
+            :key="h.id"
+            class="flex items-center justify-between gap-3 px-3.5 py-3 border border-border rounded-lg bg-surface-1 hover:border-border-strong transition-colors duration-150"
+          >
+            <div class="flex flex-col gap-0.5 min-w-0 flex-1">
+              <div class="font-medium text-fg flex items-center gap-1.5">
+                <span>{{ h.label }}</span>
+                <AlertTriangle
+                  v-if="h.broken"
+                  :size="14"
+                  class="text-danger shrink-0 cursor-help"
+                  title="Stored credentials could not be unlocked. Edit this host to re-enter the password."
+                />
+              </div>
+              <div class="text-xs text-fg-muted font-mono">{{ h.username }}@{{ h.hostname }}:{{ h.port }}</div>
+              <Badge>{{ badgeText(h) }}</Badge>
+              <div v-if="h.host_fp_sha256" class="text-[11px] text-fg-subtle font-mono mt-0.5">
+                fp {{ h.host_key_alg ?? "" }} {{ h.host_fp_sha256.slice(0, 24) }}…
+              </div>
+            </div>
+            <div class="flex gap-1.5">
+              <Button
+                size="sm"
+                :disabled="h.broken || connecting === h.id"
+                @click="onConnect(h)"
+              >
+                Connect
+              </Button>
+              <Button size="sm" variant="secondary" @click="emit('editHost', h)">Edit</Button>
+              <Button
+                size="sm"
+                variant="secondary"
+                title="Duplicate host"
+                :disabled="duplicating === h.id"
+                @click="onDuplicate(h)"
+              >
+                <Copy :size="14" />
+              </Button>
+              <Button size="sm" variant="danger" title="Delete host" @click="requestDeleteHost(h)">
+                <Trash2 :size="14" />
+              </Button>
+            </div>
+          </div>
+        </div>
+
+        <EmptyState v-if="visibleHosts.length === 0 || errorText">
+          {{
+            errorText
+              ?? (selectedGroupId == null
+                ? "No SSH hosts yet. Click \"Add host\" to save your first connection."
+                : `No hosts in "${selectedGroupLabel}" yet. Edit a host to assign it to this group.`)
+          }}
+        </EmptyState>
+      </div>
+
+      <!-- Settings button + custom scrollbar live outside the scroll container
+           so they stay pinned to the host pane rather than scrolling with the
+           list. -->
+      <button
+        type="button"
+        title="Theme settings"
+        aria-label="Open settings"
+        class="absolute right-4 bottom-4 w-11 h-11 rounded-full border border-border bg-surface-1 text-fg-muted hover:bg-surface-2 hover:text-fg hover:border-border-strong text-xl flex items-center justify-center cursor-pointer transition-colors duration-150"
+        @click="emit('openSettings')"
+      >
+        <Settings :size="20" />
+      </button>
+      <Scrollbar
+        :position="position"
+        :range="range"
+        :viewport-size="viewportSize"
+        @scroll-to="onScrollTo"
+        @page-by="onPageBy"
+      />
     </div>
 
-    <EmptyState v-if="hosts.length === 0 || errorText">
-      {{ errorText ?? "No SSH hosts yet. Click \"Add host\" to save your first connection." }}
-    </EmptyState>
-    </div>
+    <!-- Create / rename group -->
+    <Modal v-if="groupModalOpen">
+      <h2 class="m-0 text-base font-semibold text-fg">{{ groupModalTitle }}</h2>
+      <form class="flex flex-col gap-3.5" @submit.prevent="submitGroupModal">
+        <Input
+          v-model="groupModalLabel"
+          placeholder="Group name"
+          autocomplete="off"
+        />
+        <div class="flex justify-end gap-2">
+          <Button variant="secondary" @click="closeGroupModal">Cancel</Button>
+          <Button type="submit" :disabled="groupSaving || !groupModalLabel.trim()">
+            {{ groupModalMode === "rename" ? "Rename" : "Create" }}
+          </Button>
+        </div>
+      </form>
+    </Modal>
 
-    <!-- Settings button + custom scrollbar live outside the scroll container
-         so they stay pinned to the visible viewport rather than scrolling
-         with the list. -->
-    <button
-      type="button"
-      title="Theme settings"
-      aria-label="Open settings"
-      class="absolute right-4 bottom-4 w-11 h-11 rounded-full border border-border bg-surface-1 text-fg-muted hover:bg-surface-2 hover:text-fg hover:border-border-strong text-xl flex items-center justify-center cursor-pointer transition-colors duration-150"
-      @click="emit('openSettings')"
-    >
-      <Settings :size="20" />
-    </button>
-    <Scrollbar
-      :position="position"
-      :range="range"
-      :viewport-size="viewportSize"
-      @scroll-to="onScrollTo"
-      @page-by="onPageBy"
+    <!-- Delete host -->
+    <ConfirmDialog
+      :open="deleteHostTarget != null"
+      title="Delete host?"
+      :message="deleteHostTarget ? `Delete “${deleteHostTarget.label}”? This removes the saved connection${deleteHostTarget.has_password ? ' and its stored password' : ''}.` : ''"
+      confirm-label="Delete host"
+      cancel-label="Cancel"
+      @confirm="confirmDeleteHost"
+      @cancel="deleteHostTarget = null"
     />
+
+    <!-- Delete group -->
+    <Modal v-if="deleteGroupTarget" title="Delete group?">
+      <p class="m-0 text-sm text-fg-muted leading-relaxed">
+        Delete <span class="text-fg font-medium">"{{ deleteGroupTarget.label }}"</span>?
+        Its hosts and subgroups will move up one level — nothing is deleted with it.
+      </p>
+      <div class="flex justify-end gap-2 mt-1">
+        <Button variant="secondary" @click="deleteGroupTarget = null">Cancel</Button>
+        <Button variant="danger" @click="confirmDeleteGroup">Delete group</Button>
+      </div>
+    </Modal>
+
+    <!-- Set a PIN (first time a group is hidden) -->
+    <Modal v-if="setPinOpen">
+      <h2 class="m-0 text-base font-semibold text-fg">Set a PIN</h2>
+      <p class="m-0 text-sm text-fg-muted leading-relaxed">
+        Hidden groups are concealed until this PIN is entered. You'll need it to
+        reveal them again, so keep it somewhere safe.
+      </p>
+      <form class="flex flex-col gap-3.5" @submit.prevent="submitSetPin">
+        <Input
+          v-model="setPinValue"
+          type="password"
+          placeholder="New PIN"
+          autocomplete="off"
+        />
+        <Input
+          v-model="setPinConfirm"
+          type="password"
+          placeholder="Confirm PIN"
+          autocomplete="off"
+        />
+        <p v-if="setPinError" class="flex items-center gap-1 text-danger text-xs">
+          <AlertTriangle :size="12" /> {{ setPinError }}
+        </p>
+        <div class="flex justify-end gap-2">
+          <Button variant="secondary" @click="cancelSetPin">Cancel</Button>
+          <Button type="submit">Set PIN &amp; hide</Button>
+        </div>
+      </form>
+    </Modal>
+
+    <!-- Enter the PIN to reveal hidden groups -->
+    <Modal v-if="enterPinOpen">
+      <h2 class="m-0 text-base font-semibold text-fg">Enter PIN</h2>
+      <p class="m-0 text-sm text-fg-muted leading-relaxed">
+        Enter your PIN to reveal hidden groups and their hosts.
+      </p>
+      <form class="flex flex-col gap-3.5" @submit.prevent="submitEnterPin">
+        <Input
+          v-model="enterPinValue"
+          type="password"
+          placeholder="PIN"
+          autocomplete="off"
+        />
+        <p v-if="enterPinError" class="flex items-center gap-1 text-danger text-xs">
+          <AlertTriangle :size="12" /> {{ enterPinError }}
+        </p>
+        <div class="flex justify-end gap-2">
+          <Button variant="secondary" @click="enterPinOpen = false">Cancel</Button>
+          <Button type="submit">Unlock</Button>
+        </div>
+      </form>
+    </Modal>
   </div>
 </template>
