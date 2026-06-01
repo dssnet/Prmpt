@@ -146,6 +146,13 @@ export async function scrollTab(tabId: number, kind: ScrollKind): Promise<void> 
   await invoke("scroll_tab", { tabId, kind });
 }
 
+/** Physical mouse-wheel notch in rows (negative = up). The backend routes it:
+ *  arrow keys for an alternate-screen app (nano/less/vim) without mouse tracking,
+ *  otherwise a scrollback viewport scroll. */
+export async function wheelScroll(tabId: number, rows: number): Promise<void> {
+  await invoke("wheel_scroll", { tabId, rows });
+}
+
 /** Extract the text of a screen-absolute selection range (inclusive, already
  *  ordered start→end). Reads from the full grid on the backend so selections
  *  that span scrollback — beyond the current viewport snapshot — copy correctly. */

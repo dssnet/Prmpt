@@ -12,7 +12,7 @@ use std::{
 use crossbeam_channel::{bounded, select, unbounded, Receiver, Sender};
 use libghostty_vt::{
     render::{CellIterator, CursorVisualStyle, Dirty, RenderState, RowIterator},
-    screen::CellWide,
+    screen::{CellWide, Screen},
     style::{RgbColor, StyleColor},
     terminal::{Point, PointCoordinate, ScrollViewport},
     Terminal, TerminalOptions,
@@ -50,6 +50,10 @@ const PTY_WRITE_QUEUE_CAP: usize = 1024;
 /// loop drains them faster than they arrive), so their output is untouched.
 const INTERRUPT_FLUSH_BACKLOG: usize = 64;
 
+/// Max arrow-key presses a single mouse-wheel event may inject into an
+/// alternate-screen app. Caps a fast flick so it can't flood the PTY.
+const WHEEL_ARROW_CAP: u32 = 50;
+
 #[derive(Clone, Copy, Debug)]
 pub enum ScrollKind {
     Top,
@@ -70,6 +74,10 @@ pub enum TabCmd {
         cell_height_px: u32,
     },
     Scroll(ScrollKind),
+    /// Physical mouse-wheel notch, in rows (negative = up/away from the user).
+    /// Routed smartly on the tab thread: translated to arrow keys for an
+    /// alternate-screen app with no mouse tracking, otherwise a viewport scroll.
+    Wheel(i32),
     /// Extract the text of a screen-absolute coordinate range (inclusive) and
     /// send it back on `reply`. Coordinates are `(col, screen_row)` where
     /// `screen_row` is relative to the top of the scrollback — the same
@@ -454,6 +462,15 @@ impl TabRegistry {
         Ok(())
     }
 
+    pub fn wheel_scroll(&self, id: u64, rows: i32) -> AppResult<()> {
+        let guard = self.inner.lock();
+        let h = guard.get(&id).ok_or(AppError::UnknownTab(id))?;
+        h.cmd_tx
+            .send(TabCmd::Wheel(rows))
+            .map_err(|_| AppError::UnknownTab(id))?;
+        Ok(())
+    }
+
     /// Ask the tab thread for the text of a screen-absolute range (inclusive),
     /// blocking on a reply channel. The terminal lives on the tab thread, so we
     /// round-trip a `TabCmd::CopyText` rather than touching it here.
@@ -694,6 +711,31 @@ fn run_tab_loop(
                     };
                     terminal.scroll_viewport(sv);
                     pending_emit = true;
+                }
+                Ok(TabCmd::Wheel(rows)) => {
+                    let alt = terminal
+                        .active_screen()
+                        .map(|s| s == Screen::Alternate)
+                        .unwrap_or(false);
+                    let tracking = terminal.is_mouse_tracking().unwrap_or(false);
+                    if rows != 0 && alt && !tracking {
+                        // Alternate screen, no mouse reporting → drive the app
+                        // like the arrow keys do. input.ts sends ESC[A / ESC[B
+                        // (no DECCKM handling), so match that exactly — apps like
+                        // nano already respond to those.
+                        let seq: &[u8] = if rows < 0 { b"\x1b[A" } else { b"\x1b[B" };
+                        let count = rows.unsigned_abs().min(WHEEL_ARROW_CAP) as usize;
+                        let mut bytes = Vec::with_capacity(seq.len() * count);
+                        for _ in 0..count {
+                            bytes.extend_from_slice(seq);
+                        }
+                        terminal.scroll_viewport(ScrollViewport::Bottom);
+                        // Reliable blocking send, same path as TabCmd::Write.
+                        let _ = write_tx.send(bytes);
+                    } else {
+                        terminal.scroll_viewport(ScrollViewport::Delta(rows as isize));
+                        pending_emit = true;
+                    }
                 }
                 Ok(TabCmd::CopyText { start, end, reply }) => {
                     let cols = terminal.cols().unwrap_or(0);

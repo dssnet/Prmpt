@@ -2,7 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { X } from "lucide-vue-next";
 
-import { scrollTab, showContextMenu, type Config } from "../ipc";
+import { wheelScroll, showContextMenu, type Config } from "../ipc";
 import TerminalScrollbar from "./TerminalScrollbar.vue";
 import {
   applyRendererTheme,
@@ -87,7 +87,7 @@ function onHostWheel(e: WheelEvent) {
   wheelAccum -= rows * pxPerRow;
   const target = inputTargetTabId();
   if (target == null) return;
-  void scrollTab(target, { kind: "delta", delta: rows });
+  void wheelScroll(target, rows);
 }
 
 function onHostContextMenu(e: MouseEvent) {

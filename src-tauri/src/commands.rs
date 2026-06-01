@@ -139,6 +139,19 @@ pub fn scroll_tab(
     registry.scroll(tab_id, kind.into())
 }
 
+/// Physical mouse-wheel notch in rows (negative = up). Routed on the tab thread:
+/// arrow keys for an alternate-screen app without mouse tracking, else a viewport
+/// scroll. Separate from `scroll_tab` so the scrollbar/keyboard/selection paths
+/// keep pure viewport-scroll semantics.
+#[tauri::command]
+pub fn wheel_scroll(
+    registry: State<'_, SharedRegistry>,
+    tab_id: u64,
+    rows: i32,
+) -> AppResult<()> {
+    registry.wheel_scroll(tab_id, rows)
+}
+
 /// Returns the selected text for a screen-absolute coordinate range so the
 /// frontend can copy selections that extend into scrollback (which the render
 /// snapshot doesn't include). Coordinates must be pre-ordered (start before

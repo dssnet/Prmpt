@@ -188,6 +188,7 @@ pub fn run() {
             commands::write_input,
             commands::resize_tab,
             commands::scroll_tab,
+            commands::wheel_scroll,
             commands::copy_selection_text,
             commands::list_tabs,
             commands::get_config,
