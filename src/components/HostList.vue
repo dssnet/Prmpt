@@ -3,6 +3,7 @@ import {
   AlertTriangle,
   Copy,
   FolderPlus,
+  Info,
   KeyRound,
   Lock,
   LockOpen,
@@ -144,6 +145,7 @@ async function onConnect(h: SshHostRow) {
 }
 
 const duplicating = ref<number | null>(null);
+const advancedHost = ref<SshHostRow | null>(null);
 
 async function onDuplicate(h: SshHostRow) {
   duplicating.value = h.id;
@@ -508,10 +510,6 @@ async function confirmDeleteGroup() {
                 />
               </div>
               <div class="text-xs text-fg-muted font-mono">{{ h.username }}@{{ h.hostname }}:{{ h.port }}</div>
-              <Badge>{{ badgeText(h) }}</Badge>
-              <div v-if="h.host_fp_sha256" class="text-[11px] text-fg-subtle font-mono mt-0.5">
-                fp {{ h.host_key_alg ?? "" }} {{ h.host_fp_sha256.slice(0, 24) }}…
-              </div>
             </div>
             <div class="flex gap-1.5">
               <Button
@@ -526,7 +524,7 @@ async function confirmDeleteGroup() {
                   <button
                     type="button"
                     role="menuitem"
-                    class="w-full flex items-center gap-2 px-2 py-1.5 text-sm rounded-md text-fg hover:bg-surface-2 cursor-pointer transition-colors duration-150"
+                    class="w-full flex items-center gap-2 px-2 py-1.5 text-sm rounded-md whitespace-nowrap text-fg hover:bg-surface-2 cursor-pointer transition-colors duration-150"
                     @click="emit('editHost', h); close()"
                   >
                     <Pencil :size="14" class="shrink-0 text-fg-muted" /> Edit
@@ -535,7 +533,7 @@ async function confirmDeleteGroup() {
                     type="button"
                     role="menuitem"
                     :disabled="duplicating === h.id"
-                    class="w-full flex items-center gap-2 px-2 py-1.5 text-sm rounded-md text-fg hover:bg-surface-2 cursor-pointer transition-colors duration-150 disabled:opacity-50 disabled:cursor-default"
+                    class="w-full flex items-center gap-2 px-2 py-1.5 text-sm rounded-md whitespace-nowrap text-fg hover:bg-surface-2 cursor-pointer transition-colors duration-150 disabled:opacity-50 disabled:cursor-default"
                     @click="onDuplicate(h); close()"
                   >
                     <Copy :size="14" class="shrink-0 text-fg-muted" /> Duplicate
@@ -543,7 +541,15 @@ async function confirmDeleteGroup() {
                   <button
                     type="button"
                     role="menuitem"
-                    class="w-full flex items-center gap-2 px-2 py-1.5 text-sm rounded-md text-danger hover:bg-[color-mix(in_srgb,var(--color-danger)_18%,transparent)] cursor-pointer transition-colors duration-150"
+                    class="w-full flex items-center gap-2 px-2 py-1.5 text-sm rounded-md whitespace-nowrap text-fg hover:bg-surface-2 cursor-pointer transition-colors duration-150"
+                    @click="advancedHost = h; close()"
+                  >
+                    <Info :size="14" class="shrink-0 text-fg-muted" /> Show advanced infos
+                  </button>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    class="w-full flex items-center gap-2 px-2 py-1.5 text-sm rounded-md whitespace-nowrap text-danger hover:bg-[color-mix(in_srgb,var(--color-danger)_18%,transparent)] cursor-pointer transition-colors duration-150"
                     @click="requestDeleteHost(h); close()"
                   >
                     <Trash2 :size="14" class="shrink-0" /> Delete
@@ -603,6 +609,38 @@ async function confirmDeleteGroup() {
       @confirm="confirmDeleteHost"
       @cancel="deleteHostTarget = null"
     />
+
+    <!-- Advanced host info -->
+    <Modal v-if="advancedHost">
+      <h2 class="m-0 text-base font-semibold text-fg">{{ advancedHost.label }}</h2>
+      <dl class="m-0 flex flex-col gap-3 text-sm">
+        <div class="flex flex-col gap-0.5">
+          <dt class="text-xs uppercase tracking-wide text-fg-subtle">Connection</dt>
+          <dd class="m-0 font-mono text-fg-muted">
+            {{ advancedHost.username }}@{{ advancedHost.hostname }}:{{ advancedHost.port }}
+          </dd>
+        </div>
+        <div class="flex flex-col gap-1">
+          <dt class="text-xs uppercase tracking-wide text-fg-subtle">Authentication</dt>
+          <dd class="m-0"><Badge>{{ badgeText(advancedHost) }}</Badge></dd>
+        </div>
+        <div class="flex flex-col gap-0.5">
+          <dt class="text-xs uppercase tracking-wide text-fg-subtle">Host key signature</dt>
+          <dd
+            v-if="advancedHost.host_fp_sha256"
+            class="m-0 font-mono text-xs text-fg-muted break-all"
+          >
+            {{ advancedHost.host_key_alg ? advancedHost.host_key_alg + " " : "" }}{{ advancedHost.host_fp_sha256 }}
+          </dd>
+          <dd v-else class="m-0 text-xs text-fg-subtle">
+            Not recorded yet — pinned on first connect.
+          </dd>
+        </div>
+      </dl>
+      <div class="flex justify-end gap-2 mt-1">
+        <Button variant="secondary" @click="advancedHost = null">Close</Button>
+      </div>
+    </Modal>
 
     <!-- Delete group -->
     <Modal v-if="deleteGroupTarget" title="Delete group?">
