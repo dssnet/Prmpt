@@ -146,6 +146,25 @@ export async function scrollTab(tabId: number, kind: ScrollKind): Promise<void> 
   await invoke("scroll_tab", { tabId, kind });
 }
 
+/** Extract the text of a screen-absolute selection range (inclusive, already
+ *  ordered start→end). Reads from the full grid on the backend so selections
+ *  that span scrollback — beyond the current viewport snapshot — copy correctly. */
+export async function copySelectionText(
+  tabId: number,
+  startCol: number,
+  startRow: number,
+  endCol: number,
+  endRow: number,
+): Promise<string> {
+  return await invoke("copy_selection_text", {
+    tabId,
+    startCol,
+    startRow,
+    endCol,
+    endRow,
+  });
+}
+
 export async function showContextMenu(): Promise<void> {
   await invoke("show_context_menu");
 }

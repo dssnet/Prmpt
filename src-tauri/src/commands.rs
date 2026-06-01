@@ -139,6 +139,22 @@ pub fn scroll_tab(
     registry.scroll(tab_id, kind.into())
 }
 
+/// Returns the selected text for a screen-absolute coordinate range so the
+/// frontend can copy selections that extend into scrollback (which the render
+/// snapshot doesn't include). Coordinates must be pre-ordered (start before
+/// end in reading order); `*_row` is relative to the top of the scrollback.
+#[tauri::command]
+pub fn copy_selection_text(
+    registry: State<'_, SharedRegistry>,
+    tab_id: u64,
+    start_col: u16,
+    start_row: u32,
+    end_col: u16,
+    end_row: u32,
+) -> AppResult<String> {
+    registry.copy_text(tab_id, (start_col, start_row), (end_col, end_row))
+}
+
 #[tauri::command]
 pub fn list_tabs(registry: State<'_, SharedRegistry>) -> Vec<TabInfo> {
     registry.list()

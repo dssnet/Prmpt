@@ -14,7 +14,7 @@ use libghostty_vt::{
     render::{CellIterator, CursorVisualStyle, Dirty, RenderState, RowIterator},
     screen::CellWide,
     style::{RgbColor, StyleColor},
-    terminal::ScrollViewport,
+    terminal::{Point, PointCoordinate, ScrollViewport},
     Terminal, TerminalOptions,
 };
 use parking_lot::Mutex;
@@ -70,6 +70,16 @@ pub enum TabCmd {
         cell_height_px: u32,
     },
     Scroll(ScrollKind),
+    /// Extract the text of a screen-absolute coordinate range (inclusive) and
+    /// send it back on `reply`. Coordinates are `(col, screen_row)` where
+    /// `screen_row` is relative to the top of the scrollback — the same
+    /// coordinate space the frontend tracks selections in. Used for copy,
+    /// which must reach rows outside the current viewport snapshot.
+    CopyText {
+        start: (u16, u32),
+        end: (u16, u32),
+        reply: Sender<String>,
+    },
     SetWindow(String),
     Shutdown,
 }
@@ -444,6 +454,27 @@ impl TabRegistry {
         Ok(())
     }
 
+    /// Ask the tab thread for the text of a screen-absolute range (inclusive),
+    /// blocking on a reply channel. The terminal lives on the tab thread, so we
+    /// round-trip a `TabCmd::CopyText` rather than touching it here.
+    pub fn copy_text(&self, id: u64, start: (u16, u32), end: (u16, u32)) -> AppResult<String> {
+        let (reply_tx, reply_rx) = bounded::<String>(1);
+        {
+            let guard = self.inner.lock();
+            let h = guard.get(&id).ok_or(AppError::UnknownTab(id))?;
+            h.cmd_tx
+                .send(TabCmd::CopyText {
+                    start,
+                    end,
+                    reply: reply_tx,
+                })
+                .map_err(|_| AppError::UnknownTab(id))?;
+        }
+        reply_rx
+            .recv_timeout(Duration::from_secs(5))
+            .map_err(|_| AppError::UnknownTab(id))
+    }
+
     pub fn close(&self, id: u64) -> AppResult<()> {
         let mut guard = self.inner.lock();
         if let Some(h) = guard.remove(&id) {
@@ -664,6 +695,11 @@ fn run_tab_loop(
                     terminal.scroll_viewport(sv);
                     pending_emit = true;
                 }
+                Ok(TabCmd::CopyText { start, end, reply }) => {
+                    let cols = terminal.cols().unwrap_or(0);
+                    let text = extract_screen_text(&terminal, start, end, cols);
+                    let _ = reply.send(text);
+                }
                 Ok(TabCmd::Shutdown) | Err(_) => {
                     match &mut backend {
                         #[cfg(not(any(target_os = "ios", target_os = "android")))]
@@ -718,6 +754,60 @@ fn run_tab_loop(
 
 fn rgb_to_u32(c: RgbColor) -> u32 {
     (u32::from(c.r) << 16) | (u32::from(c.g) << 8) | u32::from(c.b)
+}
+
+/// Extract the text of an inclusive screen-absolute range `[start, end]` from
+/// the full grid (including scrollback), one `\n` per visual row with trailing
+/// whitespace trimmed. `start`/`end` are `(col, screen_row)` and must already
+/// be ordered (start before end in reading order). Reads each cell via
+/// `grid_ref(Point::Screen(..))`, which can address rows above the viewport —
+/// that's what lets copy reach scrollback the render snapshot never shipped.
+fn extract_screen_text(terminal: &Terminal, start: (u16, u32), end: (u16, u32), cols: u16) -> String {
+    if cols == 0 || end.1 < start.1 {
+        return String::new();
+    }
+    let last_col = cols - 1;
+    let mut lines: Vec<String> = Vec::with_capacity((end.1 - start.1 + 1) as usize);
+    let mut buf = [' '; 32];
+    for row in start.1..=end.1 {
+        let c0 = if row == start.1 { start.0 } else { 0 };
+        let c1 = if row == end.1 { end.0.min(last_col) } else { last_col };
+        let mut line = String::new();
+        let mut col = c0;
+        while col <= c1 {
+            let coord = PointCoordinate { x: col, y: row };
+            let gr = match terminal.grid_ref(Point::Screen(coord)) {
+                Ok(gr) => gr,
+                Err(_) => {
+                    line.push(' ');
+                    col += 1;
+                    continue;
+                }
+            };
+            // Skip the trailing spacer that follows a wide cell — its glyph
+            // already came from the wide cell itself.
+            if matches!(gr.cell().and_then(|c| c.wide()), Ok(CellWide::SpacerTail)) {
+                col += 1;
+                continue;
+            }
+            match gr.graphemes(&mut buf) {
+                Ok(0) => line.push(' '),
+                Ok(n) => line.extend(&buf[..n]),
+                Err(libghostty_vt::Error::OutOfSpace { required }) if required > 0 => {
+                    let mut big = vec![' '; required];
+                    if let Ok(n) = gr.graphemes(&mut big) {
+                        line.extend(&big[..n]);
+                    } else {
+                        line.push(' ');
+                    }
+                }
+                Err(_) => line.push(' '),
+            }
+            col += 1;
+        }
+        lines.push(line.trim_end().to_string());
+    }
+    lines.join("\n")
 }
 
 fn resolve_style_color(sc: StyleColor, palette: &[RgbColor; 256]) -> Option<RgbColor> {

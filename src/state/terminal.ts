@@ -2,8 +2,9 @@ import { readText as readClipboardText } from "@tauri-apps/plugin-clipboard-mana
 import { ref } from "vue";
 
 import {
-  FLAG_SPACER_TAIL,
+  copySelectionText,
   resizeTab,
+  scrollTab,
   writeInput,
   type Config,
   type RenderPayload,
@@ -326,33 +327,6 @@ function orderSelection(sel: Selection): { start: CellPoint; end: CellPoint } {
     : { start: { ...h }, end: { ...a } };
 }
 
-/** Pull the selected text out of a viewport snapshot. Selection is in screen
- *  coords; if either endpoint sits outside the current viewport we return ""
- *  — the user scrolled away from the selected content and we no longer have
- *  those cells on hand. */
-function extractSelection(p: RenderPayload, sel: Selection): string {
-  const top = p.viewport_top;
-  const norm = orderSelection(sel);
-  const sRow = norm.start.screenRow - top;
-  const eRow = norm.end.screenRow - top;
-  if (sRow < 0 || eRow >= p.rows) return "";
-  const lines: string[] = [];
-  for (let row = sRow; row <= eRow; row++) {
-    const c0 = row === sRow ? norm.start.col : 0;
-    const c1Raw = row === eRow ? norm.end.col : p.cols - 1;
-    const c1 = Math.min(c1Raw, p.cols - 1);
-    let line = "";
-    for (let col = c0; col <= c1; col++) {
-      const cell = p.cells[row * p.cols + col];
-      if (!cell) continue;
-      if (cell.flags & FLAG_SPACER_TAIL) continue;
-      line += cell.ch === 0 ? " " : String.fromCodePoint(cell.ch);
-    }
-    lines.push(line.replace(/\s+$/, ""));
-  }
-  return lines.join("\n");
-}
-
 function isWordChar(cp: number): boolean {
   if (cp === 0) return false;
   if ((cp >= 48 && cp <= 57) || (cp >= 65 && cp <= 90) || (cp >= 97 && cp <= 122)) return true;
@@ -402,6 +376,17 @@ function pointerOrigin(): { x: number; y: number } {
   return { x: 0, y: 0 };
 }
 
+/** Height (CSS px) of the area pointer events map into: the focused pane for a
+ *  workspace, the whole canvas otherwise. Pairs with `pointerOrigin`. */
+function pointerAreaHeight(): number {
+  const a = activeWs();
+  if (a) {
+    const pane = wsPanes.find((p) => p.tabId === a.ws.focusedTabId);
+    if (pane) return pane.h;
+  }
+  return canvasEl ? canvasEl.getBoundingClientRect().height : 0;
+}
+
 function cellFromEvent(e: MouseEvent): CellPoint {
   if (!canvasEl) return { col: 0, screenRow: 0 };
   const r = canvasEl.getBoundingClientRect();
@@ -422,6 +407,92 @@ let pendingAnchor: CellPoint | null = null;
 let lastClickAt = 0;
 let lastClickCell: CellPoint | null = null;
 let clickCount = 0;
+/** Last pointer event seen during the active drag, kept so the auto-scroll
+ *  timer can keep extending the selection while the pointer is held still
+ *  outside the viewport. */
+let lastDragEvent: MouseEvent | null = null;
+let autoScrollTimer: number | null = null;
+
+/** Vertical edge the pointer is past, relative to the focused area: -1 above
+ *  the top, +1 below the bottom, 0 inside. */
+function edgeDirection(e: MouseEvent): number {
+  if (!canvasEl) return 0;
+  const r = canvasEl.getBoundingClientRect();
+  const localY = e.clientY - r.top - pointerOrigin().y;
+  const h = pointerAreaHeight();
+  if (localY < 0) return -1;
+  if (h > 0 && localY > h) return 1;
+  return 0;
+}
+
+/** Rows to scroll per auto-scroll tick, scaled by how far past the edge the
+ *  pointer sits (clamped) so a small overshoot creeps and a big one races. */
+function autoScrollLines(e: MouseEvent): number {
+  if (!canvasEl || cellHeightPx <= 0) return 1;
+  const r = canvasEl.getBoundingClientRect();
+  const localY = e.clientY - r.top - pointerOrigin().y;
+  const h = pointerAreaHeight();
+  const over = localY < 0 ? -localY : Math.max(0, localY - h);
+  return Math.max(1, Math.min(10, Math.ceil(over / cellHeightPx)));
+}
+
+function stopAutoScroll(): void {
+  if (autoScrollTimer !== null) {
+    window.clearInterval(autoScrollTimer);
+    autoScrollTimer = null;
+  }
+}
+
+function autoScrollTick(): void {
+  if (!dragging || !lastDragEvent) {
+    stopAutoScroll();
+    return;
+  }
+  const dir = edgeDirection(lastDragEvent);
+  if (dir === 0) {
+    stopAutoScroll();
+    return;
+  }
+  const tabId = inputTargetTabId();
+  if (tabId == null) {
+    stopAutoScroll();
+    return;
+  }
+  void scrollTab(tabId, { kind: "delta", delta: dir * autoScrollLines(lastDragEvent) });
+  // Re-pin the selection head to the edge row against the (about-to-update)
+  // viewport; subsequent ticks pick up the new viewport_top from render events.
+  applyDragMove(lastDragEvent);
+}
+
+/** Start the auto-scroll timer when the pointer is past a vertical edge, stop
+ *  it when it returns inside. Idempotent — safe to call on every move. */
+function updateAutoScroll(e: MouseEvent): void {
+  if (edgeDirection(e) === 0) {
+    stopAutoScroll();
+    return;
+  }
+  if (autoScrollTimer === null) {
+    autoScrollTimer = window.setInterval(autoScrollTick, 50);
+  }
+}
+
+/** Apply a drag position to the selection head (or promote a pending anchor
+ *  into a live selection). Shared by `onMouseMove` and the auto-scroll tick. */
+function applyDragMove(e: MouseEvent): void {
+  const p = cellFromEvent(e);
+  if (pendingAnchor) {
+    if (p.col === pendingAnchor.col && p.screenRow === pendingAnchor.screenRow) return;
+    selection = { anchor: pendingAnchor, head: p, mode: "char" };
+    pendingAnchor = null;
+    selectionTick.value++;
+    requestDraw();
+    return;
+  }
+  if (!selection) return;
+  selection.head = p;
+  selectionTick.value++;
+  requestDraw();
+}
 
 /** host/canvas-relative CSS-px point for a pointer event. */
 function localPoint(e: MouseEvent): { x: number; y: number } | null {
@@ -490,25 +561,17 @@ export function onMouseDown(e: MouseEvent, activeKind: string | undefined): void
 
 export function onMouseMove(e: MouseEvent): void {
   if (!dragging) return;
-  const p = cellFromEvent(e);
-  if (pendingAnchor) {
-    if (p.col === pendingAnchor.col && p.screenRow === pendingAnchor.screenRow) return;
-    selection = { anchor: pendingAnchor, head: p, mode: "char" };
-    pendingAnchor = null;
-    selectionTick.value++;
-    requestDraw();
-    return;
-  }
-  if (!selection) return;
-  selection.head = p;
-  selectionTick.value++;
-  requestDraw();
+  lastDragEvent = e;
+  applyDragMove(e);
+  updateAutoScroll(e);
 }
 
 export function onMouseUp(): void {
   const hadDrag = dragging && pendingAnchor === null;
   dragging = false;
   pendingAnchor = null;
+  lastDragEvent = null;
+  stopAutoScroll();
   if (selection) {
     const a = selection.anchor;
     const h = selection.head;
@@ -520,6 +583,7 @@ export function onMouseUp(): void {
 }
 
 export function clearSelection(): void {
+  stopAutoScroll();
   if (!selection) return;
   selection = null;
   selectionTick.value++;
@@ -547,11 +611,26 @@ export function copyCurrentSelection(): void {
   if (!selection) return;
   const snap = focusedSnapshot();
   if (!snap) return;
-  const text = extractSelection(snap, selection);
-  if (text.length === 0) return;
-  void navigator.clipboard.writeText(text).catch((err) => {
-    console.error("clipboard write failed:", err);
-  });
+  const a = selection.anchor;
+  const h = selection.head;
+  if (a.screenRow === h.screenRow && a.col === h.col) return;
+  const { start, end } = orderSelection(selection);
+  // Extract from the backend grid (not the viewport snapshot) so selections
+  // spanning scrollback copy in full.
+  void copySelectionText(
+    snap.tab_id,
+    start.col,
+    start.screenRow,
+    end.col,
+    end.screenRow,
+  )
+    .then((text) => {
+      if (text.length === 0) return;
+      return navigator.clipboard.writeText(text);
+    })
+    .catch((err) => {
+      console.error("copy failed:", err);
+    });
 }
 
 /** Tab id that keyboard / paste / scroll should target: the focused pane of
