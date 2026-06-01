@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { AlertTriangle, Plus, Trash2 } from "lucide-vue-next";
+import { AlertTriangle, Check, Copy, Plus, Trash2 } from "lucide-vue-next";
 import { onMounted, ref } from "vue";
 
 import { useDomScroll } from "../composables/useDomScroll";
@@ -44,11 +44,28 @@ async function onDelete(k: SshKeyRow) {
 function publicSnippet(pub: string): string {
   return pub.length > 80 ? pub.slice(0, 80) + "…" : pub;
 }
+
+const copiedId = ref<number | null>(null);
+let copiedTimer: number | undefined;
+
+async function copyPublic(k: SshKeyRow) {
+  if (!k.public_key) return;
+  try {
+    await navigator.clipboard.writeText(k.public_key);
+    copiedId.value = k.id;
+    if (copiedTimer !== undefined) window.clearTimeout(copiedTimer);
+    copiedTimer = window.setTimeout(() => {
+      copiedId.value = null;
+    }, 1500);
+  } catch (err) {
+    console.error("copy public key failed:", err);
+  }
+}
 </script>
 
 <template>
   <div class="absolute inset-0 text-fg">
-    <div ref="scrollRoot" class="absolute inset-0 flex flex-col gap-3.5 px-9 pt-8 pb-6 overflow-y-auto scrollbar-none">
+    <div ref="scrollRoot" class="absolute inset-0 flex flex-col gap-3.5 px-9 pt-2 pb-6 overflow-y-auto scrollbar-none">
     <Button variant="ghost" @click="emit('back')">← Hosts</Button>
     <PageHeader title="Saved keys">
       <template #actions>
@@ -77,6 +94,16 @@ function publicSnippet(pub: string): string {
           </div>
         </div>
         <div class="flex gap-1.5">
+          <Button
+            v-if="k.public_key"
+            size="sm"
+            variant="secondary"
+            :title="copiedId === k.id ? 'Copied!' : 'Copy public key'"
+            @click="copyPublic(k)"
+          >
+            <Check v-if="copiedId === k.id" :size="14" />
+            <Copy v-else :size="14" />
+          </Button>
           <Button size="sm" variant="secondary" @click="emit('editKey', k)">Edit</Button>
           <Button size="sm" variant="danger" title="Delete key" @click="onDelete(k)">
             <Trash2 :size="14" />

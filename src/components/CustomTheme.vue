@@ -32,7 +32,7 @@ const swatchClass = "w-full h-8 appearance-none border border-border rounded p-0
 </script>
 
 <template>
-  <div class="absolute inset-0 flex flex-col gap-4 px-9 pt-8 pb-6 overflow-y-auto text-fg">
+  <div class="absolute inset-0 flex flex-col gap-4 px-9 pt-2 pb-6 overflow-y-auto text-fg">
     <Button variant="ghost" @click="emit('back')">← Themes</Button>
     <h2 class="m-0 text-base font-medium tracking-wide">Custom theme</h2>
     <div class="flex flex-col gap-5 max-w-130">

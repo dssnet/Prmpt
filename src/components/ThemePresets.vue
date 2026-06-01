@@ -35,7 +35,7 @@ function classFor(active: boolean): string {
 </script>
 
 <template>
-  <div class="absolute inset-0 flex flex-col gap-4 px-9 pt-8 pb-6 overflow-y-auto text-fg">
+  <div class="absolute inset-0 flex flex-col gap-4 px-9 pt-2 pb-6 overflow-y-auto text-fg">
     <Button variant="ghost" @click="emit('back')">← Back</Button>
     <h2 class="m-0 text-base font-medium tracking-wide text-fg">Theme</h2>
     <div class="grid gap-3 grid-cols-[repeat(auto-fill,minmax(180px,1fr))]">

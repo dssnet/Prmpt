@@ -75,7 +75,7 @@ function badgeText(h: SshHostRow): string {
 
 <template>
   <div class="absolute inset-0 text-fg">
-    <div ref="scrollRoot" class="absolute inset-0 flex flex-col gap-3.5 px-9 pt-8 pb-6 overflow-y-auto scrollbar-none">
+    <div ref="scrollRoot" class="absolute inset-0 flex flex-col gap-3.5 px-9 pt-2 pb-6 overflow-y-auto scrollbar-none">
     <PageHeader title="SSH hosts">
       <template #actions>
         <Button :icon="Plus" @click="emit('addHost')">Add host</Button>
