@@ -6,6 +6,7 @@ import {
   KeyRound,
   Lock,
   LockOpen,
+  Pencil,
   Plus,
   Server,
   Settings,
@@ -38,6 +39,7 @@ import {
 import { connectHost } from "../state/connect";
 import GroupTree from "./GroupTree.vue";
 import {
+  ActionMenu,
   Badge,
   Button,
   ConfirmDialog,
@@ -505,19 +507,35 @@ async function confirmDeleteGroup() {
               >
                 Connect
               </Button>
-              <Button size="sm" variant="secondary" @click="emit('editHost', h)">Edit</Button>
-              <Button
-                size="sm"
-                variant="secondary"
-                title="Duplicate host"
-                :disabled="duplicating === h.id"
-                @click="onDuplicate(h)"
-              >
-                <Copy :size="14" />
-              </Button>
-              <Button size="sm" variant="danger" title="Delete host" @click="requestDeleteHost(h)">
-                <Trash2 :size="14" />
-              </Button>
+              <ActionMenu title="Host actions">
+                <template #default="{ close }">
+                  <button
+                    type="button"
+                    role="menuitem"
+                    class="w-full flex items-center gap-2 px-2 py-1.5 text-sm rounded-md text-fg hover:bg-surface-2 cursor-pointer transition-colors duration-150"
+                    @click="emit('editHost', h); close()"
+                  >
+                    <Pencil :size="14" class="shrink-0 text-fg-muted" /> Edit
+                  </button>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    :disabled="duplicating === h.id"
+                    class="w-full flex items-center gap-2 px-2 py-1.5 text-sm rounded-md text-fg hover:bg-surface-2 cursor-pointer transition-colors duration-150 disabled:opacity-50 disabled:cursor-default"
+                    @click="onDuplicate(h); close()"
+                  >
+                    <Copy :size="14" class="shrink-0 text-fg-muted" /> Duplicate
+                  </button>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    class="w-full flex items-center gap-2 px-2 py-1.5 text-sm rounded-md text-danger hover:bg-[color-mix(in_srgb,var(--color-danger)_18%,transparent)] cursor-pointer transition-colors duration-150"
+                    @click="requestDeleteHost(h); close()"
+                  >
+                    <Trash2 :size="14" class="shrink-0" /> Delete
+                  </button>
+                </template>
+              </ActionMenu>
             </div>
           </div>
         </div>
