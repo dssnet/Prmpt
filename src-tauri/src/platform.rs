@@ -31,14 +31,41 @@ pub fn default_shell() -> String {
 
     #[cfg(windows)]
     {
-        if let Some(p) = which("pwsh.exe") {
+        if let Some(p) = find_on_path("pwsh.exe") {
             return p;
         }
-        if let Some(p) = which("powershell.exe") {
+        if let Some(p) = find_on_path("powershell.exe") {
             return p;
         }
         std::env::var("ComSpec").unwrap_or_else(|_| r"C:\Windows\System32\cmd.exe".to_string())
     }
+}
+
+/// Pick the shell binary `spawn_tab` should exec from the (optional)
+/// configured value. `None` (the default) defers to [`default_shell`].
+///
+/// A configured shell is honored only if it's actually runnable here:
+/// either an existing file (absolute/relative path) or a bare command
+/// name we can find on `PATH`. Anything else — most importantly a path
+/// from a *different* OS that rode in via an imported backup (e.g.
+/// `C:\Windows\System32\cmd.exe` on macOS) — is discarded in favor of
+/// the platform default rather than handed to the PTY, where it would
+/// fail the tab spawn outright.
+pub fn resolve_shell(configured: Option<String>) -> String {
+    let Some(s) = configured else {
+        return default_shell();
+    };
+    let usable = std::path::Path::new(&s).is_file()
+        // A bare command name (no path separator) resolves via PATH at
+        // exec time; accept it if we can locate it, so PATH-relative
+        // configs keep working.
+        || (!s.contains('/') && !s.contains('\\') && find_on_path(&s).is_some());
+    if usable {
+        return s;
+    }
+    let default = default_shell();
+    eprintln!("[tab] configured shell {s:?} not found; falling back to {default:?}");
+    default
 }
 
 /// Args that turn `shell` into a *login* shell so it sources the user's
@@ -189,8 +216,37 @@ pub fn hidden_title() -> bool {
     true
 }
 
-#[cfg(windows)]
-fn which(exe: &str) -> Option<String> {
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn none_uses_platform_default() {
+        assert_eq!(resolve_shell(None), default_shell());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn existing_absolute_path_passes_through() {
+        // /bin/sh is guaranteed by POSIX, so it must be honored verbatim.
+        assert_eq!(resolve_shell(Some("/bin/sh".into())), "/bin/sh");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn foreign_path_falls_back_to_default() {
+        // A Windows shell path that rode in via an imported backup is not a
+        // file here and not on PATH → must fall back, not reach the PTY.
+        let resolved = resolve_shell(Some(r"C:\Windows\System32\cmd.exe".into()));
+        assert_eq!(resolved, default_shell());
+        assert_ne!(resolved, r"C:\Windows\System32\cmd.exe");
+    }
+}
+
+/// First `PATH` entry that contains an executable named `exe`, or `None`.
+/// Used to resolve bare command names (the Windows `default_shell` arm and
+/// [`resolve_shell`]); on Unix `PATH` lookup is otherwise left to exec.
+fn find_on_path(exe: &str) -> Option<String> {
     let path = std::env::var_os("PATH")?;
     for dir in std::env::split_paths(&path) {
         let candidate = dir.join(exe);

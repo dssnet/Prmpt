@@ -263,7 +263,7 @@ impl TabRegistry {
             })
             .map_err(|e| AppError::Pty(e.to_string()))?;
 
-        let shell_path = shell.unwrap_or_else(platform::default_shell);
+        let shell_path = platform::resolve_shell(shell);
         // Resolve login args before moving `shell_path` into the builder.
         // The slice is `'static` so it doesn't borrow `shell_path`.
         let login_args: &[&str] = if config.lock().login_shell {

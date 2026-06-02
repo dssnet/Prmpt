@@ -4443,6 +4443,8 @@ dependencies = [
  "security-framework",
  "serde",
  "serde_json",
+ "sha2",
+ "sqlx",
  "tauri",
  "tauri-build",
  "tauri-plugin-clipboard-manager",

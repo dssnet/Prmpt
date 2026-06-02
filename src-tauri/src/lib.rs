@@ -77,41 +77,31 @@ pub use window_pool::SharedWindowPool;
 const PRESPAWN_COLS: u16 = 100;
 const PRESPAWN_ROWS: u16 = 30;
 
-/// Migrations consumed by `tauri-plugin-sql` at startup. The SQL bodies
-/// live in `src-tauri/migrations/` and are inlined at compile time.
+/// The full migration set as `(version, description, sql)`, one source of
+/// truth shared by [`ssh_migrations`] (what `tauri-plugin-sql` runs) and
+/// `backup::reconcile_migration_checksums` (which re-stamps an imported
+/// DB's recorded checksums against these exact SQL bodies). The SQL lives
+/// in `src-tauri/migrations/` and is inlined at compile time.
+pub const MIGRATIONS: &[(i64, &str, &str)] = &[
+    (1, "init", include_str!("../migrations/0001_init.sql")),
+    (2, "stronghold", include_str!("../migrations/0002_stronghold.sql")),
+    (3, "broken_flag", include_str!("../migrations/0003_broken_flag.sql")),
+    (4, "groups", include_str!("../migrations/0004_groups.sql")),
+    (5, "group_flags", include_str!("../migrations/0005_group_flags.sql")),
+];
+
+/// Migrations consumed by `tauri-plugin-sql` at startup, built from
+/// [`MIGRATIONS`].
 fn ssh_migrations() -> Vec<Migration> {
-    vec![
-        Migration {
-            version: 1,
-            description: "init",
-            sql: include_str!("../migrations/0001_init.sql"),
+    MIGRATIONS
+        .iter()
+        .map(|&(version, description, sql)| Migration {
+            version,
+            description,
+            sql,
             kind: MigrationKind::Up,
-        },
-        Migration {
-            version: 2,
-            description: "stronghold",
-            sql: include_str!("../migrations/0002_stronghold.sql"),
-            kind: MigrationKind::Up,
-        },
-        Migration {
-            version: 3,
-            description: "broken_flag",
-            sql: include_str!("../migrations/0003_broken_flag.sql"),
-            kind: MigrationKind::Up,
-        },
-        Migration {
-            version: 4,
-            description: "groups",
-            sql: include_str!("../migrations/0004_groups.sql"),
-            kind: MigrationKind::Up,
-        },
-        Migration {
-            version: 5,
-            description: "group_flags",
-            sql: include_str!("../migrations/0005_group_flags.sql"),
-            kind: MigrationKind::Up,
-        },
-    ]
+        })
+        .collect()
 }
 
 /// Attach to the parent console on Windows so a release build launched from
