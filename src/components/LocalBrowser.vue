@@ -3,17 +3,11 @@ import { computed, onMounted, ref } from "vue";
 import {
   ArrowUp,
   ChevronRight,
-  CornerDownLeft,
-  ExternalLink,
-  Eye,
   File as FileIcon,
   Folder,
-  FolderPlus,
   Link2,
-  Pencil,
+  MoreHorizontal,
   RefreshCw,
-  SquareTerminal,
-  Trash2,
   X,
 } from "lucide-vue-next";
 
@@ -28,6 +22,7 @@ import {
   writeInput,
   type LocalEntry,
 } from "../ipc";
+import { popupMenu } from "../contextMenu";
 import { deliverSftpDrop, startFileDrag, type SftpDragItem } from "../state/sftp";
 import { ConfirmDialog } from "./ui";
 
@@ -249,6 +244,31 @@ function onRowMouseDown(ev: MouseEvent, e: LocalEntry): void {
   startFileDrag(item, ev, (t) => deliverSftpDrop(t.tabId, item, t.dir));
 }
 
+// ---- native menus ----
+function openToolbarMenu(): void {
+  void popupMenu([{ text: "New folder", action: startNewFolder }]);
+}
+function openRowMenu(e: LocalEntry): void {
+  void popupMenu([
+    { text: "Open", action: () => void openInOs(e) },
+    { text: "Reveal in file manager", action: () => void reveal(e) },
+    null,
+    ...(e.is_dir
+      ? [{ text: "cd here in terminal", action: () => cdInto(e) }]
+      : []),
+    { text: "Insert path into terminal", action: () => insertPath(e) },
+    null,
+    { text: "Rename", action: () => startRename(e) },
+    null,
+    {
+      text: "Delete",
+      action: () => {
+        pendingDelete.value = e;
+      },
+    },
+  ]);
+}
+
 onMounted(() => void init());
 </script>
 
@@ -278,8 +298,8 @@ onMounted(() => void init());
       <button type="button" class="icon-btn" title="Refresh" @click="refresh">
         <RefreshCw :size="14" :class="{ 'animate-spin': loading }" />
       </button>
-      <button type="button" class="icon-btn" title="New folder" @click="startNewFolder">
-        <FolderPlus :size="14" />
+      <button type="button" class="icon-btn" title="More actions" @click="openToolbarMenu">
+        <MoreHorizontal :size="14" />
       </button>
     </div>
 
@@ -327,6 +347,7 @@ onMounted(() => void init());
           class="group flex items-center gap-2 px-2.5 py-1 text-xs cursor-default select-none hover:bg-surface-2"
           @mousedown="onRowMouseDown($event, e)"
           @dblclick="e.is_dir ? navigate(e) : openInOs(e)"
+          @contextmenu.prevent.stop="openRowMenu(e)"
         >
           <Link2 v-if="e.is_symlink" :size="15" class="shrink-0 text-accent" />
           <Folder v-else-if="e.is_dir" :size="15" class="shrink-0 text-accent" />
@@ -359,41 +380,10 @@ onMounted(() => void init());
             </span>
             <span
               data-local-action
-              class="shrink-0 flex items-center gap-0.5 opacity-0 group-hover:opacity-100"
+              class="shrink-0 opacity-0 group-hover:opacity-100"
             >
-              <button
-                v-if="e.is_dir"
-                type="button"
-                class="icon-btn"
-                title="cd here in terminal"
-                @click.stop="cdInto(e)"
-              >
-                <SquareTerminal :size="13" />
-              </button>
-              <button
-                type="button"
-                class="icon-btn"
-                title="Insert path into terminal"
-                @click.stop="insertPath(e)"
-              >
-                <CornerDownLeft :size="13" />
-              </button>
-              <button type="button" class="icon-btn" title="Open" @click.stop="openInOs(e)">
-                <ExternalLink :size="13" />
-              </button>
-              <button type="button" class="icon-btn" title="Reveal in file manager" @click.stop="reveal(e)">
-                <Eye :size="13" />
-              </button>
-              <button type="button" class="icon-btn" title="Rename" @click.stop="startRename(e)">
-                <Pencil :size="13" />
-              </button>
-              <button
-                type="button"
-                class="icon-btn icon-btn-danger"
-                title="Delete"
-                @click.stop="pendingDelete = e"
-              >
-                <Trash2 :size="13" />
+              <button type="button" class="icon-btn" title="Actions" @click.stop="openRowMenu(e)">
+                <MoreHorizontal :size="13" />
               </button>
             </span>
           </template>
@@ -436,8 +426,5 @@ onMounted(() => void init());
 .icon-btn:disabled {
   opacity: 0.35;
   cursor: default;
-}
-.icon-btn-danger:hover:not(:disabled) {
-  color: var(--danger, #f38ba8);
 }
 </style>

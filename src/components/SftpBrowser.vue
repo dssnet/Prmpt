@@ -8,12 +8,9 @@ import {
   Download,
   File as FileIcon,
   Folder,
-  FolderPlus,
-  FolderUp,
   Link2,
-  Pencil,
+  MoreHorizontal,
   RefreshCw,
-  Trash2,
   Upload,
   X,
 } from "lucide-vue-next";
@@ -40,6 +37,7 @@ import {
   type SftpDragItem,
   type FileDropTarget,
 } from "../state/sftp";
+import { popupMenu } from "../contextMenu";
 import { ConfirmDialog } from "./ui";
 
 const props = withDefaults(
@@ -331,6 +329,28 @@ function onRowMouseDown(ev: MouseEvent, e: SftpEntry): void {
   startFileDrag(item, ev, (t) => void onDrop(item, t));
 }
 
+// ---- native menus ----
+function openToolbarMenu(): void {
+  void popupMenu([
+    { text: "New folder", action: startNewFolder },
+    { text: "Upload files…", action: () => void upload() },
+    { text: "Upload folder…", action: () => void uploadFolder() },
+  ]);
+}
+function openRowMenu(e: SftpEntry): void {
+  void popupMenu([
+    { text: "Download", action: () => void download(e) },
+    { text: "Rename", action: () => startRename(e) },
+    null,
+    {
+      text: "Delete",
+      action: () => {
+        pendingDelete.value = e;
+      },
+    },
+  ]);
+}
+
 async function onDrop(item: SftpDragItem, t: FileDropTarget): Promise<void> {
   if (t.tabId === item.srcTabId) {
     // Same connection → move into a folder (ignore drops into the current dir).
@@ -527,14 +547,8 @@ onBeforeUnmount(() => {
         <button type="button" class="icon-btn" title="Refresh" @click="refresh">
           <RefreshCw :size="14" :class="{ 'animate-spin': loading }" />
         </button>
-        <button type="button" class="icon-btn" title="New folder" @click="startNewFolder">
-          <FolderPlus :size="14" />
-        </button>
-        <button type="button" class="icon-btn" title="Upload files" @click="upload">
-          <Upload :size="14" />
-        </button>
-        <button type="button" class="icon-btn" title="Upload folder" @click="uploadFolder">
-          <FolderUp :size="14" />
+        <button type="button" class="icon-btn" title="More actions" @click="openToolbarMenu">
+          <MoreHorizontal :size="14" />
         </button>
       </div>
 
@@ -597,6 +611,7 @@ onBeforeUnmount(() => {
             :data-sftp-folder="e.is_dir ? e.path : undefined"
             @mousedown="onRowMouseDown($event, e)"
             @dblclick="navigate(e)"
+            @contextmenu.prevent.stop="openRowMenu(e)"
           >
             <Link2 v-if="e.is_symlink" :size="15" class="shrink-0 text-accent" />
             <Folder v-else-if="e.is_dir" :size="15" class="shrink-0 text-accent" />
@@ -629,26 +644,10 @@ onBeforeUnmount(() => {
               </span>
               <span
                 data-sftp-action
-                class="shrink-0 flex items-center gap-0.5 opacity-0 group-hover:opacity-100"
+                class="shrink-0 opacity-0 group-hover:opacity-100"
               >
-                <button
-                  type="button"
-                  class="icon-btn"
-                  title="Download"
-                  @click.stop="download(e)"
-                >
-                  <Download :size="13" />
-                </button>
-                <button type="button" class="icon-btn" title="Rename" @click.stop="startRename(e)">
-                  <Pencil :size="13" />
-                </button>
-                <button
-                  type="button"
-                  class="icon-btn icon-btn-danger"
-                  title="Delete"
-                  @click.stop="pendingDelete = e"
-                >
-                  <Trash2 :size="13" />
+                <button type="button" class="icon-btn" title="Actions" @click.stop="openRowMenu(e)">
+                  <MoreHorizontal :size="13" />
                 </button>
               </span>
             </template>
@@ -730,8 +729,5 @@ onBeforeUnmount(() => {
 .icon-btn:disabled {
   opacity: 0.35;
   cursor: default;
-}
-.icon-btn-danger:hover:not(:disabled) {
-  color: var(--danger, #f38ba8);
 }
 </style>
