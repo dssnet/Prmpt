@@ -235,50 +235,139 @@ pub fn spawn_session(
     out_tx
 }
 
+/// Why a single connect+drive attempt stopped. Decides whether
+/// `session_task` reconnects or lets the tab close.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SessionOutcome {
+    /// Tab is being closed locally (user closed it / VT thread gone).
+    LocalClose,
+    /// Remote shell exited cleanly (`exit`/logout, exit status/signal).
+    RemoteExit,
+    /// Transport vanished unexpectedly — candidate for auto-reconnect.
+    Dropped,
+    /// Host key changed; the mismatch dialog was shown. Never reconnect.
+    Rejected,
+}
+
 async fn session_task(
     app: AppHandle,
     owner_window: String,
     tab_id: u64,
     config: SshConnectConfig,
     pty_tx: crossbeam_channel::Sender<PtyEvent>,
-    out_rx: mpsc::Receiver<SshIoCmd>,
+    mut out_rx: mpsc::Receiver<SshIoCmd>,
     cols: u16,
     rows: u16,
 ) {
-    // Preserve host identity for the error event; `config` is moved into
-    // `run_session`.
+    // Preserve host identity for the error event; `config` is borrowed by
+    // each attempt so it survives reconnects (credentials included).
     let host_id = config.host_id;
     let host_label = config.label.clone();
     let hostname = config.hostname.clone();
-    if let Err(e) = run_session(
-        app.clone(),
-        owner_window.clone(),
-        tab_id,
-        config,
-        &pty_tx,
-        out_rx,
-        cols,
-        rows,
-    )
-    .await
-    {
-        let raw = e.to_string();
-        let msg = format!("\r\n\x1b[31mSSH error:\x1b[0m {}\r\n", raw);
-        let _ = pty_tx.send(PtyEvent::Data(msg.into_bytes()));
-        let _ = app.emit_to(
-            EventTarget::webview_window(&owner_window),
-            "ssh:connect_error",
-            SshConnectError {
-                tab_id,
-                host_id,
-                host_label,
-                hostname,
-                kind: classify_connect_error(&raw).to_string(),
-                message: raw,
-            },
-        );
+    // These outlive a single transport and are threaded through every
+    // attempt: the latest terminal size (so a reconnect requests the right
+    // PTY), the now-known host fingerprint (so a key change is still caught
+    // on reconnect), and whether we ever got a working shell (gates the
+    // reconnect-vs-give-up decision).
+    let mut cols = cols;
+    let mut rows = rows;
+    let mut stored_fp = config.stored_fingerprint.clone();
+    let mut ever_established = false;
+    let mut backoff_secs = 1u64;
+
+    loop {
+        let result = run_session(
+            &app,
+            &owner_window,
+            tab_id,
+            &config,
+            &pty_tx,
+            &mut out_rx,
+            &mut cols,
+            &mut rows,
+            &mut stored_fp,
+        )
+        .await;
+
+        match result {
+            // Intentional stops — let the tab close.
+            Ok((SessionOutcome::LocalClose, _))
+            | Ok((SessionOutcome::RemoteExit, _))
+            | Ok((SessionOutcome::Rejected, _)) => break,
+            // Unexpected drop of a working session — reconnect. A good
+            // connection just died, so restart the backoff from scratch.
+            Ok((SessionOutcome::Dropped, _)) => {
+                ever_established = true;
+                backoff_secs = 1;
+            }
+            Err(e) => {
+                let raw = e.to_string();
+                if !ever_established {
+                    // First connect failed: keep the existing modal UX and
+                    // give up (the tab closes).
+                    let msg = format!("\r\n\x1b[31mSSH error:\x1b[0m {}\r\n", raw);
+                    let _ = pty_tx.send(PtyEvent::Data(msg.into_bytes()));
+                    let _ = app.emit_to(
+                        EventTarget::webview_window(&owner_window),
+                        "ssh:connect_error",
+                        SshConnectError {
+                            tab_id,
+                            host_id,
+                            host_label,
+                            hostname,
+                            kind: classify_connect_error(&raw).to_string(),
+                            message: raw,
+                        },
+                    );
+                    break;
+                }
+                // A reconnect attempt failed; report it and keep retrying
+                // (backoff keeps growing).
+                let msg = format!("\r\n\x1b[31mreconnect failed:\x1b[0m {}\r\n", raw);
+                let _ = pty_tx.send(PtyEvent::Data(msg.into_bytes()));
+            }
+        }
+
+        // Only reached when we intend to reconnect.
+        let _ = pty_tx.send(PtyEvent::Data(
+            "\r\n\x1b[33m\u{26a0} connection lost \u{2014} reconnecting\u{2026}\x1b[0m\r\n"
+                .as_bytes()
+                .to_vec(),
+        ));
+        if wait_or_close(&mut out_rx, &mut cols, &mut rows, backoff_secs).await {
+            break; // tab closed during the backoff wait
+        }
+        backoff_secs = (backoff_secs * 2).min(30);
     }
     let _ = pty_tx.send(PtyEvent::Eof);
+}
+
+/// Backoff wait that stays responsive to tab-close. Returns `true` if the
+/// tab is being closed (so the caller stops reconnecting). Resize commands
+/// update the tracked terminal size; queued input is discarded — the old
+/// shell is gone and replaying stale keystrokes into a fresh one is wrong.
+async fn wait_or_close(
+    out_rx: &mut mpsc::Receiver<SshIoCmd>,
+    cols: &mut u16,
+    rows: &mut u16,
+    secs: u64,
+) -> bool {
+    let sleep = tokio::time::sleep(std::time::Duration::from_secs(secs));
+    tokio::pin!(sleep);
+    loop {
+        tokio::select! {
+            biased;
+            cmd = out_rx.recv() => match cmd {
+                Some(SshIoCmd::Close) | None => return true,
+                Some(SshIoCmd::Resize { cols: c, rows: r, .. }) => {
+                    *cols = c;
+                    *rows = r;
+                }
+                Some(SshIoCmd::Write(_)) => {}
+            },
+            _ = &mut sleep => return false,
+        }
+    }
 }
 
 /// Coarse classification of an SSH error string so the frontend can pick
@@ -312,15 +401,16 @@ fn classify_connect_error(msg: &str) -> &'static str {
 
 #[allow(clippy::too_many_arguments)]
 async fn run_session(
-    app: AppHandle,
-    owner_window: String,
+    app: &AppHandle,
+    owner_window: &str,
     tab_id: u64,
-    config: SshConnectConfig,
+    config: &SshConnectConfig,
     pty_tx: &crossbeam_channel::Sender<PtyEvent>,
-    mut out_rx: mpsc::Receiver<SshIoCmd>,
-    cols: u16,
-    rows: u16,
-) -> AppResult<()> {
+    out_rx: &mut mpsc::Receiver<SshIoCmd>,
+    cols: &mut u16,
+    rows: &mut u16,
+    stored_fp: &mut Option<String>,
+) -> AppResult<(SessionOutcome, bool)> {
     let host_id = config.host_id;
     let russh_config = Arc::new(client::Config {
         inactivity_timeout: None,
@@ -345,9 +435,9 @@ async fn run_session(
     }
     let state = Arc::new(Mutex::new(handler_state));
     let handler = ClientHandler {
-        stored_fp: config.stored_fingerprint.clone(),
+        stored_fp: stored_fp.clone(),
         app: app.clone(),
-        owner_window: owner_window.clone(),
+        owner_window: owner_window.to_string(),
         tab_id,
         host_id,
         state: state.clone(),
@@ -373,17 +463,20 @@ async fn run_session(
                     .to_vec(),
             ));
             let _ = session.disconnect(Disconnect::ByApplication, "", "").await;
-            return Ok(());
+            return Ok((SessionOutcome::Rejected, false));
         }
         return Err(AppError::Ssh(
             "authentication failed (check password / key / agent identities)".into(),
         ));
     }
 
-    // TOFU: emit the captured fingerprint so the frontend can persist it.
+    // TOFU: emit the captured fingerprint so the frontend can persist it,
+    // and remember it locally so a key change is still detected if this
+    // session later reconnects.
     if let Some((fp, alg)) = state.lock().captured_fp.take() {
+        *stored_fp = Some(fp.clone());
         let _ = app.emit_to(
-            EventTarget::webview_window(&owner_window),
+            EventTarget::webview_window(owner_window),
             "ssh:host_key_first_connect",
             SshHostKeyFirstConnect {
                 tab_id,
@@ -399,7 +492,7 @@ async fn run_session(
         .await
         .map_err(|e| AppError::Ssh(format!("channel open: {e}")))?;
     channel
-        .request_pty(false, "xterm-256color", cols as u32, rows as u32, 0, 0, &[])
+        .request_pty(false, "xterm-256color", *cols as u32, *rows as u32, 0, 0, &[])
         .await
         .map_err(|e| AppError::Ssh(format!("request pty: {e}")))?;
     channel
@@ -415,10 +508,10 @@ async fn run_session(
     // by the loop below).
     let session = Arc::new(tokio::sync::Mutex::new(session));
     let mut forward_tasks: Vec<JoinHandle<()>> = Vec::new();
-    for fw in config.forwards {
+    for fw in config.forwards.clone() {
         let handle = session.clone();
         let app_for_task = app.clone();
-        let window_for_task = owner_window.clone();
+        let window_for_task = owner_window.to_string();
         let fw_id = fw.id;
         let task = tokio::spawn(async move {
             if let Err(e) = run_forward(handle, fw).await {
@@ -437,7 +530,7 @@ async fn run_session(
         forward_tasks.push(task);
     }
 
-    drive_channel_loop(&mut channel, pty_tx, &mut out_rx).await;
+    let outcome = drive_channel_loop(&mut channel, pty_tx, out_rx, cols, rows).await;
 
     for t in forward_tasks {
         t.abort();
@@ -445,7 +538,7 @@ async fn run_session(
 
     let s = session.lock().await;
     let _ = s.disconnect(Disconnect::ByApplication, "", "").await;
-    Ok(())
+    Ok((outcome, true))
 }
 
 async fn authenticate<H: Handler>(
@@ -524,7 +617,9 @@ async fn drive_channel_loop(
     channel: &mut Channel<client::Msg>,
     pty_tx: &crossbeam_channel::Sender<PtyEvent>,
     out_rx: &mut mpsc::Receiver<SshIoCmd>,
-) {
+    cols: &mut u16,
+    rows: &mut u16,
+) -> SessionOutcome {
     loop {
         tokio::select! {
             biased;
@@ -533,17 +628,19 @@ async fn drive_channel_loop(
                     Some(SshIoCmd::Write(bytes)) => {
                         if let Err(e) = channel.data(&bytes[..]).await {
                             eprintln!("[ssh] write to channel failed: {e:?}");
-                            break;
+                            return SessionOutcome::Dropped;
                         }
                     }
-                    Some(SshIoCmd::Resize { cols, rows, w_px, h_px }) => {
+                    Some(SshIoCmd::Resize { cols: c, rows: r, w_px, h_px }) => {
+                        *cols = c;
+                        *rows = r;
                         let _ = channel
-                            .window_change(cols as u32, rows as u32, w_px, h_px)
+                            .window_change(c as u32, r as u32, w_px, h_px)
                             .await;
                     }
                     Some(SshIoCmd::Close) | None => {
                         let _ = channel.eof().await;
-                        break;
+                        return SessionOutcome::LocalClose;
                     }
                 }
             }
@@ -551,12 +648,12 @@ async fn drive_channel_loop(
                 match msg {
                     Some(ChannelMsg::Data { data }) => {
                         if pty_tx.send(PtyEvent::Data(data.to_vec())).is_err() {
-                            break;
+                            return SessionOutcome::LocalClose;
                         }
                     }
                     Some(ChannelMsg::ExtendedData { data, .. }) => {
                         if pty_tx.send(PtyEvent::Data(data.to_vec())).is_err() {
-                            break;
+                            return SessionOutcome::LocalClose;
                         }
                     }
                     Some(ChannelMsg::Eof) => {
@@ -564,9 +661,9 @@ async fn drive_channel_loop(
                     }
                     Some(ChannelMsg::ExitStatus { .. })
                     | Some(ChannelMsg::ExitSignal { .. }) => {
-                        break;
+                        return SessionOutcome::RemoteExit;
                     }
-                    None => break,
+                    None => return SessionOutcome::Dropped,
                     _ => {}
                 }
             }
