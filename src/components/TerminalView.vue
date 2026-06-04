@@ -4,6 +4,9 @@ import { PanelBottom, PanelRight, X } from "lucide-vue-next";
 
 import { wheelScroll, showContextMenu, type Config } from "../ipc";
 import { isSftpVisible, sftpDragGhost, toggleSftpPanel } from "../state/sftp";
+import { isLocalVisible, toggleLocalBrowser } from "../state/localBrowser";
+import LocalBrowser from "./LocalBrowser.vue";
+import LocalPanel from "./LocalPanel.vue";
 import SftpBrowser from "./SftpBrowser.vue";
 import SftpPanel from "./SftpPanel.vue";
 import TerminalScrollbar from "./TerminalScrollbar.vue";
@@ -21,8 +24,10 @@ import {
   clearWorkspaceDragPreview,
   commitWorkspaceDrop,
   commitSftpDockResize,
+  commitLocalDockResize,
   getActivePanes,
   getActiveSftpDocks,
+  getActiveLocalDocks,
   pingAllForRedraw,
   pointOverTerminal,
   reflowActive,
@@ -34,6 +39,7 @@ import {
   wsDragPreview,
   type PaneOverlay,
   type SftpDock,
+  type LocalDock,
 } from "../state/terminal";
 import {
   closeWorkspacePane,
@@ -72,23 +78,43 @@ const sftpReopenVisible = computed(
 // Docked browsers (workspace SSH panes), refreshed from the cached layout.
 const sftpDocks = ref<SftpDock[]>([]);
 
+// ---- Local file browser (opt-in) ------------------------------------------
+// Plain terminal tab → a right-side panel (mirrors the SFTP one). Workspace
+// local panes → a browser docked on each pane. Hidden by default; Cmd/Ctrl+B.
+const localTarget = computed<number | null>(() => {
+  const a = active.value;
+  return a && a.kind === "terminal" ? a.id : null;
+});
+const showLocal = computed(
+  () => localTarget.value != null && isLocalVisible(localTarget.value),
+);
+const localReopenVisible = computed(
+  () => localTarget.value != null && !isLocalVisible(localTarget.value),
+);
+const localDocks = ref<LocalDock[]>([]);
+
 // Toggle a pane's dock on/off, then re-tile so the terminal reclaims/yields
 // the strip.
 function togglePaneDock(tabId: number): void {
   toggleSftpPanel(tabId);
   reflowActive(active.value);
 }
+function togglePaneLocalDock(tabId: number): void {
+  toggleLocalBrowser(tabId);
+  reflowActive(active.value);
+}
 
-// Dock resize handle (between a pane's terminal and its browser).
+// Dock resize handle (between a pane's terminal and its browser). Shared by
+// SFTP and local docks — `commit` routes the pointer Y to the right ratio.
 let dockResizeRaf = 0;
-let dockResizePending: { dock: SftpDock; y: number } | null = null;
+let dockResizePending: { commit: (y: number) => void; y: number } | null = null;
 function onDockResizeMove(e: MouseEvent) {
   if (!dockResizePending) return;
   dockResizePending.y = e.clientY;
   if (dockResizeRaf) return;
   dockResizeRaf = requestAnimationFrame(() => {
     dockResizeRaf = 0;
-    if (dockResizePending) commitSftpDockResize(dockResizePending.dock, dockResizePending.y);
+    if (dockResizePending) dockResizePending.commit(dockResizePending.y);
   });
 }
 function onDockResizeUp() {
@@ -101,13 +127,19 @@ function onDockResizeUp() {
   dockResizePending = null;
   document.body.style.userSelect = "";
 }
-function onDockResizeDown(dock: SftpDock, e: MouseEvent) {
+function startDockResize(commit: (y: number) => void, e: MouseEvent) {
   e.preventDefault();
   e.stopPropagation();
-  dockResizePending = { dock, y: e.clientY };
+  dockResizePending = { commit, y: e.clientY };
   document.body.style.userSelect = "none";
   window.addEventListener("mousemove", onDockResizeMove);
   window.addEventListener("mouseup", onDockResizeUp);
+}
+function onDockResizeDown(dock: SftpDock, e: MouseEvent) {
+  startDockResize((y) => commitSftpDockResize(dock, y), e);
+}
+function onLocalDockResizeDown(dock: LocalDock, e: MouseEvent) {
+  startDockResize((y) => commitLocalDockResize(dock, y), e);
 }
 
 const SFTP_W_KEY = "prmpt.sftpPanelWidthPx";
@@ -162,6 +194,47 @@ function onSftpExpand() {
   sftpWidth.value = clampSftpWidth(Math.max(sftpWidth.value, 680));
   localStorage.setItem(SFTP_W_KEY, String(Math.round(sftpWidth.value)));
 }
+
+// ---- Local panel width + divider (mirrors the SFTP one) -------------------
+const LOCAL_W_KEY = "prmpt.localPanelWidthPx";
+const localWidth = ref<number>(360);
+{
+  const saved = parseInt(localStorage.getItem(LOCAL_W_KEY) ?? "", 10);
+  if (Number.isFinite(saved)) localWidth.value = saved;
+}
+let localDragRaf = 0;
+let localPendingX: number | null = null;
+function onLocalDividerMove(e: MouseEvent) {
+  localPendingX = e.clientX;
+  if (localDragRaf) return;
+  localDragRaf = requestAnimationFrame(() => {
+    localDragRaf = 0;
+    const wrap = wrapRef.value?.getBoundingClientRect();
+    if (localPendingX == null || !wrap) return;
+    localWidth.value = clampSftpWidth(wrap.right - localPendingX);
+  });
+}
+function onLocalDividerUp() {
+  window.removeEventListener("mousemove", onLocalDividerMove);
+  window.removeEventListener("mouseup", onLocalDividerUp);
+  if (localDragRaf) {
+    cancelAnimationFrame(localDragRaf);
+    localDragRaf = 0;
+  }
+  localPendingX = null;
+  document.body.style.userSelect = "";
+  localStorage.setItem(LOCAL_W_KEY, String(Math.round(localWidth.value)));
+}
+function onLocalDividerDown(e: MouseEvent) {
+  e.preventDefault();
+  document.body.style.userSelect = "none";
+  window.addEventListener("mousemove", onLocalDividerMove);
+  window.addEventListener("mouseup", onLocalDividerUp);
+}
+function onLocalExpand() {
+  localWidth.value = clampSftpWidth(Math.max(localWidth.value, 680));
+  localStorage.setItem(LOCAL_W_KEY, String(Math.round(localWidth.value)));
+}
 const { selectionTick } = useTerminalSelection();
 const { theme } = useTheme();
 
@@ -177,6 +250,7 @@ function refreshOverlays(): void {
   dividers.value = getActiveDividers();
   panes.value = getActivePanes();
   sftpDocks.value = getActiveSftpDocks();
+  localDocks.value = getActiveLocalDocks();
 }
 const refreshDividers = refreshOverlays;
 
@@ -504,6 +578,17 @@ watch(theme, (next) => {
           <PanelBottom :size="12" :stroke-width="2.25" />
         </button>
         <button
+          v-if="p.localDockable"
+          type="button"
+          class="pane-close"
+          :class="{ 'pane-tool-on': p.localVisible }"
+          :title="p.localVisible ? 'Hide file browser' : 'Show file browser'"
+          @mousedown.stop.prevent
+          @click.stop="togglePaneLocalDock(p.tabId)"
+        >
+          <PanelBottom :size="12" :stroke-width="2.25" />
+        </button>
+        <button
           type="button"
           class="pane-close"
           title="Close pane"
@@ -536,6 +621,30 @@ watch(theme, (next) => {
         :fixed-label="d.hostLabel"
         can-close
         @close="togglePaneDock(d.tabId)"
+      />
+    </div>
+    <!-- Docked local browsers: one per local workspace pane (same carve as the
+         SFTP docks, for terminal panes). -->
+    <div
+      v-for="d in localDocks"
+      :key="`localdock-${d.tabId}`"
+      class="sftp-dock"
+      :style="{ left: `${d.x}px`, top: `${d.y}px`, width: `${d.w}px`, height: `${d.h}px` }"
+      @mousedown.stop
+      @wheel.stop
+      @contextmenu.stop
+    >
+      <div
+        class="sftp-dock-resize"
+        title="Resize"
+        @mousedown="onLocalDockResizeDown(d, $event)"
+      />
+      <LocalBrowser
+        class="sftp-dock-browser"
+        :target-tab-id="d.tabId"
+        :fixed-label="d.label"
+        can-close
+        @close="togglePaneLocalDock(d.tabId)"
       />
     </div>
 
@@ -573,6 +682,16 @@ watch(theme, (next) => {
     >
       <PanelRight :size="15" />
     </button>
+    <!-- Reopen the local file browser after it's been hidden (terminal tabs). -->
+    <button
+      v-if="localReopenVisible && localTarget != null"
+      type="button"
+      class="sftp-reopen"
+      title="Show file browser"
+      @click="toggleLocalBrowser(localTarget)"
+    >
+      <PanelRight :size="15" />
+    </button>
   </div>
   <!-- SFTP file browser: resizable divider + panel, SSH connections only. -->
   <template v-if="showSftp && sftpTarget">
@@ -594,6 +713,28 @@ watch(theme, (next) => {
       }"
       @close="toggleSftpPanel(sftpTarget.id)"
       @expand="onSftpExpand"
+    />
+  </template>
+  <!-- Local file browser: resizable divider + panel, plain terminal tabs only. -->
+  <template v-if="showLocal && localTarget != null">
+    <div
+      class="sftp-divider"
+      role="separator"
+      aria-orientation="vertical"
+      aria-label="Resize file browser"
+      @mousedown="onLocalDividerDown"
+    />
+    <LocalPanel
+      :target-tab-id="localTarget"
+      class="flex-none"
+      :style="{
+        width: `${localWidth}px`,
+        margin: 'var(--frame-inset) var(--frame-inset) var(--frame-inset) 0',
+        borderRadius: 'var(--pane-radius)',
+        overflow: 'hidden',
+      }"
+      @close="toggleLocalBrowser(localTarget)"
+      @expand="onLocalExpand"
     />
   </template>
   </div>

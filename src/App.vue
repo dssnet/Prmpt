@@ -59,6 +59,7 @@ import {
   reflowActive,
   selectAll,
 } from "./state/terminal";
+import { toggleLocalBrowser } from "./state/localBrowser";
 import FullDiskAccessModal from "./components/FullDiskAccessModal.vue";
 import HomeView from "./components/HomeView.vue";
 import HostKeyMismatchModal from "./components/HostKeyMismatchModal.vue";
@@ -386,6 +387,15 @@ const shortcuts: Shortcut[] = [
     run: () => void pasteFromClipboard(),
   },
   { mod: "meta", match: (k) => k === "a" || k === "A", run: () => selectAll() },
+  {
+    mod: "meta",
+    match: (k) => k === "b" || k === "B",
+    when: () => active.value?.kind === "terminal",
+    run: () => {
+      const a = active.value;
+      if (a) toggleLocalBrowser(a.id);
+    },
+  },
   {
     mod: "meta",
     match: (k) => k === "ArrowUp",

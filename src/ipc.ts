@@ -533,6 +533,59 @@ export function onSftpTransferProgress(
   return listenScoped<SftpTransferProgress>("sftp:transfer_progress", handler);
 }
 
+// ---------------- Local file browser ----------------
+
+/** One entry in a local-filesystem directory listing. */
+export interface LocalEntry {
+  name: string;
+  /** Absolute path (already joined by the backend). */
+  path: string;
+  is_dir: boolean;
+  is_symlink: boolean;
+  size: number;
+  /** mtime in epoch seconds, when available. */
+  mtime: number | null;
+}
+
+/** A local directory listing: the canonical directory, its parent (null at a
+ *  filesystem root), and the sorted entries. */
+export interface LocalListing {
+  path: string;
+  parent: string | null;
+  entries: LocalEntry[];
+}
+
+/** The user's home directory — the local browser's starting point. */
+export async function localHomeDir(): Promise<string> {
+  return await invoke<string>("local_home_dir");
+}
+
+export async function listLocalDir(path: string): Promise<LocalListing> {
+  return await invoke<LocalListing>("list_local_dir", { path });
+}
+
+export async function localMkdir(path: string): Promise<void> {
+  await invoke("local_mkdir", { path });
+}
+
+export async function localRename(from: string, to: string): Promise<void> {
+  await invoke("local_rename", { from, to });
+}
+
+export async function localRemove(path: string, isDir: boolean): Promise<void> {
+  await invoke("local_remove", { path, isDir });
+}
+
+/** Reveal a path in the OS file manager (selected). */
+export async function localReveal(path: string): Promise<void> {
+  await invoke("local_reveal", { path });
+}
+
+/** Open a path with its default application. */
+export async function localOpen(path: string): Promise<void> {
+  await invoke("local_open", { path });
+}
+
 // ---- Backup (import / export) ----
 
 export interface BackupSummary {

@@ -36,6 +36,7 @@ import {
   type Workspace,
 } from "./workspace";
 import { isSftpVisible, setSftpDockRatio, sftpDockRatio } from "./sftp";
+import { isLocalVisible } from "./localBrowser";
 
 // Selection lives in screen-absolute coords (`screenRow = viewport_top +
 // viewport_row`). That way vertical resize and scrollback motion are pure
@@ -83,6 +84,21 @@ export interface SftpDock {
   paneHeight: number;
 }
 let wsSftpDocks: SftpDock[] = [];
+
+/** A docked local file browser carved out of the bottom of a local terminal
+ *  pane. Same geometry as [`SftpDock`]; `label` is the pane title shown in the
+ *  docked browser's header. */
+export interface LocalDock {
+  tabId: number;
+  label: string;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  paneTop: number;
+  paneHeight: number;
+}
+let wsLocalDocks: LocalDock[] = [];
 // Below these the pane is too small to usefully split, so it stays all-terminal.
 const MIN_DOCK_H = 80;
 const MIN_TERM_H = 60;
@@ -153,6 +169,15 @@ function paneSftpLabel(ws: Workspace, tabId: number): string | null {
   return leaf.origin.hostLabel || leaf.origin.title;
 }
 
+/** If `tabId` is a local terminal pane whose docked file browser is toggled
+ *  on, return its header label; otherwise null. */
+function paneLocalLabel(ws: Workspace, tabId: number): string | null {
+  const leaf = findLeafByTabId(ws.root, tabId);
+  if (!leaf || leaf.origin.kind !== "terminal") return null;
+  if (!isLocalVisible(tabId)) return null;
+  return snapshotFor(tabId)?.title || leaf.origin.title || "Terminal";
+}
+
 /** Lay out the active workspace into the full host rect and tell each pane's
  *  backend tab its new cols/rows. SSH panes reserve a bottom strip for their
  *  docked SFTP browser (the terminal gets the rest). Caches the terminal rects
@@ -162,31 +187,38 @@ function reflowWorkspaceLayout(ws: Workspace, w: number, h: number): void {
   wsDividers = dividers;
   wsSplitBoxes = splitBoxes;
 
-  const ratio = sftpDockRatio();
   const termPanes: PaneRect[] = [];
   const docks: SftpDock[] = [];
+  const localDocks: LocalDock[] = [];
   for (const pane of panes) {
-    const label = paneSftpLabel(ws, pane.tabId);
-    const dockH = label ? Math.round(pane.h * ratio) : 0;
-    const termH = pane.h - dockH - (label ? GUTTER : 0);
-    if (label && dockH >= MIN_DOCK_H && termH >= MIN_TERM_H) {
+    // A pane is either SSH (→ SFTP dock) or local terminal (→ local dock).
+    // Both share one dock-height ratio so resizing any dock resizes all of them.
+    const sftpLabel = paneSftpLabel(ws, pane.tabId);
+    const localLabel = sftpLabel ? null : paneLocalLabel(ws, pane.tabId);
+    const ratio = sftpDockRatio();
+    const hasDock = sftpLabel != null || localLabel != null;
+    const dockH = hasDock ? Math.round(pane.h * ratio) : 0;
+    const termH = pane.h - dockH - (hasDock ? GUTTER : 0);
+    if (hasDock && dockH >= MIN_DOCK_H && termH >= MIN_TERM_H) {
       termPanes.push({ tabId: pane.tabId, x: pane.x, y: pane.y, w: pane.w, h: termH });
-      docks.push({
+      const geom = {
         tabId: pane.tabId,
-        hostLabel: label,
         x: pane.x,
         y: pane.y + termH + GUTTER,
         w: pane.w,
         h: dockH,
         paneTop: pane.y,
         paneHeight: pane.h,
-      });
+      };
+      if (sftpLabel != null) docks.push({ ...geom, hostLabel: sftpLabel });
+      else localDocks.push({ ...geom, label: localLabel! });
     } else {
       termPanes.push(pane);
     }
   }
   wsPanes = termPanes;
   wsSftpDocks = docks;
+  wsLocalDocks = localDocks;
   layoutVersion.value++;
   for (const pane of wsPanes) {
     const cols = Math.max(1, Math.floor(pane.w / cellWidthPx));
@@ -205,13 +237,31 @@ export function getActiveSftpDocks(): SftpDock[] {
   return activeWs() ? wsSftpDocks : [];
 }
 
+export function getActiveLocalDocks(): LocalDock[] {
+  return activeWs() ? wsLocalDocks : [];
+}
+
 /** Commit a dock resize-handle drag: pointer Y → new dock-height ratio. */
 export function commitSftpDockResize(dock: SftpDock, clientY: number): void {
+  commitDockResize(dock, clientY, setSftpDockRatio);
+}
+
+/** Same as [`commitSftpDockResize`] for a local pane's docked browser. Local
+ *  and SFTP docks share one ratio, so this drives the same setter. */
+export function commitLocalDockResize(dock: LocalDock, clientY: number): void {
+  commitDockResize(dock, clientY, setSftpDockRatio);
+}
+
+function commitDockResize(
+  dock: { paneTop: number; paneHeight: number },
+  clientY: number,
+  setRatio: (r: number) => void,
+): void {
   if (!canvasEl) return;
   const r = canvasEl.getBoundingClientRect();
   const localY = clientY - r.top;
   const newDockH = dock.paneTop + dock.paneHeight - localY;
-  setSftpDockRatio(newDockH / Math.max(1, dock.paneHeight));
+  setRatio(newDockH / Math.max(1, dock.paneHeight));
   const a = activeWs();
   if (a) {
     const dims = computeDims();
@@ -231,6 +281,10 @@ export interface PaneOverlay extends PaneRect {
   sftpDockable: boolean;
   /** Whether its dock is currently shown. */
   sftpVisible: boolean;
+  /** Local terminal pane that can carry a docked local file browser. */
+  localDockable: boolean;
+  /** Whether its local dock is currently shown. */
+  localVisible: boolean;
 }
 
 /** Pane rects + titles for the active workspace, for DOM overlays (hover bar,
@@ -242,12 +296,15 @@ export function getActivePanes(): PaneOverlay[] {
     const leaf = findLeafByTabId(a.ws.root, p.tabId);
     const dockable =
       !!leaf && leaf.origin.kind === "ssh" && !leaf.origin.disableSftp;
+    const localDockable = !!leaf && leaf.origin.kind === "terminal";
     return {
       ...p,
       title: snapshotFor(p.tabId)?.title || "Terminal",
       focused: p.tabId === a.ws.focusedTabId,
       sftpDockable: dockable,
       sftpVisible: dockable && isSftpVisible(p.tabId),
+      localDockable,
+      localVisible: localDockable && isLocalVisible(p.tabId),
     };
   });
 }

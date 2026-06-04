@@ -32,13 +32,13 @@ import {
   type SftpEntry,
 } from "../ipc";
 import {
-  sftpDrag,
-  sftpDragGhost,
   sftpDropHint,
   registerSftpTarget,
   unregisterSftpTarget,
   deliverSftpDrop,
+  startFileDrag,
   type SftpDragItem,
+  type FileDropTarget,
 } from "../state/sftp";
 import { ConfirmDialog } from "./ui";
 
@@ -299,66 +299,22 @@ function dismissTransfer(id: number): void {
 }
 
 // ---- drag & drop: pointer-based ------------------------------------------
-// WKWebView's HTML5 DnD is unreliable here (the tab/pane drag is mouse-driven
-// for the same reason), so we drive it manually: track the pointer, show a
-// ghost, and hit-test the element under the cursor on release via data-attrs.
-// This works across both columns and across workspace panes.
-let pendingDrag: { item: SftpDragItem; x: number; y: number } | null = null;
-
+// Drag a row out via the shared `startFileDrag` helper (the hit-test contract
+// + ghost/hint live in state/sftp.ts so this and the local browser share them).
 function onRowMouseDown(ev: MouseEvent, e: SftpEntry): void {
-  if (ev.button !== 0) return;
   // Don't begin a drag from the row's action buttons or the rename field.
   if ((ev.target as HTMLElement).closest("[data-sftp-action], input")) return;
-  pendingDrag = {
-    item: { srcTabId: props.tabId, path: e.path, name: e.name, isDir: e.is_dir },
-    x: ev.clientX,
-    y: ev.clientY,
+  const item: SftpDragItem = {
+    source: "sftp",
+    srcTabId: props.tabId,
+    path: e.path,
+    name: e.name,
+    isDir: e.is_dir,
   };
-  window.addEventListener("mousemove", onDragMove);
-  window.addEventListener("mouseup", onDragUp);
+  startFileDrag(item, ev, (t) => void onDrop(item, t));
 }
 
-/** Resolve the drop target (connection + destination dir) under a point from
- *  the data-attrs any browser column stamps on its folders / listing. */
-function resolveDropTarget(x: number, y: number): { tabId: number; dir: string } | null {
-  const el = document.elementFromPoint(x, y) as HTMLElement | null;
-  if (!el) return null;
-  const folder = el.closest("[data-sftp-folder]") as HTMLElement | null;
-  if (folder) return { tabId: Number(folder.dataset.sftpTab), dir: folder.dataset.sftpFolder! };
-  const list = el.closest("[data-sftp-list]") as HTMLElement | null;
-  if (list) return { tabId: Number(list.dataset.sftpTab), dir: list.dataset.sftpCwd || "/" };
-  return null;
-}
-
-function onDragMove(ev: MouseEvent): void {
-  if (!pendingDrag) return;
-  if (!sftpDrag.value) {
-    const dx = ev.clientX - pendingDrag.x;
-    const dy = ev.clientY - pendingDrag.y;
-    if (dx * dx + dy * dy < 25) return; // 5px threshold before it's a drag
-    sftpDrag.value = pendingDrag.item;
-  }
-  sftpDragGhost.value = { x: ev.clientX, y: ev.clientY, label: pendingDrag.item.name };
-  const t = resolveDropTarget(ev.clientX, ev.clientY);
-  // Hint only a meaningful drop (a real folder, or another connection's dir).
-  const noop =
-    t != null &&
-    t.tabId === pendingDrag.item.srcTabId &&
-    (t.dir === pendingDrag.item.path || t.dir === parentDir(pendingDrag.item.path));
-  sftpDropHint.value = t && !noop ? t : null;
-}
-
-async function onDragUp(ev: MouseEvent): Promise<void> {
-  window.removeEventListener("mousemove", onDragMove);
-  window.removeEventListener("mouseup", onDragUp);
-  const item = sftpDrag.value;
-  pendingDrag = null;
-  sftpDrag.value = null;
-  sftpDragGhost.value = null;
-  sftpDropHint.value = null;
-  if (!item) return;
-  const t = resolveDropTarget(ev.clientX, ev.clientY);
-  if (!t || Number.isNaN(t.tabId)) return;
+async function onDrop(item: SftpDragItem, t: FileDropTarget): Promise<void> {
   if (t.tabId === item.srcTabId) {
     // Same connection → move into a folder (ignore drops into the current dir).
     if (t.dir === item.path || t.dir === parentDir(item.path)) return;
@@ -369,12 +325,25 @@ async function onDragUp(ev: MouseEvent): Promise<void> {
       error.value = describeError(err);
     }
   } else {
-    // Cross-connection → hand to the destination column to copy + track.
+    // Another column/browser → hand to the destination column to copy + track.
     deliverSftpDrop(t.tabId, item, t.dir);
   }
 }
 
+// Delivered drop (this column is the destination). A local item is uploaded; an
+// SFTP item from another host is relayed. Folders need a confirm before upload
+// (recursive) — relaying folders cross-host isn't supported.
+const pendingUpload = ref<{ item: SftpDragItem; dstDir: string } | null>(null);
+
 async function relayInto(d: SftpDragItem, dstDir: string): Promise<void> {
+  if (d.source === "local") {
+    if (d.isDir) {
+      pendingUpload.value = { item: d, dstDir };
+      return;
+    }
+    await uploadLocalInto(d, dstDir);
+    return;
+  }
   if (d.isDir) {
     error.value = "Copying folders between connections isn't supported yet.";
     return;
@@ -390,6 +359,28 @@ async function relayInto(d: SftpDragItem, dstDir: string): Promise<void> {
   } catch (err) {
     markTransferError(id, describeError(err));
   }
+}
+
+/** Upload a local file/folder dropped onto this connection (folders recurse in
+ *  the backend `sftp_upload`). */
+async function uploadLocalInto(d: SftpDragItem, dstDir: string): Promise<void> {
+  const id = nextTransferId++;
+  transfers.value = [
+    ...transfers.value,
+    { id, name: d.name, dir: "up", transferred: 0, total: null, done: false, error: null },
+  ];
+  try {
+    await sftpUpload(props.tabId, d.path, joinRemote(dstDir, d.name), id);
+    refresh();
+  } catch (err) {
+    markTransferError(id, describeError(err));
+  }
+}
+
+function confirmUpload(): void {
+  const u = pendingUpload.value;
+  pendingUpload.value = null;
+  if (u) void uploadLocalInto(u.item, u.dstDir);
 }
 
 // Register as a drop target so another column's release can deliver a copy
@@ -449,8 +440,6 @@ onBeforeUnmount(() => {
   for (const fn of unlisteners) fn();
   unlisteners.length = 0;
   unregisterSftpTarget(props.tabId, dropHandler);
-  window.removeEventListener("mousemove", onDragMove);
-  window.removeEventListener("mouseup", onDragUp);
 });
 </script>
 
@@ -689,6 +678,16 @@ onBeforeUnmount(() => {
       cancel-label="Cancel"
       @confirm="confirmDelete"
       @cancel="pendingDelete = null"
+    />
+
+    <ConfirmDialog
+      :open="pendingUpload !== null"
+      title="Upload folder?"
+      :message="`Upload the folder “${pendingUpload?.item.name}” and all its contents to this connection?`"
+      confirm-label="Upload"
+      cancel-label="Cancel"
+      @confirm="confirmUpload"
+      @cancel="pendingUpload = null"
     />
   </section>
 </template>

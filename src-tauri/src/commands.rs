@@ -11,7 +11,8 @@ use crate::{
     activate_blank_window, configure_new_window,
     config::{Config, Theme},
     error::{AppError, AppResult},
-    protocol::{SftpEntry, TabInfo, WindowBootstrap},
+    localfs,
+    protocol::{LocalListing, SftpEntry, TabInfo, WindowBootstrap},
     schedule_refill,
     ssh::{self, SftpSlots, SshConnectConfig},
     stronghold::{self, StrongholdUnlock},
@@ -711,6 +712,47 @@ pub async fn sftp_relay(
         Ok(r) => r,
         Err(_) => Err(AppError::Ssh("relay task dropped".into())),
     }
+}
+
+// ---------- Local file browser ----------
+//
+// Thin wrappers over `crate::localfs`. These are synchronous commands on
+// purpose: Tauri runs non-`async` handlers on a worker thread, so the blocking
+// `std::fs` calls don't stall the async runtime.
+
+#[tauri::command]
+pub fn local_home_dir() -> AppResult<String> {
+    localfs::home()
+}
+
+#[tauri::command]
+pub fn list_local_dir(path: String) -> AppResult<LocalListing> {
+    localfs::list_dir(&path)
+}
+
+#[tauri::command]
+pub fn local_mkdir(path: String) -> AppResult<()> {
+    localfs::mkdir(&path)
+}
+
+#[tauri::command]
+pub fn local_rename(from: String, to: String) -> AppResult<()> {
+    localfs::rename(&from, &to)
+}
+
+#[tauri::command]
+pub fn local_remove(path: String, is_dir: bool) -> AppResult<()> {
+    localfs::remove(&path, is_dir)
+}
+
+#[tauri::command]
+pub fn local_reveal(path: String) -> AppResult<()> {
+    localfs::reveal(&path)
+}
+
+#[tauri::command]
+pub fn local_open(path: String) -> AppResult<()> {
+    localfs::open(&path)
 }
 
 #[derive(serde::Serialize)]

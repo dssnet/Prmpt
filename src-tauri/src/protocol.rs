@@ -92,6 +92,32 @@ pub struct SshHostKeyMismatch {
     pub algorithm: String,
 }
 
+/// One entry in a local-filesystem directory listing. Mirrors [`SftpEntry`]
+/// but for the machine's own filesystem; metadata is best-effort (a broken
+/// symlink or a permission-denied entry may have no `size`/`mtime`).
+#[derive(Serialize, Clone, Debug)]
+pub struct LocalEntry {
+    pub name: String,
+    /// Absolute path (the listed directory joined with `name`). The frontend
+    /// never has to join paths itself — sidesteps separator differences.
+    pub path: String,
+    pub is_dir: bool,
+    pub is_symlink: bool,
+    pub size: u64,
+    /// mtime in epoch seconds, when the OS reports it.
+    pub mtime: Option<i64>,
+}
+
+/// A local directory listing: the canonical directory, its parent (`None` at a
+/// filesystem root), and the sorted entries. `parent` drives the browser's Up
+/// button without the frontend having to reason about path separators.
+#[derive(Serialize, Clone, Debug)]
+pub struct LocalListing {
+    pub path: String,
+    pub parent: Option<String>,
+    pub entries: Vec<LocalEntry>,
+}
+
 /// Emitted on a TOFU first connect — the host had no stored fingerprint,
 /// the handler accepted whatever the server sent, and now the frontend
 /// should persist `fingerprint` against `host_id` via the SQL plugin.

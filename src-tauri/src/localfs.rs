@@ -1,0 +1,135 @@
+//! Local-filesystem operations backing the optional local file browser.
+//!
+//! These are plain synchronous `std::fs` calls. The command wrappers in
+//! [`crate::commands`] are intentionally **non-`async`** so Tauri runs them on
+//! a worker thread — keeping the blocking `read_dir`/`metadata` work off the
+//! async runtime (the `sftp_*` commands, by contrast, route through channels).
+
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::time::UNIX_EPOCH;
+
+use crate::error::{AppError, AppResult};
+use crate::protocol::{LocalEntry, LocalListing};
+
+/// List a directory: its canonical path, parent, and dirs-first / then
+/// case-insensitive sorted entries. Unreadable entries are skipped rather than
+/// failing the whole listing.
+pub fn list_dir(path: &str) -> AppResult<LocalListing> {
+    let dir = PathBuf::from(path);
+    let canonical = fs::canonicalize(&dir).unwrap_or(dir);
+
+    let mut entries: Vec<LocalEntry> = Vec::new();
+    for dent in fs::read_dir(&canonical)? {
+        let Ok(dent) = dent else { continue };
+        let p = dent.path();
+        // `symlink_metadata` doesn't follow links, so we can flag symlinks;
+        // `metadata` follows them to learn whether the target is a directory.
+        let link_meta = dent.metadata().ok();
+        let is_symlink = link_meta.as_ref().map(|m| m.file_type().is_symlink()).unwrap_or(false);
+        let target_meta = fs::metadata(&p).ok();
+        let is_dir = target_meta.as_ref().map(|m| m.is_dir()).unwrap_or(false);
+        let size = target_meta.as_ref().map(|m| m.len()).unwrap_or(0);
+        let mtime = target_meta
+            .as_ref()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+            .map(|d| d.as_secs() as i64);
+        entries.push(LocalEntry {
+            name: dent.file_name().to_string_lossy().into_owned(),
+            path: p.to_string_lossy().into_owned(),
+            is_dir,
+            is_symlink,
+            size,
+            mtime,
+        });
+    }
+
+    entries.sort_by(|a, b| match (a.is_dir, b.is_dir) {
+        (true, false) => std::cmp::Ordering::Less,
+        (false, true) => std::cmp::Ordering::Greater,
+        _ => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
+    });
+
+    let parent = canonical
+        .parent()
+        .map(|p| p.to_string_lossy().into_owned());
+
+    Ok(LocalListing {
+        path: canonical.to_string_lossy().into_owned(),
+        parent,
+        entries,
+    })
+}
+
+pub fn mkdir(path: &str) -> AppResult<()> {
+    fs::create_dir(path)?;
+    Ok(())
+}
+
+pub fn rename(from: &str, to: &str) -> AppResult<()> {
+    fs::rename(from, to)?;
+    Ok(())
+}
+
+pub fn remove(path: &str, is_dir: bool) -> AppResult<()> {
+    if is_dir {
+        fs::remove_dir_all(path)?;
+    } else {
+        fs::remove_file(path)?;
+    }
+    Ok(())
+}
+
+/// Open `path` in the OS file manager with the item selected.
+pub fn reveal(path: &str) -> AppResult<()> {
+    let p = Path::new(path);
+    #[cfg(target_os = "macos")]
+    {
+        run("open", &["-R".as_ref(), p.as_os_str()])
+    }
+    #[cfg(target_os = "windows")]
+    {
+        run("explorer", &[format!("/select,{path}").as_ref()])
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        // No portable "select the file" on Linux; open its containing folder.
+        let dir = p.parent().unwrap_or(p);
+        run("xdg-open", &[dir.as_os_str()])
+    }
+}
+
+/// Open `path` with its default application.
+pub fn open(path: &str) -> AppResult<()> {
+    let p = Path::new(path);
+    #[cfg(target_os = "macos")]
+    {
+        run("open", &[p.as_os_str()])
+    }
+    #[cfg(target_os = "windows")]
+    {
+        // `start` is a cmd builtin; the empty "" is the window-title arg so a
+        // quoted path isn't mistaken for the title.
+        run("cmd", &["/C".as_ref(), "start".as_ref(), "".as_ref(), p.as_os_str()])
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        run("xdg-open", &[p.as_os_str()])
+    }
+}
+
+pub fn home() -> AppResult<String> {
+    crate::platform::home_dir()
+        .map(|p| p.to_string_lossy().into_owned())
+        .ok_or_else(|| AppError::Other("could not resolve home directory".into()))
+}
+
+#[allow(dead_code)]
+fn run(program: &str, args: &[&std::ffi::OsStr]) -> AppResult<()> {
+    std::process::Command::new(program)
+        .args(args)
+        .spawn()
+        .map_err(AppError::Io)?;
+    Ok(())
+}

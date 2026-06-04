@@ -6,14 +6,27 @@
 import { ref } from "vue";
 
 /** Cross-column drag payload: a file being dragged from one connection's
- *  browser. Held in shared state (not dataTransfer) because WKWebView doesn't
- *  reliably expose dataTransfer during dragover, and because the drop target
- *  lives in a different component instance. */
+ *  browser, or from the local file browser. Held in shared state (not
+ *  dataTransfer) because WKWebView doesn't reliably expose dataTransfer during
+ *  dragover, and because the drop target lives in a different component
+ *  instance. */
 export interface SftpDragItem {
+  /** Where the dragged file lives. `"local"` items dropped on an SFTP folder
+   *  are uploaded; `"sftp"` items are moved (same host) or relayed (cross). */
+  source: "sftp" | "local";
+  /** For `"sftp"`, the source connection's tab id; for `"local"`, the terminal
+   *  tab id it was dragged from (never collides with an SSH tab id). */
   srcTabId: number;
   path: string;
   name: string;
   isDir: boolean;
+}
+
+/** A resolved drop location under the cursor: which browser column (by tab id)
+ *  and the destination directory the file would land in. */
+export interface FileDropTarget {
+  tabId: number;
+  dir: string;
 }
 /** The file currently being dragged (null when idle). */
 export const sftpDrag = ref<SftpDragItem | null>(null);
@@ -36,6 +49,82 @@ export function unregisterSftpTarget(tabId: number, fn: SftpDropFn): void {
 }
 export function deliverSftpDrop(tabId: number, item: SftpDragItem, dstDir: string): void {
   dropTargets.get(tabId)?.(item, dstDir);
+}
+
+// ---- shared pointer-based drag source --------------------------------------
+// WKWebView's HTML5 DnD is unreliable here, so we drive drags manually: track
+// the pointer, show a ghost, and hit-test the element under the cursor on
+// release via the `data-sftp-*` attrs any browser column stamps on its folders
+// / listing. Shared by the SFTP and local browsers so the hit-test contract is
+// single-sourced and drags work across columns, panes, and the two browsers.
+
+/** Posix parent dir — used only for same-source "dropping into your own dir is
+ *  a no-op" hinting; harmless on local Windows paths (it just won't match). */
+function dropParent(p: string): string {
+  const t = p.replace(/\/+$/, "");
+  const i = t.lastIndexOf("/");
+  return i <= 0 ? "/" : t.slice(0, i);
+}
+
+/** Resolve the drop target (connection/pane + destination dir) under a point. */
+export function resolveDropTarget(x: number, y: number): FileDropTarget | null {
+  const el = document.elementFromPoint(x, y) as HTMLElement | null;
+  if (!el) return null;
+  const folder = el.closest("[data-sftp-folder]") as HTMLElement | null;
+  if (folder) return { tabId: Number(folder.dataset.sftpTab), dir: folder.dataset.sftpFolder! };
+  const list = el.closest("[data-sftp-list]") as HTMLElement | null;
+  if (list) return { tabId: Number(list.dataset.sftpTab), dir: list.dataset.sftpCwd || "/" };
+  return null;
+}
+
+/**
+ * Begin a pointer drag for `item` from a row's mousedown. Shows the ghost +
+ * drop hint while moving; on release over a valid target, calls `onDrop`. If
+ * the pointer never crosses the threshold it's treated as a click (no drag,
+ * `onDrop` not called) so row navigation still works. The caller is
+ * responsible for ignoring mousedowns on action buttons / inputs.
+ */
+export function startFileDrag(
+  item: SftpDragItem,
+  ev: MouseEvent,
+  onDrop: (target: FileDropTarget) => void,
+): void {
+  if (ev.button !== 0) return;
+  const origin = { x: ev.clientX, y: ev.clientY };
+
+  const move = (e: MouseEvent) => {
+    if (!sftpDrag.value) {
+      const dx = e.clientX - origin.x;
+      const dy = e.clientY - origin.y;
+      if (dx * dx + dy * dy < 25) return; // 5px threshold before it's a drag
+      sftpDrag.value = item;
+    }
+    sftpDragGhost.value = { x: e.clientX, y: e.clientY, label: item.name };
+    const t = resolveDropTarget(e.clientX, e.clientY);
+    // Hint only a meaningful drop (don't highlight dropping into the file's own
+    // current/parent dir on the same source).
+    const noop =
+      t != null &&
+      t.tabId === item.srcTabId &&
+      (t.dir === item.path || t.dir === dropParent(item.path));
+    sftpDropHint.value = t && !noop ? t : null;
+  };
+
+  const up = (e: MouseEvent) => {
+    window.removeEventListener("mousemove", move);
+    window.removeEventListener("mouseup", up);
+    const dragged = sftpDrag.value;
+    sftpDrag.value = null;
+    sftpDragGhost.value = null;
+    sftpDropHint.value = null;
+    if (!dragged) return; // never crossed threshold → a click, not a drag
+    const t = resolveDropTarget(e.clientX, e.clientY);
+    if (!t || Number.isNaN(t.tabId)) return;
+    onDrop(t);
+  };
+
+  window.addEventListener("mousemove", move);
+  window.addEventListener("mouseup", up);
 }
 
 const SHOWN_KEY = "prmpt.sftpPanelShown";

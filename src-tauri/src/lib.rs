@@ -3,6 +3,7 @@ mod commands;
 mod config;
 mod data_migrations;
 mod error;
+mod localfs;
 #[cfg(target_os = "macos")]
 mod macos;
 mod paths;
@@ -229,6 +230,13 @@ pub fn run() {
             commands::sftp_download,
             commands::sftp_upload,
             commands::sftp_relay,
+            commands::local_home_dir,
+            commands::list_local_dir,
+            commands::local_mkdir,
+            commands::local_rename,
+            commands::local_remove,
+            commands::local_reveal,
+            commands::local_open,
             commands::full_disk_access_granted,
             commands::open_full_disk_access_settings,
             commands::secret_get,
