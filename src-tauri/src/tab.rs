@@ -111,6 +111,53 @@ pub enum SshIoCmd {
     Close,
 }
 
+/// SFTP requests routed from async Tauri command handlers into the SSH
+/// session task (which owns the `SftpSession` on the SSH runtime). Each
+/// carries a oneshot reply so the command can await the result. Metadata
+/// ops are served inline on the session task; transfers are spawned so a
+/// large file doesn't stall shell I/O. Mirrors how `SshIoCmd` keeps the
+/// tab side free of any russh/sftp types.
+pub enum SftpReq {
+    List {
+        path: String,
+        reply: tokio::sync::oneshot::Sender<AppResult<Vec<crate::protocol::SftpEntry>>>,
+    },
+    Realpath {
+        path: String,
+        reply: tokio::sync::oneshot::Sender<AppResult<String>>,
+    },
+    Stat {
+        path: String,
+        reply: tokio::sync::oneshot::Sender<AppResult<crate::protocol::SftpEntry>>,
+    },
+    Mkdir {
+        path: String,
+        reply: tokio::sync::oneshot::Sender<AppResult<()>>,
+    },
+    Rename {
+        from: String,
+        to: String,
+        reply: tokio::sync::oneshot::Sender<AppResult<()>>,
+    },
+    Remove {
+        path: String,
+        is_dir: bool,
+        reply: tokio::sync::oneshot::Sender<AppResult<()>>,
+    },
+    Download {
+        remote: String,
+        local: std::path::PathBuf,
+        transfer_id: u64,
+        reply: tokio::sync::oneshot::Sender<AppResult<()>>,
+    },
+    Upload {
+        local: std::path::PathBuf,
+        remote: String,
+        transfer_id: u64,
+        reply: tokio::sync::oneshot::Sender<AppResult<()>>,
+    },
+}
+
 /// Where the bytes a tab produces go to (and where its inbound bytes
 /// originate). The inbound stream is always a crossbeam `Receiver<PtyEvent>`
 /// regardless of source — only the outbound side branches.
@@ -166,6 +213,10 @@ pub struct TabHandle {
     pub kind: TabKind,
     pub host_id: Option<i64>,
     pub host_label: Option<String>,
+    /// Present for SSH tabs whose session offered the SFTP subsystem.
+    /// Command handlers clone this to drive the file browser. `None` for
+    /// local tabs and for SSH hosts where SFTP is disabled/unavailable.
+    pub sftp_tx: Option<tokio::sync::mpsc::Sender<SftpReq>>,
 }
 
 pub struct TabRegistry {
@@ -208,6 +259,7 @@ impl TabRegistry {
         config: SharedConfig,
         pty_rx: Receiver<PtyEvent>,
         out_tx: tokio::sync::mpsc::Sender<SshIoCmd>,
+        sftp_tx: tokio::sync::mpsc::Sender<SftpReq>,
     ) -> AppResult<()> {
         let (cmd_tx, cmd_rx) = unbounded::<TabCmd>();
         self.start_tab_thread(
@@ -232,6 +284,7 @@ impl TabRegistry {
                 kind: TabKind::Ssh,
                 host_id: Some(host_id),
                 host_label: Some(host_label),
+                sftp_tx: Some(sftp_tx),
             },
         );
         self.windows.lock().insert(id, owner_window);
@@ -356,6 +409,7 @@ impl TabRegistry {
                 kind: TabKind::Local,
                 host_id: None,
                 host_label: None,
+                sftp_tx: None,
             },
         );
         self.windows.lock().insert(id, owner_window);
@@ -490,6 +544,18 @@ impl TabRegistry {
         reply_rx
             .recv_timeout(Duration::from_secs(5))
             .map_err(|_| AppError::UnknownTab(id))
+    }
+
+    /// Clone the SFTP request sender for an SSH tab. Errors when the tab is
+    /// unknown, is a local tab, or its session never offered SFTP (subsystem
+    /// failed / disabled for the host) — the command layer maps that to a
+    /// clean "SFTP not available" surfaced in the panel.
+    pub fn sftp_sender(&self, id: u64) -> AppResult<tokio::sync::mpsc::Sender<SftpReq>> {
+        let guard = self.inner.lock();
+        let h = guard.get(&id).ok_or(AppError::UnknownTab(id))?;
+        h.sftp_tx
+            .clone()
+            .ok_or_else(|| AppError::Ssh("SFTP is not available on this connection".into()))
     }
 
     pub fn close(&self, id: u64) -> AppResult<()> {

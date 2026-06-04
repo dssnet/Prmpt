@@ -4439,6 +4439,7 @@ dependencies = [
  "rand",
  "russh",
  "russh-keys",
+ "russh-sftp",
  "secret-service",
  "security-framework",
  "serde",

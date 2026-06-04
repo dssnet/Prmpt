@@ -317,6 +317,8 @@ export interface SshConnectConfig {
   username: string;
   auth: SshAuthConfig;
   stored_fingerprint: string | null;
+  /** Per-host opt-out: skip opening the SFTP subsystem entirely. */
+  disable_sftp: boolean;
   forwards: SshForwardConfig[];
 }
 
@@ -425,6 +427,97 @@ export function onSshConnectError(
   handler: (payload: SshConnectError) => void,
 ): Promise<UnlistenFn> {
   return listenScoped<SshConnectError>("ssh:connect_error", handler);
+}
+
+// ---------------- SFTP file browser ----------------
+
+/** One entry in a remote directory listing. Metadata is best-effort — the
+ *  server may omit any of `size`/`mtime`/`mode`. */
+export interface SftpEntry {
+  name: string;
+  /** Absolute remote path. */
+  path: string;
+  is_dir: boolean;
+  is_symlink: boolean;
+  size: number;
+  /** Unix mtime in epoch seconds, when reported. */
+  mtime: number | null;
+  /** Unix permission bits, when reported. */
+  mode: number | null;
+}
+
+export async function sftpListDir(tabId: number, path: string): Promise<SftpEntry[]> {
+  return await invoke<SftpEntry[]>("sftp_list_dir", { tabId, path });
+}
+
+/** Resolve a remote path (pass `"."` to get the login/home directory). */
+export async function sftpRealpath(tabId: number, path: string): Promise<string> {
+  return await invoke<string>("sftp_realpath", { tabId, path });
+}
+
+export async function sftpStat(tabId: number, path: string): Promise<SftpEntry> {
+  return await invoke<SftpEntry>("sftp_stat", { tabId, path });
+}
+
+export async function sftpMkdir(tabId: number, path: string): Promise<void> {
+  await invoke("sftp_mkdir", { tabId, path });
+}
+
+export async function sftpRename(tabId: number, from: string, to: string): Promise<void> {
+  await invoke("sftp_rename", { tabId, from, to });
+}
+
+export async function sftpRemove(tabId: number, path: string, isDir: boolean): Promise<void> {
+  await invoke("sftp_remove", { tabId, path, isDir });
+}
+
+/** Stream a remote file down to a local path. Progress arrives via
+ *  `onSftpTransferProgress` keyed by `transferId`. */
+export async function sftpDownload(
+  tabId: number,
+  remote: string,
+  local: string,
+  transferId: number,
+): Promise<void> {
+  await invoke("sftp_download", { tabId, remote, local, transferId });
+}
+
+/** Stream a local file up to a remote path. */
+export async function sftpUpload(
+  tabId: number,
+  local: string,
+  remote: string,
+  transferId: number,
+): Promise<void> {
+  await invoke("sftp_upload", { tabId, local, remote, transferId });
+}
+
+export interface SftpAvailability {
+  tab_id: number;
+  available: boolean;
+}
+
+/** Fires once per connect/reconnect when the SFTP subsystem is (or isn't)
+ *  ready. The panel waits for `available: true` before its first load. */
+export function onSftpAvailability(
+  handler: (payload: SftpAvailability) => void,
+): Promise<UnlistenFn> {
+  return listenScoped<SftpAvailability>("sftp:availability", handler);
+}
+
+export interface SftpTransferProgress {
+  tab_id: number;
+  transfer_id: number;
+  transferred: number;
+  total: number | null;
+  done: boolean;
+  error: string | null;
+}
+
+export function onSftpTransferProgress(
+  handler: (payload: SftpTransferProgress) => void,
+): Promise<UnlistenFn> {
+  return listenScoped<SftpTransferProgress>("sftp:transfer_progress", handler);
 }
 
 // ---- Backup (import / export) ----

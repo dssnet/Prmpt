@@ -34,6 +34,8 @@ export interface TabState {
   title: string;
   hostLabel?: string;
   hostId?: number;
+  /** SSH tabs only: the host opted out of SFTP, so no file-browser panel. */
+  disableSftp?: boolean;
 }
 
 export interface TabHydrateInfo {
@@ -145,6 +147,7 @@ export async function spawnSsh(args: {
     title: args.hostLabel,
     hostLabel: args.hostLabel,
     hostId: args.hostId,
+    disableSftp: args.config.disable_sftp,
   });
   activeId.value = id;
   return id;

@@ -53,6 +53,7 @@ const form = reactive({
   password: "",
   key_id: "" as string,
   group_id: "" as string,
+  disable_sftp: false,
 });
 
 const pwMode = ref<PwMode>("replace");
@@ -168,6 +169,7 @@ function serialize(): string {
     auth_method: form.auth_method,
     key_id: form.key_id,
     group_id: form.group_id,
+    disable_sftp: form.disable_sftp,
     password: form.password,
     pwMode: pwMode.value,
     forwards: forwards.value
@@ -238,6 +240,7 @@ async function load() {
   form.password = "";
   form.key_id = h?.key_id ? String(h.key_id) : "";
   form.group_id = h?.group_id ? String(h.group_id) : "";
+  form.disable_sftp = h?.disable_sftp ?? false;
   pwMode.value = h?.has_password ? "saved" : "replace";
   showPw.value = false;
   errorText.value = null;
@@ -353,6 +356,7 @@ async function onSubmit() {
       key_id: auth === "key" ? keyId : null,
       group_id: form.group_id ? Number(form.group_id) : null,
       has_password: hasPassword,
+      disable_sftp: form.disable_sftp,
     });
 
     if (newPassword != null) {
@@ -684,6 +688,23 @@ async function onSubmit() {
               </div>
             </div>
 
+          </div>
+        </section>
+
+        <!-- Advanced -->
+        <section class="border border-border rounded-lg bg-surface-1">
+          <header class="px-3.5 pt-2.5 pb-2 border-b border-border">
+            <h3 class="m-0 text-sm font-semibold text-fg">Advanced</h3>
+          </header>
+          <div class="px-3.5 py-3 flex flex-col gap-2.5">
+            <FormRow label="Disable SFTP" html-for="ssh-host-disable-sftp">
+              <div class="flex items-center gap-3">
+                <Switch id="ssh-host-disable-sftp" v-model="form.disable_sftp" />
+                <p class="text-xs text-fg-subtle leading-snug">
+                  Don't open the file browser panel for this connection.
+                </p>
+              </div>
+            </FormRow>
           </div>
         </section>
 

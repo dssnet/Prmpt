@@ -26,19 +26,37 @@ use russh::client::{self, Handle, Handler};
 use russh::keys::key::PrivateKeyWithHashAlg;
 use russh::keys::ssh_key;
 use russh::{Channel, ChannelMsg, Disconnect};
+use russh_sftp::client::SftpSession;
+use russh_sftp::protocol::OpenFlags;
 use serde::Deserialize;
 use tauri::{AppHandle, Emitter, EventTarget};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
+use tokio::sync::Mutex as AsyncMutex;
 use tokio::task::JoinHandle;
 use zeroize::ZeroizeOnDrop;
 
 use crate::{
     error::{AppError, AppResult},
-    protocol::{SshConnectError, SshHostKeyFirstConnect, SshHostKeyMismatch, SshPortForwardError},
-    tab::{PtyEvent, SshIoCmd},
+    protocol::{
+        SftpAvailability, SftpEntry, SftpTransferProgress, SshConnectError,
+        SshHostKeyFirstConnect, SshHostKeyMismatch, SshPortForwardError,
+    },
+    tab::{PtyEvent, SftpReq, SshIoCmd},
 };
+
+/// Slot holding the SFTP session for the *current* transport. `run_session`
+/// fills it after a successful connect and clears it on disconnect; the
+/// long-lived `sftp_service` task reads it per request so it transparently
+/// follows reconnects (and rejects requests while disconnected).
+type SftpSlot = Arc<AsyncMutex<Option<Arc<SftpSession>>>>;
+
+/// Chunk size for streamed SFTP transfers.
+const SFTP_CHUNK: usize = 64 * 1024;
+/// Emit a progress event at most this often (bytes) to avoid flooding the
+/// webview on large transfers; plus one final emit on completion.
+const SFTP_PROGRESS_STRIDE: u64 = 512 * 1024;
 
 // ---------- inbound config types ----------
 
@@ -60,6 +78,11 @@ pub struct SshConnectConfig {
     /// frontend can record it).
     pub stored_fingerprint: Option<String>,
     pub forwards: Vec<SshForwardConfig>,
+    /// Per-host opt-out: when true, never open the SFTP subsystem (the file
+    /// browser panel won't appear). `serde(default)` keeps older saved
+    /// configs deserializing cleanly.
+    #[serde(default)]
+    pub disable_sftp: bool,
 }
 
 /// Holds plaintext credentials only while a session is being established;
@@ -210,7 +233,7 @@ impl Handler for ClientHandler {
 // ---------- session lifecycle ----------
 
 /// Spawn the SSH session on the supplied tokio runtime. Returns the
-/// outbound command channel.
+/// outbound shell command channel and the SFTP request channel.
 pub fn spawn_session(
     rt: &tokio::runtime::Runtime,
     app: AppHandle,
@@ -220,8 +243,9 @@ pub fn spawn_session(
     pty_tx: crossbeam_channel::Sender<PtyEvent>,
     cols: u16,
     rows: u16,
-) -> mpsc::Sender<SshIoCmd> {
+) -> (mpsc::Sender<SshIoCmd>, mpsc::Sender<SftpReq>) {
     let (out_tx, out_rx) = mpsc::channel::<SshIoCmd>(128);
+    let (sftp_tx, sftp_rx) = mpsc::channel::<SftpReq>(32);
     rt.spawn(session_task(
         app,
         owner_window,
@@ -229,10 +253,11 @@ pub fn spawn_session(
         config,
         pty_tx,
         out_rx,
+        sftp_rx,
         cols,
         rows,
     ));
-    out_tx
+    (out_tx, sftp_tx)
 }
 
 /// Why a single connect+drive attempt stopped. Decides whether
@@ -249,6 +274,7 @@ enum SessionOutcome {
     Rejected,
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn session_task(
     app: AppHandle,
     owner_window: String,
@@ -256,6 +282,7 @@ async fn session_task(
     config: SshConnectConfig,
     pty_tx: crossbeam_channel::Sender<PtyEvent>,
     mut out_rx: mpsc::Receiver<SshIoCmd>,
+    sftp_rx: mpsc::Receiver<SftpReq>,
     cols: u16,
     rows: u16,
 ) {
@@ -264,6 +291,19 @@ async fn session_task(
     let host_id = config.host_id;
     let host_label = config.label.clone();
     let hostname = config.hostname.clone();
+
+    // One SFTP service task lives for the whole session (across reconnects).
+    // It reads the current `SftpSession` from a shared slot that `run_session`
+    // populates/clears, so it follows reconnects without re-plumbing the
+    // receiver, and rejects requests cleanly while the transport is down.
+    let sftp_slot: SftpSlot = Arc::new(AsyncMutex::new(None));
+    let sftp_service = tokio::spawn(sftp_service(
+        sftp_rx,
+        sftp_slot.clone(),
+        app.clone(),
+        owner_window.clone(),
+        tab_id,
+    ));
     // These outlive a single transport and are threaded through every
     // attempt: the latest terminal size (so a reconnect requests the right
     // PTY), the now-known host fingerprint (so a key change is still caught
@@ -286,6 +326,7 @@ async fn session_task(
             &mut cols,
             &mut rows,
             &mut stored_fp,
+            &sftp_slot,
         )
         .await;
 
@@ -339,6 +380,7 @@ async fn session_task(
         }
         backoff_secs = (backoff_secs * 2).min(30);
     }
+    sftp_service.abort();
     let _ = pty_tx.send(PtyEvent::Eof);
 }
 
@@ -410,6 +452,7 @@ async fn run_session(
     cols: &mut u16,
     rows: &mut u16,
     stored_fp: &mut Option<String>,
+    sftp_slot: &SftpSlot,
 ) -> AppResult<(SessionOutcome, bool)> {
     let host_id = config.host_id;
     let russh_config = Arc::new(client::Config {
@@ -530,7 +573,33 @@ async fn run_session(
         forward_tasks.push(task);
     }
 
+    // Best-effort SFTP subsystem on a second channel of the same session.
+    // Failures (server without the subsystem, or the per-host opt-out) leave
+    // the slot empty so the panel shows "unavailable" — the shell is unaffected.
+    let sftp = if config.disable_sftp {
+        None
+    } else {
+        open_sftp(&session).await
+    };
+    let sftp_available = sftp.is_some();
+    *sftp_slot.lock().await = sftp;
+    // Tell the (already-mounted) panel SFTP is ready to query — it waits for
+    // this rather than failing on the pre-handshake race, and reloads on each
+    // reconnect. `false` means the host doesn't offer the subsystem.
+    let _ = app.emit_to(
+        EventTarget::webview_window(owner_window),
+        "sftp:availability",
+        SftpAvailability {
+            tab_id,
+            available: sftp_available,
+        },
+    );
+
     let outcome = drive_channel_loop(&mut channel, pty_tx, out_rx, cols, rows).await;
+
+    // Drop the SFTP session before tearing down the transport so in-flight
+    // browser requests fail fast (and so a reconnect installs a fresh one).
+    *sftp_slot.lock().await = None;
 
     for t in forward_tasks {
         t.abort();
@@ -539,6 +608,30 @@ async fn run_session(
     let s = session.lock().await;
     let _ = s.disconnect(Disconnect::ByApplication, "", "").await;
     Ok((outcome, true))
+}
+
+/// Open the SFTP subsystem on a fresh channel of an established session.
+/// Returns `None` (logging at the call sites) on any failure so the caller
+/// can degrade gracefully.
+async fn open_sftp(session: &Arc<tokio::sync::Mutex<Handle<ClientHandler>>>) -> Option<Arc<SftpSession>> {
+    let channel = match session.lock().await.channel_open_session().await {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("[sftp] channel open failed: {e}");
+            return None;
+        }
+    };
+    if let Err(e) = channel.request_subsystem(true, "sftp").await {
+        eprintln!("[sftp] subsystem request failed: {e}");
+        return None;
+    }
+    match SftpSession::new(channel.into_stream()).await {
+        Ok(s) => Some(Arc::new(s)),
+        Err(e) => {
+            eprintln!("[sftp] session init failed: {e}");
+            None
+        }
+    }
 }
 
 async fn authenticate<H: Handler>(
@@ -874,4 +967,322 @@ async fn pipe_socket_channel(sock: TcpStream, chan: Channel<client::Msg>) {
     let mut stream = chan.into_stream();
     let mut sock = sock;
     let _ = tokio::io::copy_bidirectional(&mut sock, &mut stream).await;
+}
+
+// ---------- sftp ----------
+
+/// Long-lived task draining the per-tab SFTP request channel. Reads the
+/// current `SftpSession` from `slot` per request (so it follows reconnects);
+/// rejects everything while the transport is down. Metadata ops run inline
+/// (fast, and naturally serialized); transfers are spawned so a big file
+/// doesn't block browsing.
+async fn sftp_service(
+    mut rx: mpsc::Receiver<SftpReq>,
+    slot: SftpSlot,
+    app: AppHandle,
+    window: String,
+    tab_id: u64,
+) {
+    while let Some(req) = rx.recv().await {
+        let current = slot.lock().await.clone();
+        let Some(sftp) = current else {
+            reject_sftp(req, "SFTP is not connected");
+            continue;
+        };
+        match req {
+            SftpReq::Download { .. } | SftpReq::Upload { .. } => {
+                let app = app.clone();
+                let window = window.clone();
+                tokio::spawn(async move {
+                    run_sftp_transfer(sftp, app, window, tab_id, req).await;
+                });
+            }
+            other => run_sftp_meta(&sftp, other).await,
+        }
+    }
+}
+
+fn sftp_err<E: std::fmt::Display>(e: E) -> AppError {
+    AppError::Ssh(format!("sftp: {e}"))
+}
+
+/// Send a uniform error to whichever reply channel a request carries — used
+/// when no session is available. The error is built per-arm because each
+/// reply's `T` differs (a single closure would fix one concrete type).
+fn reject_sftp(req: SftpReq, msg: &str) {
+    match req {
+        SftpReq::List { reply, .. } => {
+            let _ = reply.send(Err(AppError::Ssh(msg.to_string())));
+        }
+        SftpReq::Realpath { reply, .. } => {
+            let _ = reply.send(Err(AppError::Ssh(msg.to_string())));
+        }
+        SftpReq::Stat { reply, .. } => {
+            let _ = reply.send(Err(AppError::Ssh(msg.to_string())));
+        }
+        SftpReq::Mkdir { reply, .. } => {
+            let _ = reply.send(Err(AppError::Ssh(msg.to_string())));
+        }
+        SftpReq::Rename { reply, .. } => {
+            let _ = reply.send(Err(AppError::Ssh(msg.to_string())));
+        }
+        SftpReq::Remove { reply, .. } => {
+            let _ = reply.send(Err(AppError::Ssh(msg.to_string())));
+        }
+        SftpReq::Download { reply, .. } => {
+            let _ = reply.send(Err(AppError::Ssh(msg.to_string())));
+        }
+        SftpReq::Upload { reply, .. } => {
+            let _ = reply.send(Err(AppError::Ssh(msg.to_string())));
+        }
+    }
+}
+
+fn join_remote(dir: &str, name: &str) -> String {
+    if dir.ends_with('/') {
+        format!("{dir}{name}")
+    } else {
+        format!("{dir}/{name}")
+    }
+}
+
+fn remote_basename(path: &str) -> String {
+    let trimmed = path.trim_end_matches('/');
+    match trimmed.rsplit_once('/') {
+        Some((_, base)) if !base.is_empty() => base.to_string(),
+        _ => trimmed.to_string(),
+    }
+}
+
+fn make_entry(name: String, path: String, md: &russh_sftp::protocol::FileAttributes) -> SftpEntry {
+    SftpEntry {
+        is_dir: md.is_dir(),
+        is_symlink: md.is_symlink(),
+        size: md.size.unwrap_or(0),
+        mtime: md.mtime.map(|t| t as u64),
+        mode: md.permissions,
+        name,
+        path,
+    }
+}
+
+async fn run_sftp_meta(sftp: &SftpSession, req: SftpReq) {
+    match req {
+        SftpReq::List { path, reply } => {
+            let _ = reply.send(sftp_list(sftp, &path).await);
+        }
+        SftpReq::Realpath { path, reply } => {
+            let _ = reply.send(sftp.canonicalize(path).await.map_err(sftp_err));
+        }
+        SftpReq::Stat { path, reply } => {
+            let _ = reply.send(sftp_stat(sftp, &path).await);
+        }
+        SftpReq::Mkdir { path, reply } => {
+            let _ = reply.send(sftp.create_dir(path).await.map_err(sftp_err));
+        }
+        SftpReq::Rename { from, to, reply } => {
+            let _ = reply.send(sftp.rename(from, to).await.map_err(sftp_err));
+        }
+        SftpReq::Remove {
+            path,
+            is_dir,
+            reply,
+        } => {
+            let r = if is_dir {
+                sftp.remove_dir(path).await
+            } else {
+                sftp.remove_file(path).await
+            };
+            let _ = reply.send(r.map_err(sftp_err));
+        }
+        // Transfers are dispatched separately by `sftp_service`.
+        SftpReq::Download { .. } | SftpReq::Upload { .. } => {}
+    }
+}
+
+async fn sftp_list(sftp: &SftpSession, dir: &str) -> AppResult<Vec<SftpEntry>> {
+    let rd = sftp.read_dir(dir).await.map_err(sftp_err)?;
+    let mut out = Vec::new();
+    for entry in rd {
+        let name = entry.file_name();
+        if name == "." || name == ".." {
+            continue;
+        }
+        let md = entry.metadata();
+        let path = join_remote(dir, &name);
+        out.push(make_entry(name, path, &md));
+    }
+    // Directories first, then case-insensitive by name — a sensible default
+    // the frontend can re-sort if needed.
+    out.sort_by(|a, b| {
+        b.is_dir
+            .cmp(&a.is_dir)
+            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+    });
+    Ok(out)
+}
+
+async fn sftp_stat(sftp: &SftpSession, path: &str) -> AppResult<SftpEntry> {
+    let md = sftp.metadata(path).await.map_err(sftp_err)?;
+    Ok(make_entry(remote_basename(path), path.to_string(), &md))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_progress(
+    app: &AppHandle,
+    window: &str,
+    tab_id: u64,
+    transfer_id: u64,
+    transferred: u64,
+    total: Option<u64>,
+    done: bool,
+    error: Option<String>,
+) {
+    let _ = app.emit_to(
+        EventTarget::webview_window(window),
+        "sftp:transfer_progress",
+        SftpTransferProgress {
+            tab_id,
+            transfer_id,
+            transferred,
+            total,
+            done,
+            error,
+        },
+    );
+}
+
+async fn run_sftp_transfer(
+    sftp: Arc<SftpSession>,
+    app: AppHandle,
+    window: String,
+    tab_id: u64,
+    req: SftpReq,
+) {
+    match req {
+        SftpReq::Download {
+            remote,
+            local,
+            transfer_id,
+            reply,
+        } => {
+            let r = sftp_download(&sftp, &app, &window, tab_id, transfer_id, &remote, &local).await;
+            let _ = reply.send(r);
+        }
+        SftpReq::Upload {
+            local,
+            remote,
+            transfer_id,
+            reply,
+        } => {
+            let r = sftp_upload(&sftp, &app, &window, tab_id, transfer_id, &local, &remote).await;
+            let _ = reply.send(r);
+        }
+        _ => {}
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn sftp_download(
+    sftp: &SftpSession,
+    app: &AppHandle,
+    window: &str,
+    tab_id: u64,
+    transfer_id: u64,
+    remote: &str,
+    local: &std::path::Path,
+) -> AppResult<()> {
+    let total = sftp.metadata(remote).await.ok().and_then(|m| m.size);
+    let result = async {
+        let mut rf = sftp.open(remote).await.map_err(sftp_err)?;
+        let mut lf = tokio::fs::File::create(local).await?;
+        let mut buf = vec![0u8; SFTP_CHUNK];
+        let mut transferred = 0u64;
+        let mut last = 0u64;
+        loop {
+            let n = rf.read(&mut buf).await?;
+            if n == 0 {
+                break;
+            }
+            lf.write_all(&buf[..n]).await?;
+            transferred += n as u64;
+            if transferred - last >= SFTP_PROGRESS_STRIDE {
+                last = transferred;
+                emit_progress(app, window, tab_id, transfer_id, transferred, total, false, None);
+            }
+        }
+        lf.flush().await?;
+        Ok::<u64, AppError>(transferred)
+    }
+    .await;
+    finish_transfer(app, window, tab_id, transfer_id, total, result)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn sftp_upload(
+    sftp: &SftpSession,
+    app: &AppHandle,
+    window: &str,
+    tab_id: u64,
+    transfer_id: u64,
+    local: &std::path::Path,
+    remote: &str,
+) -> AppResult<()> {
+    let total = tokio::fs::metadata(local).await.ok().map(|m| m.len());
+    let result = async {
+        let mut lf = tokio::fs::File::open(local).await?;
+        let mut rf = sftp
+            .open_with_flags(
+                remote,
+                OpenFlags::CREATE | OpenFlags::TRUNCATE | OpenFlags::WRITE,
+            )
+            .await
+            .map_err(sftp_err)?;
+        let mut buf = vec![0u8; SFTP_CHUNK];
+        let mut transferred = 0u64;
+        let mut last = 0u64;
+        loop {
+            let n = lf.read(&mut buf).await?;
+            if n == 0 {
+                break;
+            }
+            rf.write_all(&buf[..n]).await?;
+            transferred += n as u64;
+            if transferred - last >= SFTP_PROGRESS_STRIDE {
+                last = transferred;
+                emit_progress(app, window, tab_id, transfer_id, transferred, total, false, None);
+            }
+        }
+        // Flush + send the SFTP close so the server commits the file.
+        rf.shutdown().await?;
+        Ok::<u64, AppError>(transferred)
+    }
+    .await;
+    finish_transfer(app, window, tab_id, transfer_id, total, result)
+}
+
+/// Emit the terminal progress event for a transfer and collapse the result
+/// to `AppResult<()>` for the command reply.
+fn finish_transfer(
+    app: &AppHandle,
+    window: &str,
+    tab_id: u64,
+    transfer_id: u64,
+    total: Option<u64>,
+    result: AppResult<u64>,
+) -> AppResult<()> {
+    match &result {
+        Ok(t) => emit_progress(app, window, tab_id, transfer_id, *t, total, true, None),
+        Err(e) => emit_progress(
+            app,
+            window,
+            tab_id,
+            transfer_id,
+            0,
+            total,
+            true,
+            Some(e.to_string()),
+        ),
+    }
+    result.map(|_| ())
 }

@@ -111,6 +111,48 @@ pub struct SshPortForwardError {
     pub message: String,
 }
 
+/// One entry in an SFTP directory listing. All metadata is best-effort:
+/// the server may omit any field, so `size`/`mtime`/`mode` are optional and
+/// default to "unknown" on the frontend.
+#[derive(Serialize, Clone, Debug)]
+pub struct SftpEntry {
+    pub name: String,
+    /// Absolute remote path (`dir` joined with `name`).
+    pub path: String,
+    pub is_dir: bool,
+    pub is_symlink: bool,
+    pub size: u64,
+    /// Unix mtime in epoch seconds, when the server reports it.
+    pub mtime: Option<u64>,
+    /// Unix permission bits, when the server reports them.
+    pub mode: Option<u32>,
+}
+
+/// Emitted once per connect attempt when the SFTP subsystem is (or isn't)
+/// ready: the panel mounts before the SSH handshake completes, so it waits
+/// for `available: true` to load — and reloads on each reconnect. `available:
+/// false` means the server didn't offer the subsystem.
+#[derive(Serialize, Clone, Debug)]
+pub struct SftpAvailability {
+    pub tab_id: u64,
+    pub available: bool,
+}
+
+/// Progress for an in-flight SFTP upload/download, emitted per chunk so the
+/// panel can render a progress bar. `total` is `None` when the size isn't
+/// known up front (rare; uploads always know it from the local file).
+#[derive(Serialize, Clone, Debug)]
+pub struct SftpTransferProgress {
+    pub tab_id: u64,
+    /// Frontend-supplied transfer id so concurrent transfers are distinguishable.
+    pub transfer_id: u64,
+    pub transferred: u64,
+    pub total: Option<u64>,
+    /// True on the final emit (success or error); `error` is set on failure.
+    pub done: bool,
+    pub error: Option<String>,
+}
+
 /// Emitted when the SSH session task could not establish or sustain a
 /// connection — wraps the bubbled-up error so the frontend can show a
 /// dismissable dialog (otherwise the tab just disappears and the user

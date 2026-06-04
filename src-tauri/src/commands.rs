@@ -11,11 +11,11 @@ use crate::{
     activate_blank_window, configure_new_window,
     config::{Config, Theme},
     error::{AppError, AppResult},
-    protocol::{TabInfo, WindowBootstrap},
+    protocol::{SftpEntry, TabInfo, WindowBootstrap},
     schedule_refill,
     ssh::{self, SshConnectConfig},
     stronghold::{self, StrongholdUnlock},
-    tab::{PtyEvent, ScrollKind, SharedRegistry},
+    tab::{PtyEvent, ScrollKind, SftpReq, SharedRegistry},
     window_pool::WindowMode,
     DbUrl, SharedConfig, SharedPendingHydration, SharedRuntime, SharedWindowCounter,
     SharedWindowPool,
@@ -522,7 +522,7 @@ pub fn connect_ssh_host(
 
     let id = registry.next_tab_id();
     let (pty_tx, pty_rx) = unbounded::<PtyEvent>();
-    let out_tx = ssh::spawn_session(
+    let (out_tx, sftp_tx) = ssh::spawn_session(
         runtime.inner().as_ref(),
         app.clone(),
         window.label().to_string(),
@@ -545,11 +545,137 @@ pub fn connect_ssh_host(
         config.inner().clone(),
         pty_rx,
         out_tx,
+        sftp_tx,
     )?;
 
     let _ = args.cell_width_px;
     let _ = args.cell_height_px;
     Ok(id)
+}
+
+// ---------- SFTP file browser ----------
+//
+// Each command routes a request to the tab's SSH session task (which owns the
+// `SftpSession` on the SSH runtime) via the per-tab channel and awaits a
+// oneshot reply — the handler never touches russh/sftp types directly. Local
+// filesystem paths arrive as strings from the native dialog plugin.
+
+/// Send one request to the tab's SFTP service and await its reply.
+async fn sftp_call<T>(
+    tx: tokio::sync::mpsc::Sender<SftpReq>,
+    build: impl FnOnce(tokio::sync::oneshot::Sender<AppResult<T>>) -> SftpReq,
+) -> AppResult<T> {
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+    tx.send(build(reply_tx))
+        .await
+        .map_err(|_| AppError::Ssh("SFTP channel closed".into()))?;
+    match reply_rx.await {
+        Ok(inner) => inner,
+        Err(_) => Err(AppError::Ssh("SFTP request dropped".into())),
+    }
+}
+
+#[tauri::command]
+pub async fn sftp_list_dir(
+    registry: State<'_, SharedRegistry>,
+    tab_id: u64,
+    path: String,
+) -> AppResult<Vec<SftpEntry>> {
+    let tx = registry.sftp_sender(tab_id)?;
+    sftp_call(tx, |reply| SftpReq::List { path, reply }).await
+}
+
+#[tauri::command]
+pub async fn sftp_realpath(
+    registry: State<'_, SharedRegistry>,
+    tab_id: u64,
+    path: String,
+) -> AppResult<String> {
+    let tx = registry.sftp_sender(tab_id)?;
+    sftp_call(tx, |reply| SftpReq::Realpath { path, reply }).await
+}
+
+#[tauri::command]
+pub async fn sftp_stat(
+    registry: State<'_, SharedRegistry>,
+    tab_id: u64,
+    path: String,
+) -> AppResult<SftpEntry> {
+    let tx = registry.sftp_sender(tab_id)?;
+    sftp_call(tx, |reply| SftpReq::Stat { path, reply }).await
+}
+
+#[tauri::command]
+pub async fn sftp_mkdir(
+    registry: State<'_, SharedRegistry>,
+    tab_id: u64,
+    path: String,
+) -> AppResult<()> {
+    let tx = registry.sftp_sender(tab_id)?;
+    sftp_call(tx, |reply| SftpReq::Mkdir { path, reply }).await
+}
+
+#[tauri::command]
+pub async fn sftp_rename(
+    registry: State<'_, SharedRegistry>,
+    tab_id: u64,
+    from: String,
+    to: String,
+) -> AppResult<()> {
+    let tx = registry.sftp_sender(tab_id)?;
+    sftp_call(tx, |reply| SftpReq::Rename { from, to, reply }).await
+}
+
+#[tauri::command]
+pub async fn sftp_remove(
+    registry: State<'_, SharedRegistry>,
+    tab_id: u64,
+    path: String,
+    is_dir: bool,
+) -> AppResult<()> {
+    let tx = registry.sftp_sender(tab_id)?;
+    sftp_call(tx, |reply| SftpReq::Remove {
+        path,
+        is_dir,
+        reply,
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn sftp_download(
+    registry: State<'_, SharedRegistry>,
+    tab_id: u64,
+    remote: String,
+    local: String,
+    transfer_id: u64,
+) -> AppResult<()> {
+    let tx = registry.sftp_sender(tab_id)?;
+    sftp_call(tx, |reply| SftpReq::Download {
+        remote,
+        local: std::path::PathBuf::from(local),
+        transfer_id,
+        reply,
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn sftp_upload(
+    registry: State<'_, SharedRegistry>,
+    tab_id: u64,
+    local: String,
+    remote: String,
+    transfer_id: u64,
+) -> AppResult<()> {
+    let tx = registry.sftp_sender(tab_id)?;
+    sftp_call(tx, |reply| SftpReq::Upload {
+        local: std::path::PathBuf::from(local),
+        remote,
+        transfer_id,
+        reply,
+    })
+    .await
 }
 
 #[derive(serde::Serialize)]

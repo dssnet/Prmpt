@@ -1,8 +1,10 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
-import { X } from "lucide-vue-next";
+import { PanelRight, X } from "lucide-vue-next";
 
 import { wheelScroll, showContextMenu, type Config } from "../ipc";
+import { isSftpVisible, toggleSftpPanel } from "../state/sftp";
+import SftpPanel from "./SftpPanel.vue";
 import TerminalScrollbar from "./TerminalScrollbar.vue";
 import {
   applyRendererTheme,
@@ -43,8 +45,72 @@ const props = defineProps<{ config: Config }>();
 
 const canvasRef = ref<HTMLCanvasElement | null>(null);
 const hostRef = ref<HTMLElement | null>(null);
+const wrapRef = ref<HTMLElement | null>(null);
 
 const { active, tabs, renderSeq } = useTabs();
+
+// ---- SFTP side panel (SSH tabs) -------------------------------------------
+// Shown to the right of an SSH tab; shrinks #terminal-host so the existing
+// ResizeObserver reflows the terminal automatically (no sizing changes here).
+const showSftp = computed(
+  () =>
+    active.value?.kind === "ssh" &&
+    !active.value.disableSftp &&
+    isSftpVisible(active.value.id),
+);
+const sftpReopenVisible = computed(
+  () =>
+    active.value?.kind === "ssh" &&
+    !active.value.disableSftp &&
+    !isSftpVisible(active.value.id),
+);
+
+const SFTP_W_KEY = "prmpt.sftpPanelWidthPx";
+const sftpWidth = ref<number>(360);
+{
+  const saved = parseInt(localStorage.getItem(SFTP_W_KEY) ?? "", 10);
+  if (Number.isFinite(saved)) sftpWidth.value = saved;
+}
+
+function clampSftpWidth(px: number): number {
+  const wrap = wrapRef.value?.getBoundingClientRect().width ?? window.innerWidth;
+  // Keep at least ~360px for the terminal; never narrower than 260px.
+  const max = Math.max(280, wrap - 360);
+  return Math.min(max, Math.max(260, px));
+}
+
+let sftpDragRaf = 0;
+let sftpPendingX: number | null = null;
+
+function onSftpDividerMove(e: MouseEvent) {
+  sftpPendingX = e.clientX;
+  if (sftpDragRaf) return;
+  sftpDragRaf = requestAnimationFrame(() => {
+    sftpDragRaf = 0;
+    const wrap = wrapRef.value?.getBoundingClientRect();
+    if (sftpPendingX == null || !wrap) return;
+    sftpWidth.value = clampSftpWidth(wrap.right - sftpPendingX);
+  });
+}
+
+function onSftpDividerUp() {
+  window.removeEventListener("mousemove", onSftpDividerMove);
+  window.removeEventListener("mouseup", onSftpDividerUp);
+  if (sftpDragRaf) {
+    cancelAnimationFrame(sftpDragRaf);
+    sftpDragRaf = 0;
+  }
+  sftpPendingX = null;
+  document.body.style.userSelect = "";
+  localStorage.setItem(SFTP_W_KEY, String(Math.round(sftpWidth.value)));
+}
+
+function onSftpDividerDown(e: MouseEvent) {
+  e.preventDefault();
+  document.body.style.userSelect = "none";
+  window.addEventListener("mousemove", onSftpDividerMove);
+  window.addEventListener("mouseup", onSftpDividerUp);
+}
 const { selectionTick } = useTerminalSelection();
 const { theme } = useTheme();
 
@@ -283,6 +349,7 @@ onBeforeUnmount(() => {
   window.removeEventListener("mousemove", onPaneDragMove);
   window.removeEventListener("mouseup", onPaneDragUp);
   onDividerUp();
+  onSftpDividerUp();
   teardownTerminalSession();
 });
 
@@ -322,10 +389,11 @@ watch(theme, (next) => {
 </script>
 
 <template>
+  <div ref="wrapRef" class="flex-1 flex min-h-0 min-w-0">
   <div
     id="terminal-host"
     ref="hostRef"
-    class="flex-1 relative overflow-hidden block select-none"
+    class="flex-1 relative overflow-hidden block select-none min-w-0"
     style="margin: var(--frame-inset)"
     @mousedown="onHostMouseDown"
     @wheel="onHostWheel"
@@ -406,6 +474,40 @@ watch(theme, (next) => {
       :tab-id="active.id"
     />
     <slot />
+    <!-- Reopen the SFTP panel after it's been hidden on this SSH tab. -->
+    <button
+      v-if="sftpReopenVisible && active"
+      type="button"
+      class="sftp-reopen"
+      title="Show file browser"
+      @click="toggleSftpPanel(active.id)"
+    >
+      <PanelRight :size="15" />
+    </button>
+  </div>
+  <!-- SFTP file browser: resizable divider + panel, SSH tabs only. -->
+  <template v-if="showSftp && active">
+    <div
+      class="sftp-divider"
+      role="separator"
+      aria-orientation="vertical"
+      aria-label="Resize file browser"
+      @mousedown="onSftpDividerDown"
+    />
+    <SftpPanel
+      :key="active.id"
+      :tab-id="active.id"
+      :host-label="active.hostLabel"
+      class="flex-none"
+      :style="{
+        width: `${sftpWidth}px`,
+        margin: 'var(--frame-inset) var(--frame-inset) var(--frame-inset) 0',
+        borderRadius: 'var(--pane-radius)',
+        overflow: 'hidden',
+      }"
+      @close="toggleSftpPanel(active.id)"
+    />
+  </template>
   </div>
   <Teleport to="body">
     <div
@@ -532,5 +634,47 @@ watch(theme, (next) => {
   .ws-drop-preview {
     transition: none;
   }
+}
+
+/* SFTP panel resize handle: a thin self-stretch bar between the terminal and
+   the file browser. The visible line thickens on hover/drag. */
+.sftp-divider {
+  flex: none;
+  width: 6px;
+  align-self: stretch;
+  margin: var(--frame-inset) 0;
+  cursor: col-resize;
+  border-radius: 9999px;
+  background: transparent;
+  transition: background-color 120ms ease;
+}
+.sftp-divider:hover,
+.sftp-divider:active {
+  background: color-mix(in srgb, var(--accent, #89b4fa) 40%, transparent);
+}
+
+/* Floating affordance to bring the hidden file browser back. */
+.sftp-reopen {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 20;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 7px;
+  color: var(--fg-subtle, #9399b2);
+  background: color-mix(in srgb, var(--surface-3, #313244) 85%, transparent);
+  border: 1px solid
+    color-mix(in srgb, var(--border-strong, rgba(255, 255, 255, 0.18)) 50%, transparent);
+  cursor: pointer;
+  opacity: 0.7;
+  transition: opacity 120ms ease, color 120ms ease;
+}
+.sftp-reopen:hover {
+  opacity: 1;
+  color: var(--fg, #e6e6e6);
 }
 </style>

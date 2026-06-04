@@ -88,6 +88,7 @@ pub const MIGRATIONS: &[(i64, &str, &str)] = &[
     (3, "broken_flag", include_str!("../migrations/0003_broken_flag.sql")),
     (4, "groups", include_str!("../migrations/0004_groups.sql")),
     (5, "group_flags", include_str!("../migrations/0005_group_flags.sql")),
+    (6, "disable_sftp", include_str!("../migrations/0006_disable_sftp.sql")),
 ];
 
 /// Migrations consumed by `tauri-plugin-sql` at startup, built from
@@ -218,6 +219,14 @@ pub fn run() {
             commands::get_db_url,
             commands::connect_ssh_host,
             commands::inspect_ssh_key,
+            commands::sftp_list_dir,
+            commands::sftp_realpath,
+            commands::sftp_stat,
+            commands::sftp_mkdir,
+            commands::sftp_rename,
+            commands::sftp_remove,
+            commands::sftp_download,
+            commands::sftp_upload,
             commands::full_disk_access_granted,
             commands::open_full_disk_access_settings,
             commands::secret_get,

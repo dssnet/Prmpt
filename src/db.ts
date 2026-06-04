@@ -28,6 +28,8 @@ export interface SshHostRow {
   host_key_alg: string | null;
   group_id: number | null;
   broken: boolean;
+  /** Per-host opt-out for the SFTP file browser panel. */
+  disable_sftp: boolean;
   created_at: string;
   updated_at: string;
 }
@@ -81,6 +83,8 @@ export interface SshHostInput {
   /** Mark `has_password` and clear `broken` if `true`. The actual
    *  password bytes live in Stronghold; we just bookkeep the flag. */
   has_password: boolean;
+  /** Per-host opt-out for the SFTP file browser panel. */
+  disable_sftp: boolean;
 }
 
 export interface SshKeyInput {
@@ -92,9 +96,10 @@ export interface SshKeyInput {
 
 /** Raw row shape coming back from `db.select` — booleans arrive as
  *  0/1 integers, all other columns are typed as-is. */
-type RawHostRow = Omit<SshHostRow, "has_password" | "broken"> & {
+type RawHostRow = Omit<SshHostRow, "has_password" | "broken" | "disable_sftp"> & {
   has_password: number;
   broken: number;
+  disable_sftp: number;
 };
 
 type RawKeyRow = Omit<SshKeyRow, "has_passphrase" | "broken"> & {
@@ -138,7 +143,7 @@ export async function listHosts(): Promise<SshHostRow[]> {
     `SELECT h.id, h.label, h.hostname, h.port, h.username, h.auth_method,
             h.has_password, h.key_id, k.label AS key_label,
             h.host_fp_sha256, h.host_key_alg, h.group_id, h.broken,
-            h.created_at, h.updated_at
+            h.disable_sftp, h.created_at, h.updated_at
      FROM ssh_hosts h
      LEFT JOIN ssh_keys k ON k.id = h.key_id
      ORDER BY h.label COLLATE NOCASE`,
@@ -151,7 +156,7 @@ export async function getHost(id: number): Promise<SshHostRow | null> {
     `SELECT h.id, h.label, h.hostname, h.port, h.username, h.auth_method,
             h.has_password, h.key_id, k.label AS key_label,
             h.host_fp_sha256, h.host_key_alg, h.group_id, h.broken,
-            h.created_at, h.updated_at
+            h.disable_sftp, h.created_at, h.updated_at
      FROM ssh_hosts h
      LEFT JOIN ssh_keys k ON k.id = h.key_id
      WHERE h.id = $1`,
@@ -161,7 +166,12 @@ export async function getHost(id: number): Promise<SshHostRow | null> {
 }
 
 function hostFromRow(r: RawHostRow): SshHostRow {
-  return { ...r, has_password: !!r.has_password, broken: !!r.broken };
+  return {
+    ...r,
+    has_password: !!r.has_password,
+    broken: !!r.broken,
+    disable_sftp: !!r.disable_sftp,
+  };
 }
 
 export async function saveHost(input: SshHostInput): Promise<number> {
@@ -170,8 +180,8 @@ export async function saveHost(input: SshHostInput): Promise<number> {
     const res = await ensure().execute(
       `INSERT INTO ssh_hosts
          (label, hostname, port, username, auth_method,
-          has_password, key_id, group_id, broken, created_at, updated_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 0, $9, $10)`,
+          has_password, key_id, group_id, disable_sftp, broken, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 0, $10, $11)`,
       [
         input.label,
         input.hostname,
@@ -181,6 +191,7 @@ export async function saveHost(input: SshHostInput): Promise<number> {
         input.has_password ? 1 : 0,
         input.key_id ?? null,
         input.group_id ?? null,
+        input.disable_sftp ? 1 : 0,
         now,
         now,
       ],
@@ -191,8 +202,8 @@ export async function saveHost(input: SshHostInput): Promise<number> {
     `UPDATE ssh_hosts
        SET label = $1, hostname = $2, port = $3, username = $4,
            auth_method = $5, has_password = $6, key_id = $7,
-           group_id = $8, broken = 0, updated_at = $9
-     WHERE id = $10`,
+           group_id = $8, disable_sftp = $9, broken = 0, updated_at = $10
+     WHERE id = $11`,
     [
       input.label,
       input.hostname,
@@ -202,6 +213,7 @@ export async function saveHost(input: SshHostInput): Promise<number> {
       input.has_password ? 1 : 0,
       input.key_id ?? null,
       input.group_id ?? null,
+      input.disable_sftp ? 1 : 0,
       now,
       input.id,
     ],
@@ -226,6 +238,7 @@ export async function duplicateHost(source: SshHostRow): Promise<number> {
     key_id: source.key_id,
     group_id: source.group_id,
     has_password: source.has_password,
+    disable_sftp: source.disable_sftp,
   });
   const forwards = await listPortForwards(source.id);
   for (const f of forwards) {

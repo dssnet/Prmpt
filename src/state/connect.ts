@@ -99,6 +99,7 @@ export async function connectHost(host: SshHostRow): Promise<void> {
       username: host.username,
       auth,
       stored_fingerprint: host.host_fp_sha256,
+      disable_sftp: host.disable_sftp,
       forwards: fwds
         .filter((f) => f.enabled)
         .map((f) => ({
