@@ -142,8 +142,18 @@ function fmtDate(mtime: number | null): string {
     day: "numeric",
   });
 }
+/** Strip the internal `sftp:` prefix and collapse a `"X: X"` duplicate (russh-sftp
+ *  renders `{status_code}: {error_message}`, and servers often echo the same words,
+ *  e.g. `Permission denied: Permission denied`) into a single clear phrase. */
+function tidyError(message: string): string {
+  let m = message.replace(/^sftp:\s*/i, "").trim();
+  const dup = m.match(/^(.+?):\s*\1$/);
+  if (dup) m = dup[1];
+  return m;
+}
 function describeError(err: unknown): string {
-  return typeof err === "string" ? err : err instanceof Error ? err.message : String(err);
+  const raw = typeof err === "string" ? err : err instanceof Error ? err.message : String(err);
+  return tidyError(raw);
 }
 
 /** Map a backend error to a status change. Returns true if it was a
@@ -418,7 +428,7 @@ onMounted(async () => {
               transferred: p.transferred,
               total: p.total ?? t.total,
               done: p.done,
-              error: p.error ?? t.error,
+              error: p.error ? tidyError(p.error) : t.error,
             }
           : t,
       );
@@ -655,7 +665,7 @@ onBeforeUnmount(() => {
             <span class="flex-1 min-w-0 truncate" :class="t.error ? 'text-danger' : 'text-fg-muted'">
               {{ t.name }}
             </span>
-            <span v-if="t.error" class="text-danger shrink-0">failed</span>
+            <span v-if="t.error" class="text-danger shrink-0" :title="t.error">failed</span>
             <span v-else-if="t.done" class="text-accent shrink-0">done</span>
             <span v-else-if="t.total" class="text-fg-subtle shrink-0 tabular-nums">
               {{ Math.floor((t.transferred / t.total) * 100) }}%
@@ -664,6 +674,9 @@ onBeforeUnmount(() => {
             <button type="button" class="icon-btn" title="Dismiss" @click="dismissTransfer(t.id)">
               <X :size="11" />
             </button>
+          </div>
+          <div v-if="t.error" class="text-danger truncate mt-0.5 pl-[19px]" :title="t.error">
+            {{ t.error }}
           </div>
           <div v-if="!t.done && t.total" class="h-0.5 mt-1 rounded bg-surface-2 overflow-hidden">
             <div class="h-full bg-accent" :style="{ width: `${(t.transferred / t.total) * 100}%` }" />
