@@ -250,7 +250,14 @@ async function confirmDelete(): Promise<void> {
 
 // ---- transfers ----
 async function download(e: SftpEntry): Promise<void> {
-  const dest = await saveDialog({ defaultPath: e.name });
+  let dest: string | null;
+  if (e.is_dir) {
+    const parent = await openDialog({ directory: true });
+    if (!parent || Array.isArray(parent)) return;
+    dest = `${parent.replace(/\/+$/, "")}/${e.name}`;
+  } else {
+    dest = await saveDialog({ defaultPath: e.name });
+  }
   if (!dest) return;
   const id = nextTransferId++;
   transfers.value = [
@@ -615,7 +622,6 @@ onBeforeUnmount(() => {
                 class="shrink-0 flex items-center gap-0.5 opacity-0 group-hover:opacity-100"
               >
                 <button
-                  v-if="!e.is_dir"
                   type="button"
                   class="icon-btn"
                   title="Download"

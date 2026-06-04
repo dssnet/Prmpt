@@ -1212,7 +1212,11 @@ async fn sftp_download(
     remote: &str,
     local: &std::path::Path,
 ) -> AppResult<()> {
-    let total = sftp.metadata(remote).await.ok().and_then(|m| m.size);
+    let md = sftp.metadata(remote).await.ok();
+    if md.as_ref().map(|m| m.is_dir()).unwrap_or(false) {
+        return sftp_download_dir(sftp, app, window, tab_id, transfer_id, remote, local).await;
+    }
+    let total = md.and_then(|m| m.size);
     let result = async {
         let mut rf = sftp.open(remote).await.map_err(sftp_err)?;
         let mut lf = tokio::fs::File::create(local).await?;
@@ -1390,6 +1394,99 @@ async fn sftp_upload_dir(
                 }
             }
             rf.shutdown().await?;
+        }
+        Ok::<u64, AppError>(transferred)
+    }
+    .await;
+    finish_transfer(app, window, tab_id, transfer_id, total, result)
+}
+
+/// Walk a remote directory tree breadth-first via SFTP. Returns the
+/// subdirectories as paths relative to `root` (parents always listed before
+/// their children, so they can be created in order), the regular files as
+/// `(relative path, absolute remote path)` pairs, and the total byte count.
+async fn collect_remote_tree(
+    sftp: &SftpSession,
+    root: &str,
+) -> AppResult<(
+    Vec<std::path::PathBuf>,
+    Vec<(std::path::PathBuf, String)>,
+    u64,
+)> {
+    let mut dirs: Vec<std::path::PathBuf> = Vec::new();
+    let mut files: Vec<(std::path::PathBuf, String)> = Vec::new();
+    let mut total = 0u64;
+    // Queue of (absolute remote dir, relative path from root).
+    let mut queue = vec![(root.to_string(), std::path::PathBuf::new())];
+    let mut i = 0;
+    while i < queue.len() {
+        let (dir, rel) = queue[i].clone();
+        i += 1;
+        let rd = sftp.read_dir(&dir).await.map_err(sftp_err)?;
+        for entry in rd {
+            let name = entry.file_name();
+            if name == "." || name == ".." {
+                continue;
+            }
+            let md = entry.metadata();
+            let abs = join_remote(&dir, &name);
+            let child_rel = rel.join(&name);
+            if md.is_dir() {
+                dirs.push(child_rel.clone());
+                queue.push((abs, child_rel));
+            } else if !md.is_symlink() {
+                total += md.size.unwrap_or(0);
+                files.push((child_rel, abs));
+            }
+            // Symlinks and other special files are skipped.
+        }
+    }
+    Ok((dirs, files, total))
+}
+
+/// Recursively download a remote directory: create the destination tree (best
+/// effort — existing dirs are fine) then stream every file, emitting a single
+/// transfer's progress against the summed byte total.
+#[allow(clippy::too_many_arguments)]
+async fn sftp_download_dir(
+    sftp: &SftpSession,
+    app: &AppHandle,
+    window: &str,
+    tab_id: u64,
+    transfer_id: u64,
+    remote: &str,
+    local: &std::path::Path,
+) -> AppResult<()> {
+    let (dirs, files, bytes) = match collect_remote_tree(sftp, remote).await {
+        Ok(t) => t,
+        Err(e) => return finish_transfer(app, window, tab_id, transfer_id, None, Err(e)),
+    };
+    let total = Some(bytes);
+    let result = async {
+        // Create the destination root and every subdirectory (parents first).
+        tokio::fs::create_dir_all(local).await?;
+        for rel in &dirs {
+            tokio::fs::create_dir_all(local.join(rel)).await?;
+        }
+        let mut buf = vec![0u8; SFTP_CHUNK];
+        let mut transferred = 0u64;
+        let mut last = 0u64;
+        for (rel, rpath) in &files {
+            let mut rf = sftp.open(rpath).await.map_err(sftp_err)?;
+            let mut lf = tokio::fs::File::create(local.join(rel)).await?;
+            loop {
+                let n = rf.read(&mut buf).await?;
+                if n == 0 {
+                    break;
+                }
+                lf.write_all(&buf[..n]).await?;
+                transferred += n as u64;
+                if transferred - last >= SFTP_PROGRESS_STRIDE {
+                    last = transferred;
+                    emit_progress(app, window, tab_id, transfer_id, transferred, total, false, None);
+                }
+            }
+            lf.flush().await?;
         }
         Ok::<u64, AppError>(transferred)
     }
