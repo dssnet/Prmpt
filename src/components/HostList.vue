@@ -32,13 +32,13 @@ import {
 import { buildGroupTree, concealedGroupIds, descendantGroupIds } from "../lib/groupTree";
 import {
   deleteSecret,
-  hidePinKey,
   hostPasswordKey,
   loadSecret,
   saveSecret,
 } from "../secrets";
 import { connectHost } from "../state/connect";
 import GroupTree from "./GroupTree.vue";
+import HidePinDialogs from "./HidePinDialogs.vue";
 import {
   ActionMenu,
   Badge,
@@ -177,11 +177,6 @@ onMounted(async () => {
   const saved = parseFloat(localStorage.getItem(SIDEBAR_KEY) ?? "");
   if (Number.isFinite(saved)) sidebarPct.value = clampPct(saved);
   await refresh();
-  try {
-    pinSet.value = (await loadSecret(hidePinKey())) != null;
-  } catch {
-    pinSet.value = false;
-  }
 });
 defineExpose({ refresh });
 
@@ -270,27 +265,20 @@ function toggleGroup(id: number) {
 
 // ---------- hide / PIN lock ----------
 
-// When the user opens the set-PIN dialog by hiding a group, remember which
-// group to hide once the PIN is saved.
+// The PIN dialogs live in <HidePinDialogs>; this component drives them
+// imperatively and keeps `locked` / `pinSet` (bound via v-model) for the lock
+// affordance and concealment logic.
+const pinDialogs = ref<InstanceType<typeof HidePinDialogs> | null>(null);
+
+// When the user hides a group before any PIN exists, remember which group to
+// hide once the new PIN is saved (see onPinCreated).
 const pendingHideGroupId = ref<number | null>(null);
-
-const setPinOpen = ref(false);
-const setPinValue = ref("");
-const setPinConfirm = ref("");
-const setPinError = ref<string | null>(null);
-
-const enterPinOpen = ref(false);
-const enterPinValue = ref("");
-const enterPinError = ref<string | null>(null);
 
 async function onToggleHidden(group: SshGroupRow) {
   // First time hiding anything: require a PIN to be set first.
   if (!group.hidden && !pinSet.value) {
     pendingHideGroupId.value = group.id;
-    setPinValue.value = "";
-    setPinConfirm.value = "";
-    setPinError.value = null;
-    setPinOpen.value = true;
+    pinDialogs.value?.openSetPin();
     return;
   }
   try {
@@ -302,42 +290,23 @@ async function onToggleHidden(group: SshGroupRow) {
   }
 }
 
-async function submitSetPin() {
-  const pin = setPinValue.value.trim();
-  if (!pin) {
-    setPinError.value = "Enter a PIN.";
-    return;
-  }
-  if (pin !== setPinConfirm.value.trim()) {
-    setPinError.value = "PINs don't match.";
-    return;
-  }
+// A brand-new PIN was just created; hide the group that triggered it.
+async function onPinCreated() {
   try {
-    await saveSecret(hidePinKey(), pin);
-    pinSet.value = true;
     if (pendingHideGroupId.value != null) {
       await setGroupHidden(pendingHideGroupId.value, true);
       pendingHideGroupId.value = null;
     }
-    locked.value = true; // conceal immediately
-    setPinOpen.value = false;
     await refresh();
   } catch (err) {
-    console.error("set PIN failed:", err);
-    setPinError.value = `Could not save PIN: ${err}`;
+    console.error("setGroupHidden failed:", err);
+    errorText.value = `Hide failed: ${err}`;
   }
-}
-
-function cancelSetPin() {
-  setPinOpen.value = false;
-  pendingHideGroupId.value = null;
 }
 
 function onLockClick() {
   if (locked.value) {
-    enterPinValue.value = "";
-    enterPinError.value = null;
-    enterPinOpen.value = true;
+    pinDialogs.value?.openUnlock();
   } else {
     // Re-lock: conceal hidden groups again and drop a now-hidden selection.
     locked.value = true;
@@ -347,21 +316,6 @@ function onLockClick() {
     ) {
       selectedGroupId.value = null;
     }
-  }
-}
-
-async function submitEnterPin() {
-  try {
-    const stored = await loadSecret(hidePinKey());
-    if (stored != null && enterPinValue.value.trim() === stored) {
-      locked.value = false;
-      enterPinOpen.value = false;
-    } else {
-      enterPinError.value = "Incorrect PIN.";
-    }
-  } catch (err) {
-    console.error("verify PIN failed:", err);
-    enterPinError.value = `Could not verify PIN: ${err}`;
   }
 }
 
@@ -719,57 +673,11 @@ async function confirmDeleteGroup() {
       </div>
     </Modal>
 
-    <!-- Set a PIN (first time a group is hidden) -->
-    <Modal v-if="setPinOpen">
-      <h2 class="m-0 text-base font-semibold text-fg">Set a PIN</h2>
-      <p class="m-0 text-sm text-fg-muted leading-relaxed">
-        Hidden groups are concealed until this PIN is entered. You'll need it to
-        reveal them again, so keep it somewhere safe.
-      </p>
-      <form class="flex flex-col gap-3.5" @submit.prevent="submitSetPin">
-        <Input
-          v-model="setPinValue"
-          type="password"
-          placeholder="New PIN"
-          autocomplete="off"
-        />
-        <Input
-          v-model="setPinConfirm"
-          type="password"
-          placeholder="Confirm PIN"
-          autocomplete="off"
-        />
-        <p v-if="setPinError" class="flex items-center gap-1 text-danger text-xs">
-          <AlertTriangle :size="12" /> {{ setPinError }}
-        </p>
-        <div class="flex justify-end gap-2">
-          <Button variant="secondary" @click="cancelSetPin">Cancel</Button>
-          <Button type="submit">Set PIN &amp; hide</Button>
-        </div>
-      </form>
-    </Modal>
-
-    <!-- Enter the PIN to reveal hidden groups -->
-    <Modal v-if="enterPinOpen">
-      <h2 class="m-0 text-base font-semibold text-fg">Enter PIN</h2>
-      <p class="m-0 text-sm text-fg-muted leading-relaxed">
-        Enter your PIN to reveal hidden groups and their hosts.
-      </p>
-      <form class="flex flex-col gap-3.5" @submit.prevent="submitEnterPin">
-        <Input
-          v-model="enterPinValue"
-          type="password"
-          placeholder="PIN"
-          autocomplete="off"
-        />
-        <p v-if="enterPinError" class="flex items-center gap-1 text-danger text-xs">
-          <AlertTriangle :size="12" /> {{ enterPinError }}
-        </p>
-        <div class="flex justify-end gap-2">
-          <Button variant="secondary" @click="enterPinOpen = false">Cancel</Button>
-          <Button type="submit">Unlock</Button>
-        </div>
-      </form>
-    </Modal>
+    <HidePinDialogs
+      ref="pinDialogs"
+      v-model:locked="locked"
+      v-model:pin-set="pinSet"
+      @pin-created="onPinCreated"
+    />
   </div>
 </template>
