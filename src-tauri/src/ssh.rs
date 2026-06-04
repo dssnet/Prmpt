@@ -1248,6 +1248,13 @@ async fn sftp_upload(
     local: &std::path::Path,
     remote: &str,
 ) -> AppResult<()> {
+    let is_dir = tokio::fs::metadata(local)
+        .await
+        .map(|m| m.is_dir())
+        .unwrap_or(false);
+    if is_dir {
+        return sftp_upload_dir(sftp, app, window, tab_id, transfer_id, local, remote).await;
+    }
     let total = tokio::fs::metadata(local).await.ok().map(|m| m.len());
     let result = async {
         let mut lf = tokio::fs::File::open(local).await?;
@@ -1275,6 +1282,115 @@ async fn sftp_upload(
         }
         // Flush + send the SFTP close so the server commits the file.
         rf.shutdown().await?;
+        Ok::<u64, AppError>(transferred)
+    }
+    .await;
+    finish_transfer(app, window, tab_id, transfer_id, total, result)
+}
+
+/// Join a remote (POSIX, `/`-separated) base path with a local relative path,
+/// using forward slashes regardless of the host OS's separator.
+fn remote_join(base: &str, rel: &std::path::Path) -> String {
+    let mut s = base.trim_end_matches('/').to_string();
+    for comp in rel.components() {
+        if let std::path::Component::Normal(c) = comp {
+            s.push('/');
+            s.push_str(&c.to_string_lossy());
+        }
+    }
+    s
+}
+
+/// Walk a local directory tree breadth-first. Returns the subdirectories
+/// (parents always listed before their children, so they can be created in
+/// order), the regular files with their sizes, and the total byte count.
+async fn collect_local_tree(
+    root: &std::path::Path,
+) -> std::io::Result<(
+    Vec<std::path::PathBuf>,
+    Vec<std::path::PathBuf>,
+    u64,
+)> {
+    let mut dirs: Vec<std::path::PathBuf> = Vec::new();
+    let mut files: Vec<std::path::PathBuf> = Vec::new();
+    let mut total = 0u64;
+    let mut queue = vec![root.to_path_buf()];
+    let mut i = 0;
+    while i < queue.len() {
+        let dir = queue[i].clone();
+        i += 1;
+        let mut rd = tokio::fs::read_dir(&dir).await?;
+        while let Some(entry) = rd.next_entry().await? {
+            let ft = entry.file_type().await?;
+            let path = entry.path();
+            if ft.is_dir() {
+                dirs.push(path.clone());
+                queue.push(path);
+            } else if ft.is_file() {
+                total += entry.metadata().await.map(|m| m.len()).unwrap_or(0);
+                files.push(path);
+            }
+            // Symlinks and other special files are skipped.
+        }
+    }
+    Ok((dirs, files, total))
+}
+
+/// Recursively upload a local directory: mkdir the destination tree (best
+/// effort — existing dirs are fine) then stream every file, emitting a single
+/// transfer's progress against the summed byte total.
+#[allow(clippy::too_many_arguments)]
+async fn sftp_upload_dir(
+    sftp: &SftpSession,
+    app: &AppHandle,
+    window: &str,
+    tab_id: u64,
+    transfer_id: u64,
+    local: &std::path::Path,
+    remote: &str,
+) -> AppResult<()> {
+    let (dirs, files, bytes) = match collect_local_tree(local).await {
+        Ok(t) => t,
+        Err(e) => return finish_transfer(app, window, tab_id, transfer_id, None, Err(e.into())),
+    };
+    let total = Some(bytes);
+    let result = async {
+        // Create the destination root and every subdirectory (parents first).
+        // `create_dir` errors are ignored: a dir that already exists is fine,
+        // and a genuine failure will surface when we try to write a file into it.
+        let _ = sftp.create_dir(remote).await;
+        for d in &dirs {
+            let rel = d.strip_prefix(local).unwrap_or(d);
+            let _ = sftp.create_dir(&remote_join(remote, rel)).await;
+        }
+        let mut buf = vec![0u8; SFTP_CHUNK];
+        let mut transferred = 0u64;
+        let mut last = 0u64;
+        for f in &files {
+            let rel = f.strip_prefix(local).unwrap_or(f);
+            let rpath = remote_join(remote, rel);
+            let mut lf = tokio::fs::File::open(f).await?;
+            let mut rf = sftp
+                .open_with_flags(
+                    &rpath,
+                    OpenFlags::CREATE | OpenFlags::TRUNCATE | OpenFlags::WRITE,
+                )
+                .await
+                .map_err(sftp_err)?;
+            loop {
+                let n = lf.read(&mut buf).await?;
+                if n == 0 {
+                    break;
+                }
+                rf.write_all(&buf[..n]).await?;
+                transferred += n as u64;
+                if transferred - last >= SFTP_PROGRESS_STRIDE {
+                    last = transferred;
+                    emit_progress(app, window, tab_id, transfer_id, transferred, total, false, None);
+                }
+            }
+            rf.shutdown().await?;
+        }
         Ok::<u64, AppError>(transferred)
     }
     .await;

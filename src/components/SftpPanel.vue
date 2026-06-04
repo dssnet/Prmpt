@@ -52,7 +52,7 @@ function addSecond(): void {
 </script>
 
 <template>
-  <aside class="flex flex-col h-full min-h-0 bg-surface-1 border-l border-border text-fg">
+  <aside class="flex flex-col min-h-0 self-stretch bg-surface-1 border-l border-border text-fg">
     <header class="flex items-center gap-1.5 px-2 h-8 border-b border-border shrink-0">
       <span class="text-[11px] font-semibold uppercase tracking-wide text-fg-subtle flex-1">
         Files

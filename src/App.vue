@@ -446,6 +446,10 @@ function onKeyDown(e: KeyboardEvent) {
   // Cmd/Ctrl+Shift combo never leaks to the terminal as a control byte.
   if (e.metaKey || primary) return;
 
+  // Let focused text inputs (e.g. SFTP new-folder / rename fields) handle
+  // their own keystrokes natively instead of forwarding them to the PTY.
+  if (editable) return;
+
   const bytes = encodeKey(e);
   if (bytes) {
     const target = inputTargetTabId();
@@ -457,6 +461,8 @@ function onKeyDown(e: KeyboardEvent) {
 }
 
 function onPaste(e: ClipboardEvent) {
+  // Let focused text inputs receive the paste natively (SFTP name fields, etc.).
+  if (focusedEditable() != null) return;
   const text = e.clipboardData?.getData("text");
   if (!text) return;
   const target = inputTargetTabId();

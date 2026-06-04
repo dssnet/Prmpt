@@ -9,6 +9,7 @@ import {
   File as FileIcon,
   Folder,
   FolderPlus,
+  FolderUp,
   Link2,
   Pencil,
   RefreshCw,
@@ -264,7 +265,15 @@ async function download(e: SftpEntry): Promise<void> {
 }
 
 async function upload(): Promise<void> {
-  const picked = await openDialog({ multiple: true });
+  await pickAndUpload(false);
+}
+
+async function uploadFolder(): Promise<void> {
+  await pickAndUpload(true);
+}
+
+async function pickAndUpload(directory: boolean): Promise<void> {
+  const picked = await openDialog({ multiple: true, directory });
   if (!picked) return;
   const paths = Array.isArray(picked) ? picked : [picked];
   for (const localPath of paths) {
@@ -518,6 +527,9 @@ onBeforeUnmount(() => {
         <button type="button" class="icon-btn" title="Upload files" @click="upload">
           <Upload :size="14" />
         </button>
+        <button type="button" class="icon-btn" title="Upload folder" @click="uploadFolder">
+          <FolderUp :size="14" />
+        </button>
       </div>
 
       <!-- breadcrumb -->
@@ -537,7 +549,7 @@ onBeforeUnmount(() => {
 
       <!-- listing (also a drop zone for cross-connection copy into cwd) -->
       <div
-        class="flex-1 min-h-0 overflow-y-auto"
+        class="flex-1 min-h-0 overflow-y-auto pb-3"
         :class="{
           'ring-1 ring-inset ring-accent/50':
             sftpDropHint && sftpDropHint.tabId === tabId && sftpDropHint.dir === cwd,
