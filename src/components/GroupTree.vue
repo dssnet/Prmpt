@@ -78,8 +78,8 @@ const emit = defineEmits<{
           title="Hidden — revealed because the sidebar is unlocked"
         />
 
-        <!-- hover actions -->
-        <span class="flex items-center gap-0.5 opacity-0 group-hover/row:opacity-100 transition-opacity duration-150">
+        <!-- hover actions: hidden (no reserved width) until the row is hovered -->
+        <span class="hidden group-hover/row:flex shrink-0 items-center gap-0.5">
           <button
             type="button"
             class="grid place-items-center w-5 h-5 rounded text-fg-subtle hover:text-fg hover:bg-surface-3 cursor-pointer"

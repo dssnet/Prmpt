@@ -13,7 +13,7 @@ import {
   Settings,
   Trash2,
 } from "lucide-vue-next";
-import { computed, onMounted, ref } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 
 import { useDomScroll } from "../composables/useDomScroll";
 import {
@@ -77,6 +77,57 @@ const scrollRoot = ref<HTMLElement | null>(null);
 const { position, range, viewportSize, onScrollTo, onPageBy } =
   useDomScroll(scrollRoot);
 
+// Resizeable sidebar. Width is stored as a percentage of the home-tab width
+// (so it scales across window sizes) and persisted per-machine in localStorage.
+const SIDEBAR_KEY = "prmpt.homeSidebarWidthPct";
+const MIN_PCT = 12;
+const MAX_PCT = 40;
+const DEFAULT_PCT = 20;
+const sidebarPct = ref<number>(DEFAULT_PCT);
+const containerRef = ref<HTMLElement | null>(null);
+
+function clampPct(n: number): number {
+  return Math.min(MAX_PCT, Math.max(MIN_PCT, n));
+}
+
+let dragRaf = 0;
+let pendingDragEvent: MouseEvent | null = null;
+
+function onSidebarDragMove(e: MouseEvent) {
+  pendingDragEvent = e;
+  if (dragRaf) return;
+  dragRaf = requestAnimationFrame(() => {
+    dragRaf = 0;
+    const ev = pendingDragEvent;
+    const el = containerRef.value;
+    if (!ev || !el) return;
+    const rect = el.getBoundingClientRect();
+    if (rect.width <= 0) return;
+    sidebarPct.value = clampPct(((ev.clientX - rect.left) / rect.width) * 100);
+  });
+}
+
+function onSidebarDragEnd() {
+  window.removeEventListener("mousemove", onSidebarDragMove);
+  window.removeEventListener("mouseup", onSidebarDragEnd);
+  if (dragRaf) {
+    cancelAnimationFrame(dragRaf);
+    dragRaf = 0;
+  }
+  pendingDragEvent = null;
+  document.body.style.userSelect = "";
+  localStorage.setItem(SIDEBAR_KEY, String(Math.round(sidebarPct.value)));
+}
+
+function onSidebarDragStart(e: MouseEvent) {
+  e.preventDefault();
+  document.body.style.userSelect = "none";
+  window.addEventListener("mousemove", onSidebarDragMove);
+  window.addEventListener("mouseup", onSidebarDragEnd);
+}
+
+onBeforeUnmount(onSidebarDragEnd);
+
 // While locked, hidden groups (and their subtrees) are concealed entirely.
 const concealed = computed(() =>
   locked.value ? concealedGroupIds(groups.value) : new Set<number>(),
@@ -123,6 +174,8 @@ async function refresh() {
 }
 
 onMounted(async () => {
+  const saved = parseFloat(localStorage.getItem(SIDEBAR_KEY) ?? "");
+  if (Number.isFinite(saved)) sidebarPct.value = clampPct(saved);
   await refresh();
   try {
     pinSet.value = (await loadSecret(hidePinKey())) != null;
@@ -404,9 +457,12 @@ async function confirmDeleteGroup() {
 </script>
 
 <template>
-  <div class="absolute inset-0 flex text-fg">
+  <div ref="containerRef" class="absolute inset-0 flex text-fg">
     <!-- Sidebar: group tree (floating card, like the host entries) -->
-    <aside class="flex-none w-60 my-4 ml-4 flex flex-col border border-border rounded-lg bg-surface-1 overflow-hidden">
+    <aside
+      class="flex-none my-4 ml-4 flex flex-col border border-border rounded-lg bg-surface-1 overflow-hidden"
+      :style="{ width: sidebarPct + '%' }"
+    >
       <!-- All hosts, separated from the group tree below. -->
       <div class="flex items-center gap-1 px-2 py-2 flex-none border-b border-border">
         <div
@@ -482,6 +538,15 @@ async function confirmDeleteGroup() {
         </button>
       </div>
     </aside>
+
+    <!-- Drag handle: resize the sidebar -->
+    <div
+      class="flex-none w-1 mx-0.5 self-stretch cursor-col-resize rounded-full hover:bg-accent/40 transition-colors"
+      role="separator"
+      aria-orientation="vertical"
+      aria-label="Resize sidebar"
+      @mousedown="onSidebarDragStart"
+    />
 
     <!-- Right column: filtered host list -->
     <div class="relative flex-1 min-w-0 h-full">
