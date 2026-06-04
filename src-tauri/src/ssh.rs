@@ -50,7 +50,16 @@ use crate::{
 /// fills it after a successful connect and clears it on disconnect; the
 /// long-lived `sftp_service` task reads it per request so it transparently
 /// follows reconnects (and rejects requests while disconnected).
-type SftpSlot = Arc<AsyncMutex<Option<Arc<SftpSession>>>>;
+pub type SftpSlot = Arc<AsyncMutex<Option<Arc<SftpSession>>>>;
+
+/// Registry of per-tab SFTP slots, keyed by tab id. Lets a cross-connection
+/// relay reach two different sessions' SFTP channels at once (the per-tab
+/// request channels only serve their own tab).
+pub type SftpSlots = Arc<parking_lot::Mutex<std::collections::HashMap<u64, SftpSlot>>>;
+
+pub fn new_sftp_slots() -> SftpSlots {
+    Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new()))
+}
 
 /// Chunk size for streamed SFTP transfers.
 const SFTP_CHUNK: usize = 64 * 1024;
@@ -234,6 +243,7 @@ impl Handler for ClientHandler {
 
 /// Spawn the SSH session on the supplied tokio runtime. Returns the
 /// outbound shell command channel and the SFTP request channel.
+#[allow(clippy::too_many_arguments)]
 pub fn spawn_session(
     rt: &tokio::runtime::Runtime,
     app: AppHandle,
@@ -243,9 +253,14 @@ pub fn spawn_session(
     pty_tx: crossbeam_channel::Sender<PtyEvent>,
     cols: u16,
     rows: u16,
+    slots: SftpSlots,
 ) -> (mpsc::Sender<SshIoCmd>, mpsc::Sender<SftpReq>) {
     let (out_tx, out_rx) = mpsc::channel::<SshIoCmd>(128);
     let (sftp_tx, sftp_rx) = mpsc::channel::<SftpReq>(32);
+    // The slot's content follows reconnects; the registry entry is stable for
+    // the tab's lifetime so a relay can always find it.
+    let sftp_slot: SftpSlot = Arc::new(AsyncMutex::new(None));
+    slots.lock().insert(tab_id, sftp_slot.clone());
     rt.spawn(session_task(
         app,
         owner_window,
@@ -256,6 +271,8 @@ pub fn spawn_session(
         sftp_rx,
         cols,
         rows,
+        sftp_slot,
+        slots,
     ));
     (out_tx, sftp_tx)
 }
@@ -285,6 +302,8 @@ async fn session_task(
     sftp_rx: mpsc::Receiver<SftpReq>,
     cols: u16,
     rows: u16,
+    sftp_slot: SftpSlot,
+    slots: SftpSlots,
 ) {
     // Preserve host identity for the error event; `config` is borrowed by
     // each attempt so it survives reconnects (credentials included).
@@ -293,10 +312,10 @@ async fn session_task(
     let hostname = config.hostname.clone();
 
     // One SFTP service task lives for the whole session (across reconnects).
-    // It reads the current `SftpSession` from a shared slot that `run_session`
-    // populates/clears, so it follows reconnects without re-plumbing the
-    // receiver, and rejects requests cleanly while the transport is down.
-    let sftp_slot: SftpSlot = Arc::new(AsyncMutex::new(None));
+    // It reads the current `SftpSession` from the shared slot that
+    // `run_session` populates/clears, so it follows reconnects without
+    // re-plumbing the receiver, and rejects requests while the transport is
+    // down.
     let sftp_service = tokio::spawn(sftp_service(
         sftp_rx,
         sftp_slot.clone(),
@@ -381,6 +400,7 @@ async fn session_task(
         backoff_secs = (backoff_secs * 2).min(30);
     }
     sftp_service.abort();
+    slots.lock().remove(&tab_id);
     let _ = pty_tx.send(PtyEvent::Eof);
 }
 
@@ -1259,6 +1279,74 @@ async fn sftp_upload(
     }
     .await;
     finish_transfer(app, window, tab_id, transfer_id, total, result)
+}
+
+/// Cross-connection copy: stream a file from one tab's SFTP session straight
+/// into another's, relayed through this process (there's no server-to-server
+/// SFTP). Progress is emitted against the destination tab. Must run on the SSH
+/// runtime (both sessions' channel drivers live there).
+#[allow(clippy::too_many_arguments)]
+pub async fn relay(
+    slots: SftpSlots,
+    app: AppHandle,
+    window: String,
+    src_tab: u64,
+    src_path: String,
+    dst_tab: u64,
+    dst_path: String,
+    transfer_id: u64,
+) -> AppResult<()> {
+    let src_slot = slots
+        .lock()
+        .get(&src_tab)
+        .cloned()
+        .ok_or_else(|| AppError::Ssh("source connection not found".into()))?;
+    let dst_slot = slots
+        .lock()
+        .get(&dst_tab)
+        .cloned()
+        .ok_or_else(|| AppError::Ssh("destination connection not found".into()))?;
+    let src = src_slot
+        .lock()
+        .await
+        .clone()
+        .ok_or_else(|| AppError::Ssh("source SFTP not connected".into()))?;
+    let dst = dst_slot
+        .lock()
+        .await
+        .clone()
+        .ok_or_else(|| AppError::Ssh("destination SFTP not connected".into()))?;
+
+    let total = src.metadata(&src_path).await.ok().and_then(|m| m.size);
+    let result = async {
+        let mut rf = src.open(&src_path).await.map_err(sftp_err)?;
+        let mut wf = dst
+            .open_with_flags(
+                &dst_path,
+                OpenFlags::CREATE | OpenFlags::TRUNCATE | OpenFlags::WRITE,
+            )
+            .await
+            .map_err(sftp_err)?;
+        let mut buf = vec![0u8; SFTP_CHUNK];
+        let mut transferred = 0u64;
+        let mut last = 0u64;
+        loop {
+            let n = rf.read(&mut buf).await?;
+            if n == 0 {
+                break;
+            }
+            wf.write_all(&buf[..n]).await?;
+            transferred += n as u64;
+            if transferred - last >= SFTP_PROGRESS_STRIDE {
+                last = transferred;
+                emit_progress(&app, &window, dst_tab, transfer_id, transferred, total, false, None);
+            }
+        }
+        wf.shutdown().await?;
+        Ok::<u64, AppError>(transferred)
+    }
+    .await;
+    finish_transfer(&app, &window, dst_tab, transfer_id, total, result)
 }
 
 /// Emit the terminal progress event for a transfer and collapse the result

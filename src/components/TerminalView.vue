@@ -1,9 +1,10 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
-import { PanelRight, X } from "lucide-vue-next";
+import { PanelBottom, PanelRight, X } from "lucide-vue-next";
 
 import { wheelScroll, showContextMenu, type Config } from "../ipc";
-import { isSftpVisible, toggleSftpPanel } from "../state/sftp";
+import { isSftpVisible, sftpDragGhost, toggleSftpPanel } from "../state/sftp";
+import SftpBrowser from "./SftpBrowser.vue";
 import SftpPanel from "./SftpPanel.vue";
 import TerminalScrollbar from "./TerminalScrollbar.vue";
 import {
@@ -19,7 +20,9 @@ import {
   onMouseUp,
   clearWorkspaceDragPreview,
   commitWorkspaceDrop,
+  commitSftpDockResize,
   getActivePanes,
+  getActiveSftpDocks,
   pingAllForRedraw,
   pointOverTerminal,
   reflowActive,
@@ -30,6 +33,7 @@ import {
   useTerminalSelection,
   wsDragPreview,
   type PaneOverlay,
+  type SftpDock,
 } from "../state/terminal";
 import {
   closeWorkspacePane,
@@ -49,21 +53,62 @@ const wrapRef = ref<HTMLElement | null>(null);
 
 const { active, tabs, renderSeq } = useTabs();
 
-// ---- SFTP side panel (SSH tabs) -------------------------------------------
-// Shown to the right of an SSH tab; shrinks #terminal-host so the existing
-// ResizeObserver reflows the terminal automatically (no sizing changes here).
+// ---- SFTP browsers --------------------------------------------------------
+// Standalone SSH tab → a right-side panel (shrinks #terminal-host, reflowed by
+// the ResizeObserver). Workspace SSH panes → a browser docked on each pane
+// (carved out of the pane rect in reflowWorkspaceLayout; rendered as overlays).
+const sftpTarget = computed<{ id: number; hostLabel?: string } | null>(() => {
+  const a = active.value;
+  if (!a || a.kind !== "ssh") return null; // workspaces use docked browsers
+  return a.disableSftp ? null : { id: a.id, hostLabel: a.hostLabel };
+});
 const showSftp = computed(
-  () =>
-    active.value?.kind === "ssh" &&
-    !active.value.disableSftp &&
-    isSftpVisible(active.value.id),
+  () => sftpTarget.value != null && isSftpVisible(sftpTarget.value.id),
 );
 const sftpReopenVisible = computed(
-  () =>
-    active.value?.kind === "ssh" &&
-    !active.value.disableSftp &&
-    !isSftpVisible(active.value.id),
+  () => sftpTarget.value != null && !isSftpVisible(sftpTarget.value.id),
 );
+
+// Docked browsers (workspace SSH panes), refreshed from the cached layout.
+const sftpDocks = ref<SftpDock[]>([]);
+
+// Toggle a pane's dock on/off, then re-tile so the terminal reclaims/yields
+// the strip.
+function togglePaneDock(tabId: number): void {
+  toggleSftpPanel(tabId);
+  reflowActive(active.value);
+}
+
+// Dock resize handle (between a pane's terminal and its browser).
+let dockResizeRaf = 0;
+let dockResizePending: { dock: SftpDock; y: number } | null = null;
+function onDockResizeMove(e: MouseEvent) {
+  if (!dockResizePending) return;
+  dockResizePending.y = e.clientY;
+  if (dockResizeRaf) return;
+  dockResizeRaf = requestAnimationFrame(() => {
+    dockResizeRaf = 0;
+    if (dockResizePending) commitSftpDockResize(dockResizePending.dock, dockResizePending.y);
+  });
+}
+function onDockResizeUp() {
+  window.removeEventListener("mousemove", onDockResizeMove);
+  window.removeEventListener("mouseup", onDockResizeUp);
+  if (dockResizeRaf) {
+    cancelAnimationFrame(dockResizeRaf);
+    dockResizeRaf = 0;
+  }
+  dockResizePending = null;
+  document.body.style.userSelect = "";
+}
+function onDockResizeDown(dock: SftpDock, e: MouseEvent) {
+  e.preventDefault();
+  e.stopPropagation();
+  dockResizePending = { dock, y: e.clientY };
+  document.body.style.userSelect = "none";
+  window.addEventListener("mousemove", onDockResizeMove);
+  window.addEventListener("mouseup", onDockResizeUp);
+}
 
 const SFTP_W_KEY = "prmpt.sftpPanelWidthPx";
 const sftpWidth = ref<number>(360);
@@ -111,6 +156,12 @@ function onSftpDividerDown(e: MouseEvent) {
   window.addEventListener("mousemove", onSftpDividerMove);
   window.addEventListener("mouseup", onSftpDividerUp);
 }
+
+// The panel opened a second column — widen it so both fit (respecting clamp).
+function onSftpExpand() {
+  sftpWidth.value = clampSftpWidth(Math.max(sftpWidth.value, 680));
+  localStorage.setItem(SFTP_W_KEY, String(Math.round(sftpWidth.value)));
+}
 const { selectionTick } = useTerminalSelection();
 const { theme } = useTheme();
 
@@ -125,6 +176,7 @@ const panes = ref<PaneOverlay[]>([]);
 function refreshOverlays(): void {
   dividers.value = getActiveDividers();
   panes.value = getActivePanes();
+  sftpDocks.value = getActiveSftpDocks();
 }
 const refreshDividers = refreshOverlays;
 
@@ -350,6 +402,7 @@ onBeforeUnmount(() => {
   window.removeEventListener("mouseup", onPaneDragUp);
   onDividerUp();
   onSftpDividerUp();
+  onDockResizeUp();
   teardownTerminalSession();
 });
 
@@ -440,6 +493,17 @@ watch(theme, (next) => {
       >
         <span class="pane-title">{{ p.title }}</span>
         <button
+          v-if="p.sftpDockable"
+          type="button"
+          class="pane-close"
+          :class="{ 'pane-tool-on': p.sftpVisible }"
+          :title="p.sftpVisible ? 'Hide file browser' : 'Show file browser'"
+          @mousedown.stop.prevent
+          @click.stop="togglePaneDock(p.tabId)"
+        >
+          <PanelBottom :size="12" :stroke-width="2.25" />
+        </button>
+        <button
           type="button"
           class="pane-close"
           title="Close pane"
@@ -450,6 +514,31 @@ watch(theme, (next) => {
         </button>
       </div>
     </div>
+    <!-- Docked SFTP browsers: one per SSH workspace pane, carved out of the
+         bottom of the pane (the terminal already reflowed to the top strip). -->
+    <div
+      v-for="d in sftpDocks"
+      :key="`dock-${d.tabId}`"
+      class="sftp-dock"
+      :style="{ left: `${d.x}px`, top: `${d.y}px`, width: `${d.w}px`, height: `${d.h}px` }"
+      @mousedown.stop
+      @wheel.stop
+      @contextmenu.stop
+    >
+      <div
+        class="sftp-dock-resize"
+        title="Resize"
+        @mousedown="onDockResizeDown(d, $event)"
+      />
+      <SftpBrowser
+        class="sftp-dock-browser"
+        :tab-id="d.tabId"
+        :fixed-label="d.hostLabel"
+        can-close
+        @close="togglePaneDock(d.tabId)"
+      />
+    </div>
+
     <!-- Drop-zone preview: shows the half the dropped tab will occupy. -->
     <div
       v-if="dropHi"
@@ -474,19 +563,19 @@ watch(theme, (next) => {
       :tab-id="active.id"
     />
     <slot />
-    <!-- Reopen the SFTP panel after it's been hidden on this SSH tab. -->
+    <!-- Reopen the SFTP panel after it's been hidden on this SSH connection. -->
     <button
-      v-if="sftpReopenVisible && active"
+      v-if="sftpReopenVisible && sftpTarget"
       type="button"
       class="sftp-reopen"
       title="Show file browser"
-      @click="toggleSftpPanel(active.id)"
+      @click="toggleSftpPanel(sftpTarget.id)"
     >
       <PanelRight :size="15" />
     </button>
   </div>
-  <!-- SFTP file browser: resizable divider + panel, SSH tabs only. -->
-  <template v-if="showSftp && active">
+  <!-- SFTP file browser: resizable divider + panel, SSH connections only. -->
+  <template v-if="showSftp && sftpTarget">
     <div
       class="sftp-divider"
       role="separator"
@@ -495,9 +584,7 @@ watch(theme, (next) => {
       @mousedown="onSftpDividerDown"
     />
     <SftpPanel
-      :key="active.id"
-      :tab-id="active.id"
-      :host-label="active.hostLabel"
+      :tab-id="sftpTarget.id"
       class="flex-none"
       :style="{
         width: `${sftpWidth}px`,
@@ -505,7 +592,8 @@ watch(theme, (next) => {
         borderRadius: 'var(--pane-radius)',
         overflow: 'hidden',
       }"
-      @close="toggleSftpPanel(active.id)"
+      @close="toggleSftpPanel(sftpTarget.id)"
+      @expand="onSftpExpand"
     />
   </template>
   </div>
@@ -516,6 +604,13 @@ watch(theme, (next) => {
       :style="{ left: `${paneGhost.x + 12}px`, top: `${paneGhost.y + 12}px` }"
     >
       {{ paneGhost.label }}
+    </div>
+    <div
+      v-if="sftpDragGhost"
+      class="sftp-drag-ghost"
+      :style="{ left: `${sftpDragGhost.x + 14}px`, top: `${sftpDragGhost.y + 14}px` }"
+    >
+      {{ sftpDragGhost.label }}
     </div>
   </Teleport>
 </template>
@@ -593,11 +688,48 @@ watch(theme, (next) => {
   color: var(--fg, #e6e6e6);
   background: color-mix(in srgb, var(--fg, #fff) 14%, transparent);
 }
-.pane-drag-ghost {
+.pane-tool-on {
+  color: var(--accent, #89b4fa);
+}
+
+/* Docked SFTP browser, overlaid on the bottom strip of an SSH pane. */
+.sftp-dock {
+  position: absolute;
+  z-index: 16;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid
+    color-mix(in srgb, var(--border-strong, rgba(255, 255, 255, 0.18)) 45%, transparent);
+  border-radius: var(--pane-radius);
+  overflow: hidden;
+  background: var(--surface-1, #1e1e2e);
+}
+.sftp-dock-browser {
+  flex: 1;
+  min-height: 0;
+}
+.sftp-dock-resize {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 6px;
+  z-index: 1;
+  cursor: row-resize;
+  background: transparent;
+  transition: background-color 120ms ease;
+}
+.sftp-dock-resize:hover,
+.sftp-dock-resize:active {
+  background: color-mix(in srgb, var(--accent, #89b4fa) 40%, transparent);
+}
+.pane-drag-ghost,
+.sftp-drag-ghost {
   position: fixed;
   z-index: 9999;
   pointer-events: none;
-  max-width: 220px;
+  max-width: 240px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;

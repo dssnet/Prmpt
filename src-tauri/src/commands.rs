@@ -13,7 +13,7 @@ use crate::{
     error::{AppError, AppResult},
     protocol::{SftpEntry, TabInfo, WindowBootstrap},
     schedule_refill,
-    ssh::{self, SshConnectConfig},
+    ssh::{self, SftpSlots, SshConnectConfig},
     stronghold::{self, StrongholdUnlock},
     tab::{PtyEvent, ScrollKind, SftpReq, SharedRegistry},
     window_pool::WindowMode,
@@ -512,6 +512,7 @@ pub fn connect_ssh_host(
     registry: State<'_, SharedRegistry>,
     runtime: State<'_, SharedRuntime>,
     config: State<'_, SharedConfig>,
+    sftp_slots: State<'_, SftpSlots>,
     args: SshConnectArgs,
 ) -> AppResult<u64> {
     let scrollback = config.lock().scrollback_lines;
@@ -531,6 +532,7 @@ pub fn connect_ssh_host(
         pty_tx,
         cols,
         rows,
+        sftp_slots.inner().clone(),
     );
 
     registry.start_ssh_tab(
@@ -676,6 +678,39 @@ pub async fn sftp_upload(
         reply,
     })
     .await
+}
+
+/// Cross-connection copy: stream a remote file from one SSH tab's SFTP session
+/// straight to another's (relayed through this process). Progress lands on the
+/// destination tab via `sftp:transfer_progress`.
+#[allow(clippy::too_many_arguments)]
+#[tauri::command]
+pub async fn sftp_relay(
+    app: AppHandle,
+    window: WebviewWindow,
+    runtime: State<'_, SharedRuntime>,
+    sftp_slots: State<'_, SftpSlots>,
+    src_tab: u64,
+    src_path: String,
+    dst_tab: u64,
+    dst_path: String,
+    transfer_id: u64,
+) -> AppResult<()> {
+    let slots = sftp_slots.inner().clone();
+    let window = window.label().to_string();
+    // Run on the SSH runtime, where both sessions' channel drivers live.
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    runtime.spawn(async move {
+        let r = ssh::relay(
+            slots, app, window, src_tab, src_path, dst_tab, dst_path, transfer_id,
+        )
+        .await;
+        let _ = tx.send(r);
+    });
+    match rx.await {
+        Ok(r) => r,
+        Err(_) => Err(AppError::Ssh("relay task dropped".into())),
+    }
 }
 
 #[derive(serde::Serialize)]

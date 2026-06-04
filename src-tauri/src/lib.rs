@@ -195,6 +195,7 @@ pub fn run() {
         .manage(runtime)
         .manage(DbUrl(db_url))
         .manage(secret_store::SecretStore::new())
+        .manage(ssh::new_sftp_slots())
         .invoke_handler(tauri::generate_handler![
             commands::spawn_tab,
             commands::close_tab,
@@ -227,6 +228,7 @@ pub fn run() {
             commands::sftp_remove,
             commands::sftp_download,
             commands::sftp_upload,
+            commands::sftp_relay,
             commands::full_disk_access_granted,
             commands::open_full_disk_access_settings,
             commands::secret_get,

@@ -78,6 +78,40 @@ export function isInteractiveTab(t: TabState | null | undefined): boolean {
   return !!t && t.kind !== "home";
 }
 
+/** All open SSH connections in this window — standalone SSH tabs plus SSH
+ *  panes inside workspaces. Used by the SFTP browser's connection picker.
+ *  Read inside a computed that also touches `workspaceTick` for reactivity to
+ *  pane changes. */
+export function listSshConnections(): {
+  id: number;
+  label: string;
+  disableSftp: boolean;
+}[] {
+  const out: { id: number; label: string; disableSftp: boolean }[] = [];
+  for (const t of tabs.value) {
+    if (t.kind === "ssh") {
+      out.push({
+        id: t.id,
+        label: t.hostLabel || t.title,
+        disableSftp: !!t.disableSftp,
+      });
+    } else if (t.kind === "workspace") {
+      const ws = getWorkspace(t.id);
+      if (!ws) continue;
+      for (const leaf of collectLeaves(ws.root)) {
+        if (leaf.origin.kind === "ssh") {
+          out.push({
+            id: leaf.tabId,
+            label: leaf.origin.hostLabel || leaf.origin.title,
+            disableSftp: !!leaf.origin.disableSftp,
+          });
+        }
+      }
+    }
+  }
+  return out;
+}
+
 export function isWorkspaceTab(t: TabState | null | undefined): boolean {
   return !!t && t.kind === "workspace";
 }
@@ -88,6 +122,7 @@ function originOf(t: TabState): TabOrigin {
     title: t.title,
     hostLabel: t.hostLabel,
     hostId: t.hostId,
+    disableSftp: t.disableSftp,
   };
 }
 
@@ -286,6 +321,7 @@ function revertOrRemoveSlot(slotId: number, survivor: LeafNode | null): void {
     slot.title = snapshots.get(survivor.tabId)?.title || o.title;
     slot.hostLabel = o.hostLabel;
     slot.hostId = o.hostId;
+    slot.disableSftp = o.disableSftp;
     if (activeId.value === slotId) activeId.value = survivor.tabId;
   } else {
     spliceTab(slotId);
@@ -377,6 +413,7 @@ export function detachWorkspaceLeaf(slotId: number, tabId: number): void {
       title: snapshots.get(tabId)?.title || leaf.origin.title,
       hostLabel: leaf.origin.hostLabel,
       hostId: leaf.origin.hostId,
+      disableSftp: leaf.origin.disableSftp,
     });
   }
   applyWorkspaceRemoval(slotId, tabId, newRoot);

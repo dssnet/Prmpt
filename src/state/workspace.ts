@@ -15,6 +15,8 @@ export interface TabOrigin {
   title: string;
   hostLabel?: string;
   hostId?: number;
+  /** SSH panes only: the host opted out of SFTP. */
+  disableSftp?: boolean;
 }
 
 export interface LeafNode {

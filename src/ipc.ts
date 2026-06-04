@@ -492,6 +492,19 @@ export async function sftpUpload(
   await invoke("sftp_upload", { tabId, local, remote, transferId });
 }
 
+/** Cross-connection copy: stream a remote file from `srcTab`'s SFTP session to
+ *  `dstTab`'s, relayed through this process. Progress lands on `dstTab` via
+ *  `onSftpTransferProgress`. */
+export async function sftpRelay(
+  srcTab: number,
+  srcPath: string,
+  dstTab: number,
+  dstPath: string,
+  transferId: number,
+): Promise<void> {
+  await invoke("sftp_relay", { srcTab, srcPath, dstTab, dstPath, transferId });
+}
+
 export interface SftpAvailability {
   tab_id: number;
   available: boolean;

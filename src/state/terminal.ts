@@ -24,6 +24,7 @@ import {
   type TabState,
 } from "./tabs";
 import {
+  findLeafByTabId,
   getWorkspace,
   layout as layoutWorkspace,
   markTabConsumed,
@@ -34,6 +35,7 @@ import {
   type PaneRect,
   type Workspace,
 } from "./workspace";
+import { isSftpVisible, setSftpDockRatio, sftpDockRatio } from "./sftp";
 
 // Selection lives in screen-absolute coords (`screenRow = viewport_top +
 // viewport_row`). That way vertical resize and scrollback motion are pure
@@ -66,6 +68,24 @@ const selectionTick = ref(0);
 let wsPanes: PaneRect[] = [];
 let wsDividers: DividerRect[] = [];
 let wsSplitBoxes = new Map<string, { x: number; y: number; w: number; h: number }>();
+
+/** A docked SFTP browser carved out of the bottom of an SSH pane. The rect is
+ *  host/canvas-relative CSS px; `paneTop`/`paneHeight` are the full pane extent
+ *  (before the carve) so the resize handle can recompute the ratio. */
+export interface SftpDock {
+  tabId: number;
+  hostLabel: string;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  paneTop: number;
+  paneHeight: number;
+}
+let wsSftpDocks: SftpDock[] = [];
+// Below these the pane is too small to usefully split, so it stays all-terminal.
+const MIN_DOCK_H = 80;
+const MIN_TERM_H = 60;
 
 // Bumped whenever the cached workspace layout changes (reflow, resize,
 // structural mutation) so views can refresh divider overlays.
@@ -124,15 +144,51 @@ export function computeDims(): { cols: number; rows: number; w: number; h: numbe
   return { cols, rows, w: rect.width, h: rect.height };
 }
 
+/** If `tabId` is an SSH pane that should carry a docked file browser, return
+ *  its host label; otherwise null. */
+function paneSftpLabel(ws: Workspace, tabId: number): string | null {
+  const leaf = findLeafByTabId(ws.root, tabId);
+  if (!leaf || leaf.origin.kind !== "ssh" || leaf.origin.disableSftp) return null;
+  if (!isSftpVisible(tabId)) return null;
+  return leaf.origin.hostLabel || leaf.origin.title;
+}
+
 /** Lay out the active workspace into the full host rect and tell each pane's
- *  backend tab its new cols/rows. Caches the layout for the draw/hit paths. */
+ *  backend tab its new cols/rows. SSH panes reserve a bottom strip for their
+ *  docked SFTP browser (the terminal gets the rest). Caches the terminal rects
+ *  (used by draw/hit/resize) and the dock rects (DOM overlays). */
 function reflowWorkspaceLayout(ws: Workspace, w: number, h: number): void {
   const { panes, dividers, splitBoxes } = layoutWorkspace(ws.root, 0, 0, w, h);
-  wsPanes = panes;
   wsDividers = dividers;
   wsSplitBoxes = splitBoxes;
-  layoutVersion.value++;
+
+  const ratio = sftpDockRatio();
+  const termPanes: PaneRect[] = [];
+  const docks: SftpDock[] = [];
   for (const pane of panes) {
+    const label = paneSftpLabel(ws, pane.tabId);
+    const dockH = label ? Math.round(pane.h * ratio) : 0;
+    const termH = pane.h - dockH - (label ? GUTTER : 0);
+    if (label && dockH >= MIN_DOCK_H && termH >= MIN_TERM_H) {
+      termPanes.push({ tabId: pane.tabId, x: pane.x, y: pane.y, w: pane.w, h: termH });
+      docks.push({
+        tabId: pane.tabId,
+        hostLabel: label,
+        x: pane.x,
+        y: pane.y + termH + GUTTER,
+        w: pane.w,
+        h: dockH,
+        paneTop: pane.y,
+        paneHeight: pane.h,
+      });
+    } else {
+      termPanes.push(pane);
+    }
+  }
+  wsPanes = termPanes;
+  wsSftpDocks = docks;
+  layoutVersion.value++;
+  for (const pane of wsPanes) {
     const cols = Math.max(1, Math.floor(pane.w / cellWidthPx));
     const rows = Math.max(1, Math.floor(pane.h / cellHeightPx));
     void resizeTab({
@@ -145,6 +201,25 @@ function reflowWorkspaceLayout(ws: Workspace, w: number, h: number): void {
   }
 }
 
+export function getActiveSftpDocks(): SftpDock[] {
+  return activeWs() ? wsSftpDocks : [];
+}
+
+/** Commit a dock resize-handle drag: pointer Y → new dock-height ratio. */
+export function commitSftpDockResize(dock: SftpDock, clientY: number): void {
+  if (!canvasEl) return;
+  const r = canvasEl.getBoundingClientRect();
+  const localY = clientY - r.top;
+  const newDockH = dock.paneTop + dock.paneHeight - localY;
+  setSftpDockRatio(newDockH / Math.max(1, dock.paneHeight));
+  const a = activeWs();
+  if (a) {
+    const dims = computeDims();
+    reflowWorkspaceLayout(a.ws, dims.w, dims.h);
+    drawNow();
+  }
+}
+
 export function getActiveDividers(): DividerRect[] {
   return activeWs() ? wsDividers : [];
 }
@@ -152,6 +227,10 @@ export function getActiveDividers(): DividerRect[] {
 export interface PaneOverlay extends PaneRect {
   title: string;
   focused: boolean;
+  /** SSH pane that can carry a docked file browser (drives the pane-bar toggle). */
+  sftpDockable: boolean;
+  /** Whether its dock is currently shown. */
+  sftpVisible: boolean;
 }
 
 /** Pane rects + titles for the active workspace, for DOM overlays (hover bar,
@@ -159,11 +238,18 @@ export interface PaneOverlay extends PaneRect {
 export function getActivePanes(): PaneOverlay[] {
   const a = activeWs();
   if (!a) return [];
-  return wsPanes.map((p) => ({
-    ...p,
-    title: snapshotFor(p.tabId)?.title || "Terminal",
-    focused: p.tabId === a.ws.focusedTabId,
-  }));
+  return wsPanes.map((p) => {
+    const leaf = findLeafByTabId(a.ws.root, p.tabId);
+    const dockable =
+      !!leaf && leaf.origin.kind === "ssh" && !leaf.origin.disableSftp;
+    return {
+      ...p,
+      title: snapshotFor(p.tabId)?.title || "Terminal",
+      focused: p.tabId === a.ws.focusedTabId,
+      sftpDockable: dockable,
+      sftpVisible: dockable && isSftpVisible(p.tabId),
+    };
+  });
 }
 
 export function reflowActive(activeTab: TabState | null): void {
