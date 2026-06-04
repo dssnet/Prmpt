@@ -163,12 +163,15 @@ windows = { version = "0.58", features = [
 ] }
 # WebView2 settings interface, used to switch off Edge's native
 # "Saved Information" autofill dropdown (see
-# platform::disable_webview2_autofill). Versions track what wry/tauri
-# already resolve in Cargo.lock (webview2-com 0.38, windows-core 0.62)
-# so cargo dedupes instead of pulling a second copy. `windows-core` is
-# only needed for the `Interface` trait (`.cast()`) and `BOOL`.
+# platform::disable_webview2_autofill). Versions track what
+# webview2-com already resolves in Cargo.lock (webview2-com 0.38 pulls
+# windows-core 0.61) so cargo dedupes instead of pulling a second copy.
+# `windows-core` MUST match webview2-com's version: the `Interface`
+# trait that backs `.cast()` is version-specific, and the WebView2
+# interfaces implement the 0.61 trait — a 0.62 import is a different
+# trait and `.cast()` won't resolve.
 webview2-com = "0.38"
-windows-core = "0.62"
+windows-core = "0.61"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # Stores the boot key in the Secret Service (libsecret / GNOME Keyring /
