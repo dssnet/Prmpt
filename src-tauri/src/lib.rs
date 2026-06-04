@@ -565,6 +565,13 @@ pub fn configure_new_window<R: Runtime>(window: &WebviewWindow<R>) {
         });
     }
 
+    #[cfg(target_os = "windows")]
+    {
+        let _ = window.with_webview(|webview| {
+            platform::disable_webview2_autofill(&webview);
+        });
+    }
+
     let label = window.label().to_string();
     let app = window.app_handle().clone();
     window.on_window_event(move |event| {

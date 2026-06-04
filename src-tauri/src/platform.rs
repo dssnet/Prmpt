@@ -216,6 +216,33 @@ pub fn hidden_title() -> bool {
     true
 }
 
+/// Turn off WebView2's native "Saved Information" autofill dropdown.
+///
+/// WebView2 ignores the `autocomplete="off"` HTML attribute for its
+/// general-autofill UI (`main.ts` sets that attribute on every input, but
+/// the Edge "Saved Information" suggestion box appears anyway), so the only
+/// way to suppress it is the native settings interface. Disables both the
+/// general-form autofill (the dropdown) and password autosave. No-op
+/// anywhere but Windows.
+#[cfg(target_os = "windows")]
+pub fn disable_webview2_autofill(webview: &tauri::webview::PlatformWebview) {
+    use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Settings4;
+    use windows_core::Interface;
+    unsafe {
+        let Ok(core) = webview.controller().CoreWebView2() else {
+            return;
+        };
+        let Ok(settings) = core.Settings() else {
+            return;
+        };
+        let Ok(settings4) = settings.cast::<ICoreWebView2Settings4>() else {
+            return;
+        };
+        let _ = settings4.SetIsGeneralAutofillEnabled(false.into());
+        let _ = settings4.SetIsPasswordAutosaveEnabled(false.into());
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
