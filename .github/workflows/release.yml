@@ -299,6 +299,11 @@ jobs:
           TS_ENDPOINT: 'https://weu.codesigning.azure.net/'
           TS_ACCOUNT: 'DSS-Net'
           TS_PROFILE: 'Digital-Services-Stephan'
+          # The job sets RUSTC_WRAPPER=sccache; route this one-off tool build
+          # around it. sccache buys nothing for a `cargo install` and its GHA
+          # cache backend can hard-fail the step during a cache-service blip.
+          RUSTC_WRAPPER: ''
+          SCCACHE_GHA_ENABLED: 'false'
         run: |
           set -euo pipefail
           if [ -z "${AZURE_CLIENT_ID:-}" ]; then
@@ -308,7 +313,20 @@ jobs:
           # Surface tooling gaps early (esp. on the windows-11-arm runner).
           dotnet --version || echo "::warning::dotnet missing"
           az version 2>/dev/null || echo "::warning::Azure CLI missing"
-          where signtool 2>/dev/null || echo "::warning::signtool not on PATH"
+          # artifact-signing-cli shells out to signtool but doesn't bundle it.
+          # The Windows SDK ships signtool under a versioned, per-arch dir that
+          # isn't on PATH — locate the newest and prepend it (via GITHUB_PATH)
+          # so the later bundle/sign step can find it.
+          arch=x64
+          [ "${RUNNER_ARCH:-}" = "ARM64" ] && arch=arm64
+          sdkbin="/c/Program Files (x86)/Windows Kits/10/bin"
+          stdir=$(ls -d "$sdkbin"/10.*/"$arch" 2>/dev/null | sort -V | tail -1 || true)
+          if [ -n "${stdir:-}" ] && [ -f "$stdir/signtool.exe" ]; then
+            echo "signtool: $stdir/signtool.exe"
+            cygpath -w "$stdir" >> "$GITHUB_PATH"
+          else
+            echo "::warning::signtool.exe not found under $sdkbin/10.*/$arch — signing will fail."
+          fi
           cargo install artifact-signing-cli --locked
           cat > src-tauri/tauri.signing.conf.json <<EOF
           { "bundle": { "windows": {
