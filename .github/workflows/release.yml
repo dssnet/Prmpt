@@ -291,12 +291,17 @@ jobs:
         if: matrix.platform.family == 'windows'
         shell: bash
         env:
+          # All three SP creds are needed here (not just for the bundle step)
+          # so the smoke test below can actually authenticate.
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
           AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
           # Non-secret Trusted Signing resource coordinates (region endpoint,
           # account, certificate profile). They're embedded in the published
           # cert anyway, so they live here rather than in repo variables —
-          # only the SP credentials below need to be GitHub secrets.
-          TS_ENDPOINT: 'https://weu.codesigning.azure.net/'
+          # only the SP credentials above need to be GitHub secrets. Endpoint
+          # has no trailing slash (matches Tauri's documented form).
+          TS_ENDPOINT: 'https://weu.codesigning.azure.net'
           TS_ACCOUNT: 'DSS-Net'
           TS_PROFILE: 'Digital-Services-Stephan'
           # The job sets RUSTC_WRAPPER=sccache; route this one-off tool build
@@ -323,11 +328,27 @@ jobs:
           stdir=$(ls -d "$sdkbin"/10.*/"$arch" 2>/dev/null | sort -V | tail -1 || true)
           if [ -n "${stdir:-}" ] && [ -f "$stdir/signtool.exe" ]; then
             echo "signtool: $stdir/signtool.exe"
-            cygpath -w "$stdir" >> "$GITHUB_PATH"
+            cygpath -w "$stdir" >> "$GITHUB_PATH"   # for the later bundle step
+            export PATH="$stdir:$PATH"              # for the smoke test below
           else
             echo "::warning::signtool.exe not found under $sdkbin/10.*/$arch — signing will fail."
           fi
           cargo install artifact-signing-cli --locked
+          # Smoke-test the signer on a throwaway PE so the REAL error surfaces
+          # here (stdout+stderr visible) instead of being swallowed by
+          # tauri-bundler, which runs signCommand via .output() and only
+          # re-emits a generic "failed to run artifact-signing-cli". Also a
+          # fail-fast: validates auth + role + signtool before the long build.
+          winsys="$(cygpath -u "$SYSTEMROOT")/System32"
+          probe="$RUNNER_TEMP/probe.exe"
+          cp "$winsys/whoami.exe" "$probe"
+          echo "== artifact-signing-cli smoke test =="
+          if artifact-signing-cli -e "$TS_ENDPOINT" -a "$TS_ACCOUNT" -c "$TS_PROFILE" "$(cygpath -w "$probe")"; then
+            echo "smoke test: OK"
+          else
+            echo "::error::artifact-signing-cli smoke test FAILED (real error above) — fix before signing the bundle."
+            exit 1
+          fi
           cat > src-tauri/tauri.signing.conf.json <<EOF
           { "bundle": { "windows": {
               "signCommand": "artifact-signing-cli -e ${TS_ENDPOINT} -a ${TS_ACCOUNT} -c ${TS_PROFILE} %1"
