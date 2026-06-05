@@ -291,16 +291,12 @@ jobs:
         if: matrix.platform.family == 'windows'
         shell: bash
         env:
-          # All three SP creds are needed here (not just for the bundle step)
-          # so the smoke test below can actually authenticate.
-          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
           AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
-          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
           # Non-secret Trusted Signing resource coordinates (region endpoint,
           # account, certificate profile). They're embedded in the published
-          # cert anyway, so they live here rather than in repo variables —
-          # only the SP credentials above need to be GitHub secrets. Endpoint
-          # has no trailing slash (matches Tauri's documented form).
+          # cert anyway, so they live here rather than in repo variables — only
+          # the SP credentials (on the bundle step) need to be GitHub secrets.
+          # Endpoint has no trailing slash (matches Tauri's documented form).
           TS_ENDPOINT: 'https://weu.codesigning.azure.net'
           TS_ACCOUNT: 'DSS-Net'
           TS_PROFILE: 'Digital-Services-Stephan'
@@ -315,23 +311,6 @@ jobs:
             echo "::warning::AZURE_CLIENT_ID unset — building UNSIGNED Windows bundle."
             exit 0
           fi
-          # Non-leaking SP-credential sanity check (lengths + stray whitespace
-          # only; values stay masked). AADSTS7000215 means the client secret
-          # VALUE Azure received was wrong — a trailing newline/space from a
-          # bad paste triggers it just like pasting the wrong field does.
-          echo "tenant id length:     ${#AZURE_TENANT_ID} (expect 36)"
-          echo "client id length:     ${#AZURE_CLIENT_ID} (expect 36)"
-          echo "client secret length: ${#AZURE_CLIENT_SECRET} (expect ~40)"
-          if printf '%s' "$AZURE_CLIENT_SECRET" | LC_ALL=C grep -q '[^[:print:]]'; then
-            echo "::warning::client secret contains a non-printable char (newline?) — re-paste it"
-          fi
-          case "$AZURE_CLIENT_SECRET" in
-            *' '*) echo "::warning::client secret contains a space — re-paste it" ;;
-            -*)    echo "::warning::client secret starts with '-' (can break az login arg parsing)" ;;
-          esac
-          # Surface tooling gaps early (esp. on the windows-11-arm runner).
-          dotnet --version || echo "::warning::dotnet missing"
-          az version 2>/dev/null || echo "::warning::Azure CLI missing"
           # artifact-signing-cli shells out to signtool but doesn't bundle it.
           # The Windows SDK ships signtool under a versioned, per-arch dir that
           # isn't on PATH — locate the newest and prepend it (via GITHUB_PATH)
@@ -341,28 +320,11 @@ jobs:
           sdkbin="/c/Program Files (x86)/Windows Kits/10/bin"
           stdir=$(ls -d "$sdkbin"/10.*/"$arch" 2>/dev/null | sort -V | tail -1 || true)
           if [ -n "${stdir:-}" ] && [ -f "$stdir/signtool.exe" ]; then
-            echo "signtool: $stdir/signtool.exe"
-            cygpath -w "$stdir" >> "$GITHUB_PATH"   # for the later bundle step
-            export PATH="$stdir:$PATH"              # for the smoke test below
+            cygpath -w "$stdir" >> "$GITHUB_PATH"
           else
             echo "::warning::signtool.exe not found under $sdkbin/10.*/$arch — signing will fail."
           fi
           cargo install artifact-signing-cli --locked
-          # Smoke-test the signer on a throwaway PE so the REAL error surfaces
-          # here (stdout+stderr visible) instead of being swallowed by
-          # tauri-bundler, which runs signCommand via .output() and only
-          # re-emits a generic "failed to run artifact-signing-cli". Also a
-          # fail-fast: validates auth + role + signtool before the long build.
-          winsys="$(cygpath -u "$SYSTEMROOT")/System32"
-          probe="$RUNNER_TEMP/probe.exe"
-          cp "$winsys/whoami.exe" "$probe"
-          echo "== artifact-signing-cli smoke test =="
-          if artifact-signing-cli -e "$TS_ENDPOINT" -a "$TS_ACCOUNT" -c "$TS_PROFILE" "$(cygpath -w "$probe")"; then
-            echo "smoke test: OK"
-          else
-            echo "::error::artifact-signing-cli smoke test FAILED (real error above) — fix before signing the bundle."
-            exit 1
-          fi
           cat > src-tauri/tauri.signing.conf.json <<EOF
           { "bundle": { "windows": {
               "signCommand": "artifact-signing-cli -e ${TS_ENDPOINT} -a ${TS_ACCOUNT} -c ${TS_PROFILE} %1"
