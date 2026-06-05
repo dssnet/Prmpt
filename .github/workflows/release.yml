@@ -198,6 +198,24 @@ jobs:
         with:
           dotnet-version: '8.x'
 
+      # artifact-signing-cli always drives the x64 signtool + x64
+      # Azure.CodeSigning.Dlib, which need the x64 .NET 8 *runtime*. The
+      # windows-11-arm runner only has arm64 .NET, so the x64 dlib can't load
+      # its runtime and signtool exits with code 3. Install the x64 runtime to
+      # a dedicated dir (xcopy install — no registry) and point the x64 .NET
+      # host at it via DOTNET_ROOT_X64, which hostfxr checks ahead of
+      # DOTNET_ROOT for x64 processes; the bundle step's signtool inherits it.
+      - name: Install x64 .NET 8 runtime (Windows arm64, for x64 signtool)
+        if: ${{ matrix.platform.family == 'windows' && matrix.platform.arch == 'aarch64' }}
+        shell: powershell
+        run: |
+          $dir = Join-Path $env:RUNNER_TEMP 'dotnet-x64'
+          & ([scriptblock]::Create((Invoke-RestMethod 'https://dot.net/v1/dotnet-install.ps1'))) `
+            -Architecture x64 -Runtime dotnet -Channel 8.0 -InstallDir $dir
+          "DOTNET_ROOT_X64=$dir" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "installed x64 .NET runtime to $dir"
+          & "$dir\dotnet.exe" --list-runtimes
+
       # sccache caches individual `rustc` invocations to the GitHub
       # Actions cache, so the large dependency tree (tauri, russh,
       # tokio, stronghold, objc2/windows/secret-service, …) is reused
@@ -357,6 +375,7 @@ jobs:
           Log ("signtool -> " + (Get-Command signtool -ErrorAction SilentlyContinue).Source)
           Log "creds present: tenant=$([bool]$env:AZURE_TENANT_ID) client=$([bool]$env:AZURE_CLIENT_ID) secret=$([bool]$env:AZURE_CLIENT_SECRET)"
           Log "endpoint=$env:TS_ENDPOINT account=$env:TS_ACCOUNT profile=$env:TS_PROFILE"
+          Log "dotnet: ROOT_X64=$env:DOTNET_ROOT_X64 ROOT=$env:DOTNET_ROOT"
           for ($i = 1; $i -le 5; $i++) {
             Log "attempt $i ..."
             $out = & artifact-signing-cli -e $env:TS_ENDPOINT -a $env:TS_ACCOUNT -c $env:TS_PROFILE $File 2>&1
