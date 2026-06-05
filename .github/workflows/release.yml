@@ -187,6 +187,17 @@ jobs:
           # Empty string is accepted and means "no extra targets".
           targets: ${{ matrix.platform.extra_rust_targets }}
 
+      # artifact-signing-cli (the Azure Trusted Signing tool Tauri's docs
+      # recommend) shells out to signtool and the Azure Code Signing Dlib,
+      # which need the .NET 8 runtime. windows-latest ships it, but pin it
+      # explicitly so both Windows legs (incl. the native windows-11-arm
+      # runner) are deterministic. No-op on macOS/Linux legs.
+      - name: Setup .NET 8 (Windows, for artifact-signing-cli)
+        if: matrix.platform.family == 'windows'
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.x'
+
       # sccache caches individual `rustc` invocations to the GitHub
       # Actions cache, so the large dependency tree (tauri, russh,
       # tokio, stronghold, objc2/windows/secret-service, …) is reused
@@ -266,6 +277,46 @@ jobs:
       - name: Apply libghostty-rs fork patch
         run: bun run setup-vendor
 
+      # Azure Trusted Signing for the Windows bundles. tauri-bundler signs the
+      # app .exe + the NSIS/MSI installers mid-build by invoking the
+      # bundle.windows.signCommand (%1 = file path). We can't put that command
+      # in tauri.conf.json / tauri.windows.conf.json — those apply to every
+      # Windows build (incl. local/contributor builds) and would fail without
+      # Azure creds + tooling. Instead generate a CI-only overlay config here
+      # and pass it via --config (see SIGN_CONFIG_ARG below).
+      #
+      # Backward compatible: with no AZURE_CLIENT_ID secret set, this step
+      # no-ops and the Windows legs build today's UNSIGNED bundles unchanged.
+      - name: Configure Azure Trusted Signing (Windows)
+        if: matrix.platform.family == 'windows'
+        shell: bash
+        env:
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          # Non-secret Trusted Signing resource coordinates (region endpoint,
+          # account, certificate profile). They're embedded in the published
+          # cert anyway, so they live here rather than in repo variables —
+          # only the SP credentials below need to be GitHub secrets.
+          TS_ENDPOINT: 'https://weu.codesigning.azure.net/'
+          TS_ACCOUNT: 'DSS-Net'
+          TS_PROFILE: 'Digital-Services-Stephan'
+        run: |
+          set -euo pipefail
+          if [ -z "${AZURE_CLIENT_ID:-}" ]; then
+            echo "::warning::AZURE_CLIENT_ID unset — building UNSIGNED Windows bundle."
+            exit 0
+          fi
+          # Surface tooling gaps early (esp. on the windows-11-arm runner).
+          dotnet --version || echo "::warning::dotnet missing"
+          az version 2>/dev/null || echo "::warning::Azure CLI missing"
+          where signtool 2>/dev/null || echo "::warning::signtool not on PATH"
+          cargo install artifact-signing-cli --locked
+          cat > src-tauri/tauri.signing.conf.json <<EOF
+          { "bundle": { "windows": {
+              "signCommand": "artifact-signing-cli -e ${TS_ENDPOINT} -a ${TS_ACCOUNT} -c ${TS_PROFILE} %1"
+          } } }
+          EOF
+          echo "SIGN_CONFIG_ARG=--config src-tauri/tauri.signing.conf.json" >> "$GITHUB_ENV"
+
       - name: Build & upload Tauri bundle
         uses: tauri-apps/tauri-action@v0
         env:
@@ -304,9 +355,19 @@ jobs:
           # the three platforms' entries across the matrix legs).
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          # Azure Trusted Signing service-principal creds. Read by
+          # artifact-signing-cli (the signCommand) via DefaultAzureCredential
+          # → EnvironmentCredential — no `az login` needed. Empty on the
+          # macOS/Linux legs (those don't run the signCommand), so harmless.
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
         with:
           releaseId: ${{ needs.create-release.outputs.release_id }}
-          args: ${{ matrix.platform.args }}
+          # SIGN_CONFIG_ARG is set only by the "Configure Azure Trusted
+          # Signing" step (Windows + secret present); otherwise it's unset and
+          # renders empty, leaving the build unchanged.
+          args: ${{ matrix.platform.args }} ${{ env.SIGN_CONFIG_ARG }}
 
       # linuxdeploy-plugin-gtk bundles the host's libwayland-* into the
       # AppImage. libwayland is tied to the running compositor, so on a

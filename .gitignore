@@ -16,6 +16,10 @@ dist-ssr
 # Staged native libs (populated by src-tauri/build.rs for the Tauri bundler)
 src-tauri/native/
 
+# CI-only Azure Trusted Signing overlay config (generated per-run in the
+# release workflow; carries no secrets but must never be committed)
+src-tauri/tauri.signing.conf.json
+
 # Bun runtime cache
 .bun/
 
