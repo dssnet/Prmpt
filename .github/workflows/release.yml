@@ -332,28 +332,27 @@ jobs:
           # so one transient blip doesn't fail the whole release. Endpoint /
           # account / profile are baked in (non-secret); the SP creds come
           # from the bundle step's env, which the wrapper inherits.
-          cat > src-tauri/sign.sh <<EOF
-          #!/usr/bin/env bash
-          set -uo pipefail
-          file="\$1"
-          for attempt in 1 2 3 4 5; do
-            if artifact-signing-cli -e ${TS_ENDPOINT} -a ${TS_ACCOUNT} -c ${TS_PROFILE} "\$file"; then
-              exit 0
-            fi
-            echo "sign attempt \$attempt failed for \$file; retrying in \$((attempt * 5))s..." >&2
-            sleep \$((attempt * 5))
-          done
-          echo "signing failed after 5 attempts: \$file" >&2
+          cat > src-tauri/sign.ps1 <<EOF
+          param([Parameter(Mandatory=\$true)][string]\$File)
+          \$ErrorActionPreference = 'Continue'
+          for (\$i = 1; \$i -le 5; \$i++) {
+            artifact-signing-cli -e ${TS_ENDPOINT} -a ${TS_ACCOUNT} -c ${TS_PROFILE} \$File
+            if (\$LASTEXITCODE -eq 0) { exit 0 }
+            Write-Host "sign attempt \$i failed for \$File; retrying in \$(\$i * 5)s..."
+            Start-Sleep -Seconds (\$i * 5)
+          }
+          Write-Host "signing failed after 5 attempts: \$File"
           exit 1
           EOF
-          # Reference the wrapper by an ABSOLUTE forward-slash path: tauri only
-          # rewrites *relative* existing args (into a backslash path Git-bash
-          # chokes on), so an absolute path is passed through verbatim and
-          # Git-bash opens it cleanly.
+          # Drive the wrapper through powershell.exe (always on PATH on Windows;
+          # plain `bash` is not). Reference the script by an ABSOLUTE
+          # forward-slash path: tauri only rewrites *relative* existing args, so
+          # an absolute path is passed through verbatim and PowerShell -File
+          # accepts the forward slashes.
           ws="${GITHUB_WORKSPACE//\\//}"
           cat > src-tauri/tauri.signing.conf.json <<EOF
           { "bundle": { "windows": {
-              "signCommand": "bash ${ws}/src-tauri/sign.sh %1"
+              "signCommand": "powershell -NoProfile -ExecutionPolicy Bypass -File ${ws}/src-tauri/sign.ps1 %1"
           } } }
           EOF
           echo "SIGN_CONFIG_ARG=--config src-tauri/tauri.signing.conf.json" >> "$GITHUB_ENV"
