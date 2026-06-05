@@ -315,6 +315,20 @@ jobs:
             echo "::warning::AZURE_CLIENT_ID unset — building UNSIGNED Windows bundle."
             exit 0
           fi
+          # Non-leaking SP-credential sanity check (lengths + stray whitespace
+          # only; values stay masked). AADSTS7000215 means the client secret
+          # VALUE Azure received was wrong — a trailing newline/space from a
+          # bad paste triggers it just like pasting the wrong field does.
+          echo "tenant id length:     ${#AZURE_TENANT_ID} (expect 36)"
+          echo "client id length:     ${#AZURE_CLIENT_ID} (expect 36)"
+          echo "client secret length: ${#AZURE_CLIENT_SECRET} (expect ~40)"
+          if printf '%s' "$AZURE_CLIENT_SECRET" | LC_ALL=C grep -q '[^[:print:]]'; then
+            echo "::warning::client secret contains a non-printable char (newline?) — re-paste it"
+          fi
+          case "$AZURE_CLIENT_SECRET" in
+            *' '*) echo "::warning::client secret contains a space — re-paste it" ;;
+            -*)    echo "::warning::client secret starts with '-' (can break az login arg parsing)" ;;
+          esac
           # Surface tooling gaps early (esp. on the windows-11-arm runner).
           dotnet --version || echo "::warning::dotnet missing"
           az version 2>/dev/null || echo "::warning::Azure CLI missing"
