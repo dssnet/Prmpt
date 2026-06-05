@@ -324,6 +324,16 @@ jobs:
           else
             echo "::warning::signtool.exe not found under $sdkbin/10.*/$arch — signing will fail."
           fi
+          # Ensure `powershell` resolves for tauri's signCommand. Windows
+          # PowerShell 5.1 ships in System32 but its dir isn't on the job PATH
+          # on the windows-11-arm runner (it is on x86_64) — that's why
+          # `powershell` spawned fine on x64 but "failed to run" on arm.
+          psdir="/c/Windows/System32/WindowsPowerShell/v1.0"
+          if [ -f "$psdir/powershell.exe" ]; then
+            cygpath -w "$psdir" >> "$GITHUB_PATH"
+          else
+            echo "::warning::powershell.exe not found at $psdir"
+          fi
           cargo install artifact-signing-cli --locked
           # Retry wrapper. tauri-bundler signs many PE files per MSI/NSIS
           # bundle (the app exe, ghostty-vt.dll, the WiX/NSIS helper DLLs) in
