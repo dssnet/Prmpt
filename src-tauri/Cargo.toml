@@ -29,6 +29,10 @@ anyhow = "1"
 parking_lot = "0.12"
 crossbeam-channel = "0.5"
 directories = "5"
+# `canonicalize` that omits Windows' `\\?\` verbatim prefix (which breaks
+# the local browser's breadcrumbs and triggers ERROR_INVALID_NAME when paths
+# round-trip back to the shell). No-op wrapper over std on non-Windows.
+dunce = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "macros", "io-util", "time", "net"] }
 tauri-plugin-sql = { version = "2", features = ["sqlite"] }
 # Used to be `tauri-plugin-stronghold` (a JS-callable plugin), but every

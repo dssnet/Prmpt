@@ -17,7 +17,10 @@ use crate::protocol::{LocalEntry, LocalListing};
 /// failing the whole listing.
 pub fn list_dir(path: &str) -> AppResult<LocalListing> {
     let dir = PathBuf::from(path);
-    let canonical = fs::canonicalize(&dir).unwrap_or(dir);
+    // `dunce::canonicalize` strips Windows' `\\?\` verbatim prefix (which
+    // `fs::canonicalize` adds) so breadcrumbs render and paths round-trip to
+    // the shell cleanly; it's a no-op alias for `fs::canonicalize` elsewhere.
+    let canonical = dunce::canonicalize(&dir).unwrap_or(dir);
 
     let mut entries: Vec<LocalEntry> = Vec::new();
     for dent in fs::read_dir(&canonical)? {

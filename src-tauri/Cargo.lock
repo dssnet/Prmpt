@@ -4439,6 +4439,7 @@ dependencies = [
  "bytes",
  "crossbeam-channel",
  "directories",
+ "dunce",
  "hex",
  "iota_stronghold",
  "libghostty-vt",
