@@ -232,6 +232,7 @@ pub fn run() {
             commands::sftp_relay,
             commands::local_home_dir,
             commands::list_local_dir,
+            commands::local_drives,
             commands::local_mkdir,
             commands::local_rename,
             commands::local_remove,

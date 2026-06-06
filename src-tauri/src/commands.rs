@@ -12,7 +12,7 @@ use crate::{
     config::{Config, Theme},
     error::{AppError, AppResult},
     localfs,
-    protocol::{LocalListing, SftpEntry, TabInfo, WindowBootstrap},
+    protocol::{LocalDrive, LocalListing, SftpEntry, TabInfo, WindowBootstrap},
     schedule_refill,
     ssh::{self, SftpSlots, SshConnectConfig},
     stronghold::{self, StrongholdUnlock},
@@ -728,6 +728,11 @@ pub fn local_home_dir() -> AppResult<String> {
 #[tauri::command]
 pub fn list_local_dir(path: String) -> AppResult<LocalListing> {
     localfs::list_dir(&path)
+}
+
+#[tauri::command]
+pub fn local_drives() -> Vec<LocalDrive> {
+    localfs::list_drives()
 }
 
 #[tauri::command]

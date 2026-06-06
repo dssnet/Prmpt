@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
 use crate::error::{AppError, AppResult};
-use crate::protocol::{LocalEntry, LocalListing};
+use crate::protocol::{LocalDrive, LocalEntry, LocalListing};
 
 /// List a directory: its canonical path, parent, and dirs-first / then
 /// case-insensitive sorted entries. Unreadable entries are skipped rather than
@@ -63,6 +63,66 @@ pub fn list_dir(path: &str) -> AppResult<LocalListing> {
         parent,
         entries,
     })
+}
+
+/// Enumerate the filesystem roots the user can switch between in the browser.
+///
+/// - Windows: every attached drive letter (`C:\`, `D:\`, …), probed `A`..=`Z`
+///   (avoids pulling in a WinAPI crate just for `GetLogicalDrives`).
+/// - macOS: the root `/` plus each mounted volume under `/Volumes`.
+/// - Linux: the root `/` plus mount points under `/mnt` and `/media`.
+pub fn list_drives() -> Vec<LocalDrive> {
+    let mut drives: Vec<LocalDrive> = Vec::new();
+
+    #[cfg(target_os = "windows")]
+    {
+        for letter in b'A'..=b'Z' {
+            let root = format!("{}:\\", letter as char);
+            // `is_navigable` skips drive letters that exist but can't be opened
+            // (an empty optical/card-reader slot), which would only error on click.
+            if is_navigable(Path::new(&root)) {
+                drives.push(LocalDrive {
+                    name: format!("{}:", letter as char),
+                    path: root,
+                });
+            }
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        drives.push(LocalDrive { name: "/".into(), path: "/".into() });
+        let mount_parents: &[&str] = if cfg!(target_os = "macos") {
+            &["/Volumes"]
+        } else {
+            &["/mnt", "/media"]
+        };
+        for parent in mount_parents {
+            let Ok(rd) = fs::read_dir(parent) else { continue };
+            for dent in rd.flatten() {
+                let name = dent.file_name().to_string_lossy().into_owned();
+                let p = dent.path();
+                // Skip hidden/synthetic mounts (macOS `.timemachine`,
+                // `com.apple.TimeMachine.localsnapshots`, snapshot mounts) and
+                // anything we can't actually list — they'd only error on click.
+                if name.starts_with('.') || !is_navigable(&p) {
+                    continue;
+                }
+                drives.push(LocalDrive { name, path: p.to_string_lossy().into_owned() });
+            }
+        }
+    }
+
+    drives
+}
+
+/// Whether a root can be offered in the drive picker: it must open the same way
+/// the browser will (canonicalize, then list), so dead drives and
+/// permission-walled snapshot mounts don't appear just to fail when selected.
+fn is_navigable(path: &Path) -> bool {
+    dunce::canonicalize(path)
+        .and_then(|c| fs::read_dir(c).map(drop))
+        .is_ok()
 }
 
 pub fn mkdir(path: &str) -> AppResult<()> {

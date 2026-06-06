@@ -555,9 +555,20 @@ export interface LocalListing {
   entries: LocalEntry[];
 }
 
+/** A filesystem root the user can switch to from the drive picker. */
+export interface LocalDrive {
+  name: string;
+  path: string;
+}
+
 /** The user's home directory — the local browser's starting point. */
 export async function localHomeDir(): Promise<string> {
   return await invoke<string>("local_home_dir");
+}
+
+/** List filesystem roots: Windows drive letters, or mounted volumes elsewhere. */
+export async function localDrives(): Promise<LocalDrive[]> {
+  return await invoke<LocalDrive[]>("local_drives");
 }
 
 export async function listLocalDir(path: string): Promise<LocalListing> {

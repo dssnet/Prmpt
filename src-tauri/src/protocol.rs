@@ -108,6 +108,15 @@ pub struct LocalEntry {
     pub mtime: Option<i64>,
 }
 
+/// One filesystem root the user can switch to from the browser's drive picker.
+/// `name` is a short label (a drive letter like `C:` on Windows, or the volume
+/// folder name on macOS/Linux); `path` is the root directory to navigate to.
+#[derive(Serialize, Clone, Debug)]
+pub struct LocalDrive {
+    pub name: String,
+    pub path: String,
+}
+
 /// A local directory listing: the canonical directory, its parent (`None` at a
 /// filesystem root), and the sorted entries. `parent` drives the browser's Up
 /// button without the frontend having to reason about path separators.

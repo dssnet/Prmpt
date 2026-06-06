@@ -5,14 +5,17 @@ import {
   ChevronRight,
   File as FileIcon,
   Folder,
+  HardDrive,
   Link2,
   MoreHorizontal,
+  Pencil,
   RefreshCw,
   X,
 } from "lucide-vue-next";
 
 import {
   listLocalDir,
+  localDrives,
   localHomeDir,
   localMkdir,
   localOpen,
@@ -90,6 +93,35 @@ const crumbs = computed(() => {
   }
   return acc;
 });
+
+// ---- address bar (editable path) ----
+const editingPath = ref(false);
+const pathDraft = ref("");
+function startEditPath(): void {
+  pathDraft.value = cwd.value;
+  editingPath.value = true;
+}
+function commitEditPath(): void {
+  const p = pathDraft.value.trim();
+  editingPath.value = false;
+  if (p && p !== cwd.value) void load(p);
+}
+
+// ---- drive / volume picker ----
+async function openDriveMenu(): Promise<void> {
+  // Fetch fresh each open — removable drives come and go.
+  let list: Awaited<ReturnType<typeof localDrives>>;
+  try {
+    list = await localDrives();
+  } catch (err) {
+    error.value = describeError(err);
+    return;
+  }
+  if (!list.length) return;
+  void popupMenu(
+    list.map((d) => ({ text: d.name, action: () => void load(d.path) })),
+  );
+}
 
 function joinLocal(dir: string, name: string): string {
   const s = sep.value;
@@ -316,17 +348,44 @@ onMounted(() => void init());
       </button>
     </div>
 
-    <!-- breadcrumb -->
-    <div class="flex items-center flex-wrap gap-0.5 px-2.5 py-1.5 border-b border-border text-xs text-fg-muted shrink-0">
-      <template v-for="(c, i) in crumbs" :key="c.path">
-        <ChevronRight v-if="i > 0" :size="11" class="text-fg-subtle shrink-0" />
-        <button
-          type="button"
-          class="px-1 py-0.5 rounded hover:bg-surface-2 truncate max-w-[140px]"
-          :class="i === crumbs.length - 1 ? 'text-fg font-medium' : 'text-fg-muted'"
-          @click="load(c.path)"
-        >
-          {{ c.label }}
+    <!-- breadcrumb / address bar -->
+    <div class="flex items-center gap-1 px-2.5 py-1.5 border-b border-border text-xs text-fg-muted shrink-0">
+      <button
+        v-if="IS_WIN"
+        type="button"
+        class="icon-btn shrink-0"
+        title="Drives"
+        @click="openDriveMenu"
+      >
+        <HardDrive :size="13" />
+      </button>
+
+      <input
+        v-if="editingPath"
+        v-model="pathDraft"
+        v-focus
+        :class="EDIT_INPUT_CLASS"
+        spellcheck="false"
+        @keydown.enter="commitEditPath"
+        @keydown.esc="editingPath = false"
+        @blur="editingPath = false"
+      />
+      <template v-else>
+        <div class="flex items-center flex-wrap gap-0.5 flex-1 min-w-0">
+          <template v-for="(c, i) in crumbs" :key="c.path">
+            <ChevronRight v-if="i > 0" :size="11" class="text-fg-subtle shrink-0" />
+            <button
+              type="button"
+              class="px-1 py-0.5 rounded hover:bg-surface-2 truncate max-w-[140px]"
+              :class="i === crumbs.length - 1 ? 'text-fg font-medium' : 'text-fg-muted'"
+              @click="load(c.path)"
+            >
+              {{ c.label }}
+            </button>
+          </template>
+        </div>
+        <button type="button" class="icon-btn shrink-0" title="Edit path" @click="startEditPath">
+          <Pencil :size="13" />
         </button>
       </template>
     </div>
