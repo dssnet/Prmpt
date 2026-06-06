@@ -319,11 +319,26 @@ onMounted(() => void init());
 
 <template>
   <section class="flex flex-col h-full min-h-0 min-w-0 bg-surface-1 text-fg">
-    <!-- header -->
-    <header class="flex items-center gap-1.5 px-2 h-8 border-b border-border shrink-0">
-      <span class="flex-1 min-w-0 truncate text-xs font-semibold" :title="fixedLabel">
-        {{ fixedLabel || "Files" }}
+    <!-- header: nav actions, optional label, parent-injected actions, close -->
+    <header class="flex items-center gap-1 px-2 h-8 border-b border-border shrink-0">
+      <button type="button" class="icon-btn" title="Up" :disabled="!parent" @click="goUp">
+        <ArrowUp :size="14" />
+      </button>
+      <button type="button" class="icon-btn" title="Refresh" @click="refresh">
+        <RefreshCw :size="14" :class="{ 'animate-spin': loading }" />
+      </button>
+      <button type="button" class="icon-btn" title="More actions" @click="openToolbarMenu">
+        <MoreHorizontal :size="14" />
+      </button>
+      <span
+        v-if="fixedLabel"
+        class="flex-1 min-w-0 truncate text-xs font-semibold text-fg-subtle"
+        :title="fixedLabel"
+      >
+        {{ fixedLabel }}
       </span>
+      <span v-else class="flex-1" />
+      <slot name="actions" />
       <button
         v-if="canClose"
         type="button"
@@ -334,19 +349,6 @@ onMounted(() => void init());
         <X :size="14" />
       </button>
     </header>
-
-    <!-- toolbar -->
-    <div class="flex items-center gap-1 px-2 h-8 border-b border-border shrink-0">
-      <button type="button" class="icon-btn" title="Up" :disabled="!parent" @click="goUp">
-        <ArrowUp :size="14" />
-      </button>
-      <button type="button" class="icon-btn" title="Refresh" @click="refresh">
-        <RefreshCw :size="14" :class="{ 'animate-spin': loading }" />
-      </button>
-      <button type="button" class="icon-btn" title="More actions" @click="openToolbarMenu">
-        <MoreHorizontal :size="14" />
-      </button>
-    </div>
 
     <!-- breadcrumb / address bar -->
     <div class="flex items-center gap-1 px-2.5 py-1.5 border-b border-border text-xs text-fg-muted shrink-0">

@@ -36,26 +36,23 @@ function addSftp(): void {
 
 <template>
   <aside class="flex flex-col min-h-0 self-stretch bg-surface-1 border-l border-border text-fg">
-    <header class="flex items-center gap-1.5 px-2 h-8 border-b border-border shrink-0">
-      <span class="text-[11px] font-semibold uppercase tracking-wide text-fg-subtle flex-1">
-        Files
-      </span>
-      <button
-        v-if="canAddSftp"
-        type="button"
-        class="hdr-btn"
-        title="Open an SSH connection (drag local files onto it to upload)"
-        @click="addSftp"
-      >
-        <Columns2 :size="14" />
-      </button>
-      <button type="button" class="hdr-btn" title="Hide file browser" @click="emit('close')">
-        <X :size="14" />
-      </button>
-    </header>
-
     <div class="flex-1 min-h-0 flex">
-      <LocalBrowser class="flex-1 min-w-0" :target-tab-id="targetTabId" />
+      <LocalBrowser class="flex-1 min-w-0" :target-tab-id="targetTabId">
+        <template #actions>
+          <button
+            v-if="canAddSftp"
+            type="button"
+            class="hdr-btn"
+            title="Open an SSH connection (drag local files onto it to upload)"
+            @click="addSftp"
+          >
+            <Columns2 :size="14" />
+          </button>
+          <button type="button" class="hdr-btn" title="Hide file browser" @click="emit('close')">
+            <X :size="14" />
+          </button>
+        </template>
+      </LocalBrowser>
       <template v-if="sftpId !== null">
         <div class="w-px bg-border shrink-0" />
         <SftpBrowser

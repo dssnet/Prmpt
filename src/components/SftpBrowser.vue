@@ -10,6 +10,7 @@ import {
   Folder,
   Link2,
   MoreHorizontal,
+  Pencil,
   RefreshCw,
   Upload,
   X,
@@ -210,6 +211,19 @@ function goUp(): void {
 }
 function refresh(): void {
   if (cwd.value) void load(cwd.value);
+}
+
+// ---- address bar (editable path) ----
+const editingPath = ref(false);
+const pathDraft = ref("");
+function startEditPath(): void {
+  pathDraft.value = cwd.value;
+  editingPath.value = true;
+}
+function commitEditPath(): void {
+  const p = pathDraft.value.trim();
+  editingPath.value = false;
+  if (p && p !== cwd.value) void load(p);
 }
 
 // ---- new folder ----
@@ -492,11 +506,23 @@ onBeforeUnmount(() => {
 
 <template>
   <section class="flex flex-col h-full min-h-0 min-w-0 bg-surface-1 text-fg">
-    <!-- header: fixed label (docked) or connection picker -->
-    <header class="flex items-center gap-1.5 px-2 h-8 border-b border-border shrink-0">
+    <!-- header: nav actions (when ready), fixed label (docked) or connection
+         picker, then close -->
+    <header class="flex items-center gap-1 px-2 h-8 border-b border-border shrink-0">
+      <template v-if="status === 'ready'">
+        <button type="button" class="icon-btn" title="Up" :disabled="atRoot" @click="goUp">
+          <ArrowUp :size="14" />
+        </button>
+        <button type="button" class="icon-btn" title="Refresh" @click="refresh">
+          <RefreshCw :size="14" :class="{ 'animate-spin': loading }" />
+        </button>
+        <button type="button" class="icon-btn" title="More actions" @click="openToolbarMenu">
+          <MoreHorizontal :size="14" />
+        </button>
+      </template>
       <span
         v-if="fixedLabel"
-        class="flex-1 min-w-0 truncate text-xs font-semibold"
+        class="flex-1 min-w-0 truncate text-xs font-semibold text-fg-subtle"
         :title="fixedLabel"
       >
         {{ fixedLabel }}
@@ -549,30 +575,34 @@ onBeforeUnmount(() => {
     </template>
 
     <template v-else>
-      <!-- toolbar -->
-      <div class="flex items-center gap-1 px-2 h-8 border-b border-border shrink-0">
-        <button type="button" class="icon-btn" title="Up" :disabled="atRoot" @click="goUp">
-          <ArrowUp :size="14" />
-        </button>
-        <button type="button" class="icon-btn" title="Refresh" @click="refresh">
-          <RefreshCw :size="14" :class="{ 'animate-spin': loading }" />
-        </button>
-        <button type="button" class="icon-btn" title="More actions" @click="openToolbarMenu">
-          <MoreHorizontal :size="14" />
-        </button>
-      </div>
-
-      <!-- breadcrumb -->
-      <div class="flex items-center flex-wrap gap-0.5 px-2.5 py-1.5 border-b border-border text-xs text-fg-muted shrink-0">
-        <template v-for="(c, i) in crumbs" :key="c.path">
-          <ChevronRight v-if="i > 0" :size="11" class="text-fg-subtle shrink-0" />
-          <button
-            type="button"
-            class="px-1 py-0.5 rounded hover:bg-surface-2 truncate max-w-[140px]"
-            :class="i === crumbs.length - 1 ? 'text-fg font-medium' : 'text-fg-muted'"
-            @click="load(c.path)"
-          >
-            {{ c.label }}
+      <!-- breadcrumb / address bar -->
+      <div class="flex items-center gap-1 px-2.5 py-1.5 border-b border-border text-xs text-fg-muted shrink-0">
+        <input
+          v-if="editingPath"
+          v-model="pathDraft"
+          v-focus
+          :class="EDIT_INPUT_CLASS"
+          spellcheck="false"
+          @keydown.enter="commitEditPath"
+          @keydown.esc="editingPath = false"
+          @blur="editingPath = false"
+        />
+        <template v-else>
+          <div class="flex items-center flex-wrap gap-0.5 flex-1 min-w-0">
+            <template v-for="(c, i) in crumbs" :key="c.path">
+              <ChevronRight v-if="i > 0" :size="11" class="text-fg-subtle shrink-0" />
+              <button
+                type="button"
+                class="px-1 py-0.5 rounded hover:bg-surface-2 truncate max-w-[140px]"
+                :class="i === crumbs.length - 1 ? 'text-fg font-medium' : 'text-fg-muted'"
+                @click="load(c.path)"
+              >
+                {{ c.label }}
+              </button>
+            </template>
+          </div>
+          <button type="button" class="icon-btn shrink-0" title="Edit path" @click="startEditPath">
+            <Pencil :size="13" />
           </button>
         </template>
       </div>
