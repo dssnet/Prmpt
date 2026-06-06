@@ -38,6 +38,7 @@ import {
   type FileDropTarget,
 } from "../state/sftp";
 import { popupMenu } from "../contextMenu";
+import { showHiddenFiles, toggleHiddenFiles } from "../state/fileBrowser";
 import { ConfirmDialog } from "./ui";
 
 const props = withDefaults(
@@ -67,6 +68,10 @@ type Status = "connecting" | "ready" | "unavailable";
 
 const cwd = ref<string>("");
 const entries = ref<SftpEntry[]>([]);
+// Hide dot-prefixed (hidden) entries unless the shared toggle is on.
+const visibleEntries = computed(() =>
+  entries.value.filter((e) => showHiddenFiles.value || !e.name.startsWith(".")),
+);
 const loading = ref(false);
 const error = ref<string | null>(null);
 const status = ref<Status>("connecting");
@@ -335,6 +340,11 @@ function openToolbarMenu(): void {
     { text: "New folder", action: startNewFolder },
     { text: "Upload files…", action: () => void upload() },
     { text: "Upload folder…", action: () => void uploadFolder() },
+    null,
+    {
+      text: showHiddenFiles.value ? "Hide hidden files" : "Show hidden files",
+      action: toggleHiddenFiles,
+    },
   ]);
 }
 function openRowMenu(e: SftpEntry): void {
@@ -592,7 +602,7 @@ onBeforeUnmount(() => {
         </div>
 
         <p
-          v-if="!loading && entries.length === 0 && !creatingFolder"
+          v-if="!loading && visibleEntries.length === 0 && !creatingFolder"
           class="px-3 py-6 text-center text-xs text-fg-subtle"
         >
           Empty directory.
@@ -600,7 +610,7 @@ onBeforeUnmount(() => {
 
         <ul class="py-0.5">
           <li
-            v-for="e in entries"
+            v-for="e in visibleEntries"
             :key="e.path"
             class="group flex items-center gap-2 px-2.5 py-1 text-xs cursor-default select-none hover:bg-surface-2"
             :class="{

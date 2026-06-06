@@ -24,6 +24,7 @@ import {
 } from "../ipc";
 import { popupMenu } from "../contextMenu";
 import { deliverSftpDrop, startFileDrag, type SftpDragItem } from "../state/sftp";
+import { showHiddenFiles, toggleHiddenFiles } from "../state/fileBrowser";
 import { ConfirmDialog } from "./ui";
 
 const props = withDefaults(
@@ -52,6 +53,11 @@ const parent = ref<string | null>(null);
 const entries = ref<LocalEntry[]>([]);
 const loading = ref(false);
 const error = ref<string | null>(null);
+
+// Hide dot-prefixed (hidden) entries unless the shared toggle is on.
+const visibleEntries = computed(() =>
+  entries.value.filter((e) => showHiddenFiles.value || !e.name.startsWith(".")),
+);
 
 const renamingPath = ref<string | null>(null);
 const renameValue = ref("");
@@ -246,7 +252,14 @@ function onRowMouseDown(ev: MouseEvent, e: LocalEntry): void {
 
 // ---- native menus ----
 function openToolbarMenu(): void {
-  void popupMenu([{ text: "New folder", action: startNewFolder }]);
+  void popupMenu([
+    { text: "New folder", action: startNewFolder },
+    null,
+    {
+      text: showHiddenFiles.value ? "Hide hidden files" : "Show hidden files",
+      action: toggleHiddenFiles,
+    },
+  ]);
 }
 function openRowMenu(e: LocalEntry): void {
   void popupMenu([
@@ -334,7 +347,7 @@ onMounted(() => void init());
       </div>
 
       <p
-        v-if="!loading && entries.length === 0 && !creatingFolder"
+        v-if="!loading && visibleEntries.length === 0 && !creatingFolder"
         class="px-3 py-6 text-center text-xs text-fg-subtle"
       >
         Empty directory.
@@ -342,7 +355,7 @@ onMounted(() => void init());
 
       <ul class="py-0.5">
         <li
-          v-for="e in entries"
+          v-for="e in visibleEntries"
           :key="e.path"
           class="group flex items-center gap-2 px-2.5 py-1 text-xs cursor-default select-none hover:bg-surface-2"
           @mousedown="onRowMouseDown($event, e)"
