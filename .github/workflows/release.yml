@@ -213,8 +213,6 @@ jobs:
           & ([scriptblock]::Create((Invoke-RestMethod 'https://dot.net/v1/dotnet-install.ps1'))) `
             -Architecture x64 -Runtime dotnet -Channel 8.0 -InstallDir $dir
           "DOTNET_ROOT_X64=$dir" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          Write-Host "installed x64 .NET runtime to $dir"
-          & "$dir\dotnet.exe" --list-runtimes
 
       # sccache caches individual `rustc` invocations to the GitHub
       # Actions cache, so the large dependency tree (tauri, russh,
@@ -315,89 +313,7 @@ jobs:
           # cache backend can hard-fail the step during a cache-service blip.
           RUSTC_WRAPPER: ''
           SCCACHE_GHA_ENABLED: 'false'
-        run: |
-          set -euo pipefail
-          if [ -z "${AZURE_CLIENT_ID:-}" ]; then
-            echo "::warning::AZURE_CLIENT_ID unset — building UNSIGNED Windows bundle."
-            exit 0
-          fi
-          # artifact-signing-cli shells out to signtool but doesn't bundle it.
-          # The Windows SDK ships signtool under a versioned, per-arch dir that
-          # isn't on PATH — locate the newest and prepend it (via GITHUB_PATH)
-          # so the later bundle/sign step can find it.
-          arch=x64
-          [ "${RUNNER_ARCH:-}" = "ARM64" ] && arch=arm64
-          sdkbin="/c/Program Files (x86)/Windows Kits/10/bin"
-          stdir=$(ls -d "$sdkbin"/10.*/"$arch" 2>/dev/null | sort -V | tail -1 || true)
-          if [ -n "${stdir:-}" ] && [ -f "$stdir/signtool.exe" ]; then
-            cygpath -w "$stdir" >> "$GITHUB_PATH"
-          else
-            echo "::warning::signtool.exe not found under $sdkbin/10.*/$arch — signing will fail."
-          fi
-          # Resolve an absolute path to a PowerShell. We don't rely on PATH:
-          # `powershell` (5.1) is on the x86_64 runner's PATH but the
-          # windows-11-arm runner may lack it entirely and ship only pwsh 7
-          # (whose path contains a space). The signCommand below uses the
-          # {cmd,args} object form, so an absolute path — space or not —
-          # is invoked directly without PATH lookup or whitespace splitting.
-          PS_EXE=""
-          for cand in \
-            "/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe" \
-            "/c/Program Files/PowerShell/7/pwsh.exe" \
-            "$(command -v pwsh 2>/dev/null || true)" \
-            "$(command -v powershell 2>/dev/null || true)"; do
-            if [ -n "$cand" ] && [ -f "$cand" ]; then PS_EXE="$cand"; break; fi
-          done
-          if [ -z "$PS_EXE" ]; then
-            echo "::error::no PowerShell (powershell.exe / pwsh.exe) found on the runner"
-            exit 1
-          fi
-          echo "signing via: $(cygpath -w "$PS_EXE")"
-          cargo install artifact-signing-cli --locked
-          # Retry wrapper with verbose logging. tauri-bundler signs many PE
-          # files per MSI/NSIS bundle in rapid succession and Azure Trusted
-          # Signing intermittently throttles one request, so retry with
-          # backoff. Everything is appended to $RUNNER_TEMP/artifact-sign.log
-          # and printed by the "Show signing log" step, because tauri captures
-          # the signCommand output and only re-emits it on success — so an
-          # internal failure would otherwise be invisible. Resource coords and
-          # SP creds are read from the bundle step's env at run time. Quoted
-          # heredoc (<<'PS_EOF') → the script is written verbatim, no shell
-          # expansion, so no \$ escaping.
-          cat > src-tauri/sign.ps1 <<'PS_EOF'
-          param([Parameter(Mandatory=$true)][string]$File)
-          $ErrorActionPreference = 'Continue'
-          $log = Join-Path $env:RUNNER_TEMP 'artifact-sign.log'
-          function Log($m) { $l = "[sign] $m"; Write-Host $l; Add-Content -LiteralPath $log -Value $l }
-          Log "=== signing: $File ==="
-          Log "powershell $($PSVersionTable.PSVersion) ($($PSVersionTable.PSEdition))"
-          Log ("artifact-signing-cli -> " + (Get-Command artifact-signing-cli -ErrorAction SilentlyContinue).Source)
-          Log ("signtool -> " + (Get-Command signtool -ErrorAction SilentlyContinue).Source)
-          Log "creds present: tenant=$([bool]$env:AZURE_TENANT_ID) client=$([bool]$env:AZURE_CLIENT_ID) secret=$([bool]$env:AZURE_CLIENT_SECRET)"
-          Log "endpoint=$env:TS_ENDPOINT account=$env:TS_ACCOUNT profile=$env:TS_PROFILE"
-          Log "dotnet: ROOT_X64=$env:DOTNET_ROOT_X64 ROOT=$env:DOTNET_ROOT"
-          for ($i = 1; $i -le 5; $i++) {
-            Log "attempt $i ..."
-            $out = & artifact-signing-cli -e $env:TS_ENDPOINT -a $env:TS_ACCOUNT -c $env:TS_PROFILE $File 2>&1
-            $rc = $LASTEXITCODE
-            foreach ($line in $out) { Log $line }
-            if ($rc -eq 0) { Log "attempt $i succeeded"; exit 0 }
-            Log "attempt $i failed (exit $rc); retrying in $($i * 5)s..."
-            Start-Sleep -Seconds ($i * 5)
-          }
-          Log "signing FAILED after 5 attempts: $File"
-          exit 1
-          PS_EOF
-          # Build the overlay config with jq (handles JSON backslash-escaping
-          # of the Windows paths) using signCommand's {cmd,args} OBJECT form:
-          # no whitespace splitting, no PATH lookup, no relative-path rewrite.
-          # %1 in args is still substituted by tauri with each file to sign.
-          ps_win="$(cygpath -w "$PS_EXE")"
-          script_win="$(cygpath -w "$PWD/src-tauri/sign.ps1")"
-          jq -n --arg cmd "$ps_win" --arg script "$script_win" \
-            '{bundle:{windows:{signCommand:{cmd:$cmd,args:["-NoProfile","-ExecutionPolicy","Bypass","-File",$script,"%1"]}}}}' \
-            > src-tauri/tauri.signing.conf.json
-          echo "SIGN_CONFIG_ARG=--config src-tauri/tauri.signing.conf.json" >> "$GITHUB_ENV"
+        run: bash scripts/configure-windows-signing.sh
 
       - name: Build & upload Tauri bundle
         uses: tauri-apps/tauri-action@v0
@@ -454,22 +370,6 @@ jobs:
           # Signing" step (Windows + secret present); otherwise it's unset and
           # renders empty, leaving the build unchanged.
           args: ${{ matrix.platform.args }} ${{ env.SIGN_CONFIG_ARG }}
-
-      # sign.ps1 logs every signing attempt (and the signer's own output) to
-      # this file. tauri only re-emits the signCommand output on success, so on
-      # failure this is the only place the real error shows. Runs even when the
-      # bundle step failed.
-      - name: Show signing log (Windows)
-        if: ${{ always() && matrix.platform.family == 'windows' }}
-        shell: bash
-        run: |
-          f="$RUNNER_TEMP/artifact-sign.log"
-          if [ -f "$f" ]; then
-            echo "===== artifact-sign.log ====="
-            cat "$f"
-          else
-            echo "no signing log at $f (signCommand may not have run)"
-          fi
 
       # linuxdeploy-plugin-gtk bundles the host's libwayland-* into the
       # AppImage. libwayland is tied to the running compositor, so on a
