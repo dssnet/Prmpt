@@ -231,8 +231,14 @@ async function handleDragOut(
 
 type EditableInput = HTMLInputElement | HTMLTextAreaElement;
 
-function focusedEditable(): EditableInput | null {
-  const el = document.activeElement;
+// Resolve an editable text field from a candidate element. Pass an event's
+// `target` to test where a keystroke *originated* rather than the live
+// `document.activeElement`: an input's own Enter handler may tear itself down
+// (navigate / close) before the event bubbles to the window listener, leaving
+// `activeElement` on <body> — so a target-blind check would wrongly forward the
+// Enter to the PTY. Defaults to `activeElement` when no candidate is given.
+function focusedEditable(candidate?: EventTarget | null): EditableInput | null {
+  const el = (candidate as Element | null) ?? document.activeElement;
   if (el instanceof HTMLTextAreaElement) return el;
   if (el instanceof HTMLInputElement) {
     // Bail on inputs that don't carry editable text (checkbox/radio/buttons).
@@ -424,7 +430,7 @@ function onKeyDown(e: KeyboardEvent) {
   // When focus is on a form input, don't hijack standard editing shortcuts
   // (a/c/v/x) for the terminal — let the field handle them natively (or
   // let the Edit menu accelerators route through the menu handlers).
-  const editable = focusedEditable() != null;
+  const editable = focusedEditable(e.target) != null;
   const key = canonicalKey(e);
   const primary = isPrimaryMod(e);
   // Windows Terminal convention: bare Ctrl+C copies when there's a
@@ -472,7 +478,7 @@ function onKeyDown(e: KeyboardEvent) {
 
 function onPaste(e: ClipboardEvent) {
   // Let focused text inputs receive the paste natively (SFTP name fields, etc.).
-  if (focusedEditable() != null) return;
+  if (focusedEditable(e.target) != null) return;
   const text = e.clipboardData?.getData("text");
   if (!text) return;
   const target = inputTargetTabId();
