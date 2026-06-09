@@ -61,6 +61,21 @@ pub fn new_sftp_slots() -> SftpSlots {
     Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new()))
 }
 
+/// Pending first-connect host-key prompts, keyed by tab id. `check_server_key`
+/// parks a oneshot sender here while the user looks at the fingerprint; the
+/// `ssh_confirm_host_key` command resolves it (managed as Tauri state).
+pub type HostKeyPrompts =
+    Arc<parking_lot::Mutex<std::collections::HashMap<u64, tokio::sync::oneshot::Sender<bool>>>>;
+
+pub fn new_host_key_prompts() -> HostKeyPrompts {
+    Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// How long the first-connect prompt waits for the user before treating the
+/// key as rejected. Kept at sshd's default LoginGraceTime — the server drops
+/// the half-finished handshake after that anyway.
+const HOST_KEY_PROMPT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
 /// Chunk size for streamed SFTP transfers.
 const SFTP_CHUNK: usize = 64 * 1024;
 /// Emit a progress event at most this often (bytes) to avoid flooding the
@@ -216,8 +231,36 @@ impl Handler for ClientHandler {
 
         match &self.stored_fp {
             None => {
-                self.state.lock().captured_fp = Some((fp, alg));
-                Ok(true)
+                // TOFU first connect: don't trust silently — show the
+                // fingerprint and block the handshake on the user's verdict.
+                // Rejecting (or timing out) makes russh abort the connection
+                // before any credentials are sent.
+                use tauri::Manager;
+                let prompts = self.app.state::<crate::ssh::HostKeyPrompts>();
+                let (tx, rx) = tokio::sync::oneshot::channel();
+                prompts.lock().insert(self.tab_id, tx);
+                let _ = self.app.emit_to(
+                    EventTarget::webview_window(&self.owner_window),
+                    "ssh:host_key_first_connect",
+                    SshHostKeyFirstConnect {
+                        tab_id: self.tab_id,
+                        host_id: self.host_id,
+                        fingerprint: fp.clone(),
+                        algorithm: alg.clone(),
+                    },
+                );
+                let accepted = matches!(
+                    tokio::time::timeout(HOST_KEY_PROMPT_TIMEOUT, rx).await,
+                    Ok(Ok(true))
+                );
+                prompts.lock().remove(&self.tab_id);
+                if accepted {
+                    self.state.lock().captured_fp = Some((fp, alg));
+                    Ok(true)
+                } else {
+                    self.state.lock().host_key_rejected = true;
+                    Ok(false)
+                }
             }
             Some(stored) if stored == &fp => Ok(true),
             Some(stored) => {
@@ -533,21 +576,11 @@ async fn run_session(
         ));
     }
 
-    // TOFU: emit the captured fingerprint so the frontend can persist it,
-    // and remember it locally so a key change is still detected if this
-    // session later reconnects.
-    if let Some((fp, alg)) = state.lock().captured_fp.take() {
-        *stored_fp = Some(fp.clone());
-        let _ = app.emit_to(
-            EventTarget::webview_window(owner_window),
-            "ssh:host_key_first_connect",
-            SshHostKeyFirstConnect {
-                tab_id,
-                host_id,
-                fingerprint: fp,
-                algorithm: alg,
-            },
-        );
+    // TOFU: the user already confirmed the fingerprint in check_server_key
+    // (the frontend persists it from the prompt); remember it locally so a
+    // key change is still detected if this session later reconnects.
+    if let Some((fp, _alg)) = state.lock().captured_fp.take() {
+        *stored_fp = Some(fp);
     }
 
     let mut channel = session

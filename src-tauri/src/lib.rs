@@ -197,6 +197,7 @@ pub fn run() {
         .manage(DbUrl(db_url))
         .manage(secret_store::SecretStore::new())
         .manage(ssh::new_sftp_slots())
+        .manage(ssh::new_host_key_prompts())
         .invoke_handler(tauri::generate_handler![
             commands::spawn_tab,
             commands::close_tab,
@@ -220,6 +221,7 @@ pub fn run() {
             commands::get_stronghold_unlock,
             commands::get_db_url,
             commands::connect_ssh_host,
+            commands::ssh_confirm_host_key,
             commands::inspect_ssh_key,
             commands::sftp_list_dir,
             commands::sftp_realpath,

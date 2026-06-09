@@ -556,6 +556,22 @@ pub fn connect_ssh_host(
     Ok(id)
 }
 
+/// Resolve a pending first-connect host-key prompt. The SSH handshake for
+/// `tab_id` is parked in `check_server_key` until this delivers the user's
+/// verdict; rejecting (or never answering) aborts the connection before any
+/// credentials are sent.
+#[tauri::command]
+pub fn ssh_confirm_host_key(
+    prompts: State<'_, ssh::HostKeyPrompts>,
+    tab_id: u64,
+    accept: bool,
+) -> AppResult<()> {
+    if let Some(tx) = prompts.lock().remove(&tab_id) {
+        let _ = tx.send(accept);
+    }
+    Ok(())
+}
+
 // ---------- SFTP file browser ----------
 //
 // Each command routes a request to the tab's SSH session task (which owns the

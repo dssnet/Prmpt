@@ -3,7 +3,6 @@ import { readText as readClipboardText } from "@tauri-apps/plugin-clipboard-mana
 import type { UnlistenFn } from "@tauri-apps/api/event";
 import { onMounted, onBeforeUnmount, ref } from "vue";
 
-import { recordHostFingerprint } from "./db";
 import { encodeKey } from "./input";
 import {
   attachTab,
@@ -30,6 +29,7 @@ import {
   writeInput,
   type Config,
   type SshConnectError,
+  type SshHostKeyFirstConnect,
   type SshHostKeyMismatch,
 } from "./ipc";
 import {
@@ -62,6 +62,7 @@ import {
 import { toggleLocalBrowser } from "./state/localBrowser";
 import FullDiskAccessModal from "./components/FullDiskAccessModal.vue";
 import HomeView from "./components/HomeView.vue";
+import HostKeyFirstConnectModal from "./components/HostKeyFirstConnectModal.vue";
 import HostKeyMismatchModal from "./components/HostKeyMismatchModal.vue";
 import PassphrasePromptModal from "./components/PassphrasePromptModal.vue";
 import SshConnectErrorModal from "./components/SshConnectErrorModal.vue";
@@ -77,6 +78,7 @@ const props = defineProps<{ config: Config }>();
 
 const { tabs, active } = useTabs();
 const hostKeyModal = ref<SshHostKeyMismatch | null>(null);
+const firstConnectModal = ref<SshHostKeyFirstConnect | null>(null);
 const connectErrorModal = ref<SshConnectError | null>(null);
 const fdaModal = ref(false);
 
@@ -568,13 +570,8 @@ onMounted(async () => {
     }
   }));
   unlisteners.push(await onSshHostKeyMismatch((p) => (hostKeyModal.value = p)));
-  unlisteners.push(await onSshHostKeyFirstConnect(async (p) => {
-    try {
-      await recordHostFingerprint(p.host_id, p.fingerprint, p.algorithm);
-    } catch (err) {
-      console.error("recordHostFingerprint failed:", err);
-    }
-  }));
+  // The SSH handshake is parked in the backend until the modal answers.
+  unlisteners.push(await onSshHostKeyFirstConnect((p) => (firstConnectModal.value = p)));
   unlisteners.push(await onSshPortForwardError((p) => {
     console.error(
       `[ssh] port-forward error tab=${p.tab_id} host=${p.host_id}: ${p.message}`,
@@ -657,6 +654,11 @@ onBeforeUnmount(() => {
     v-if="hostKeyModal"
     :payload="hostKeyModal"
     @close="hostKeyModal = null"
+  />
+  <HostKeyFirstConnectModal
+    v-if="firstConnectModal"
+    :payload="firstConnectModal"
+    @close="firstConnectModal = null"
   />
   <FullDiskAccessModal v-if="fdaModal" @close="dismissFda" />
   <PassphrasePromptModal

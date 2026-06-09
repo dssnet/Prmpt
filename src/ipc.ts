@@ -417,6 +417,13 @@ export function onSshHostKeyFirstConnect(
   return listenScoped<SshHostKeyFirstConnect>("ssh:host_key_first_connect", handler);
 }
 
+/** Resolve a pending first-connect host-key prompt. The SSH handshake is
+ *  parked until this delivers the verdict; rejecting aborts the connection
+ *  before any credentials are sent. */
+export async function sshConfirmHostKey(tabId: number, accept: boolean): Promise<void> {
+  await invoke("ssh_confirm_host_key", { tabId, accept });
+}
+
 export function onSshPortForwardError(
   handler: (payload: SshPortForwardError) => void,
 ): Promise<UnlistenFn> {
