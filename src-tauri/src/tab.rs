@@ -437,7 +437,7 @@ impl TabRegistry {
         thread::Builder::new()
             .name(format!("tab-{id}-main"))
             .spawn(move || {
-                if let Err(e) = run_tab_loop(
+                let status = match run_tab_loop(
                     id,
                     app_for_tab.clone(),
                     owner_for_thread,
@@ -449,26 +449,24 @@ impl TabRegistry {
                     scrollback_lines,
                     config,
                 ) {
-                    eprintln!("[tab {id}] crashed: {e}");
-                }
+                    Ok(status) => status,
+                    Err(e) => {
+                        eprintln!("[tab {id}] crashed: {e}");
+                        -1
+                    }
+                };
                 match registry_for_tab.window_of(id) {
                     Some(label) => {
                         let _ = app_for_tab.emit_to(
                             EventTarget::webview_window(label),
                             "terminal:exit",
-                            ExitPayload {
-                                tab_id: id,
-                                status: 0,
-                            },
+                            ExitPayload { tab_id: id, status },
                         );
                     }
                     None => {
                         let _ = app_for_tab.emit(
                             "terminal:exit",
-                            ExitPayload {
-                                tab_id: id,
-                                status: 0,
-                            },
+                            ExitPayload { tab_id: id, status },
                         );
                     }
                 }
@@ -624,7 +622,7 @@ fn run_tab_loop(
     rows: u16,
     scrollback_lines: usize,
     config: SharedConfig,
-) -> AppResult<()> {
+) -> AppResult<i32> {
     // Build a unified writer + a small backend handle for resize/shutdown.
     enum Backend {
         #[cfg(not(any(target_os = "ios", target_os = "android")))]
@@ -809,12 +807,10 @@ fn run_tab_loop(
                     let _ = reply.send(text);
                 }
                 Ok(TabCmd::Shutdown) | Err(_) => {
-                    match &mut backend {
-                        #[cfg(not(any(target_os = "ios", target_os = "android")))]
-                        Backend::Pty { child, .. } => { let _ = child.kill(); }
-                        Backend::Ssh { out_tx } => {
-                            let _ = out_tx.blocking_send(SshIoCmd::Close);
-                        }
+                    // PTY children are killed + reaped after the loop (all exit
+                    // paths share that); only SSH needs an explicit close here.
+                    if let Backend::Ssh { out_tx } = &mut backend {
+                        let _ = out_tx.blocking_send(SshIoCmd::Close);
                     }
                     break;
                 }
@@ -857,7 +853,20 @@ fn run_tab_loop(
             last_emit = Instant::now();
         }
     }
-    Ok(())
+
+    // Reap the child on every exit path. kill() is harmless if it already
+    // exited; without the wait() the process stays a zombie until app exit.
+    // std::process::Child caches the status, so wait() after kill()'s internal
+    // try_wait still yields the real exit code.
+    let status = match &mut backend {
+        #[cfg(not(any(target_os = "ios", target_os = "android")))]
+        Backend::Pty { child, .. } => {
+            let _ = child.kill();
+            child.wait().map(|s| s.exit_code() as i32).unwrap_or(0)
+        }
+        Backend::Ssh { .. } => 0,
+    };
+    Ok(status)
 }
 
 fn rgb_to_u32(c: RgbColor) -> u32 {
