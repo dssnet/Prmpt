@@ -3,7 +3,8 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import type { UnlistenFn } from "@tauri-apps/api/event";
 import {
-  ArrowUp,
+  ArrowLeft,
+  ArrowRight,
   ChevronRight,
   Download,
   File as FileIcon,
@@ -119,6 +120,12 @@ const crumbs = computed(() => {
 
 const atRoot = computed(() => cwd.value === "/" || cwd.value === "");
 
+// ---- back/forward history ----
+const backStack = ref<string[]>([]);
+const forwardStack = ref<string[]>([]);
+const canGoBack = computed(() => backStack.value.length > 0);
+const canGoForward = computed(() => forwardStack.value.length > 0);
+
 function basename(p: string): string {
   const t = p.replace(/\/+$/, "");
   const i = t.lastIndexOf("/");
@@ -192,6 +199,8 @@ async function load(path: string): Promise<void> {
 async function init(): Promise<void> {
   entries.value = [];
   cwd.value = "";
+  backStack.value = [];
+  forwardStack.value = [];
   error.value = null;
   status.value = "connecting";
   try {
@@ -202,11 +211,40 @@ async function init(): Promise<void> {
   }
 }
 
+/** User-initiated navigation: push history, clear forward stack. */
+async function visit(path: string): Promise<void> {
+  const prev = cwd.value;
+  await load(path);
+  if (prev && cwd.value !== prev) {
+    backStack.value.push(prev);
+    forwardStack.value = [];
+  }
+}
+async function goBack(): Promise<void> {
+  const target = backStack.value[backStack.value.length - 1];
+  if (!target) return;
+  const prev = cwd.value;
+  await load(target);
+  if (cwd.value === target) {
+    backStack.value.pop();
+    forwardStack.value.push(prev);
+  }
+}
+async function goForward(): Promise<void> {
+  const target = forwardStack.value[forwardStack.value.length - 1];
+  if (!target) return;
+  const prev = cwd.value;
+  await load(target);
+  if (cwd.value === target) {
+    forwardStack.value.pop();
+    backStack.value.push(prev);
+  }
+}
 function navigate(e: SftpEntry): void {
-  if (e.is_dir) void load(e.path);
+  if (e.is_dir) void visit(e.path);
 }
 function goUp(): void {
-  if (!atRoot.value) void load(parentDir(cwd.value));
+  if (!atRoot.value) void visit(parentDir(cwd.value));
 }
 function refresh(): void {
   if (cwd.value) void load(cwd.value);
@@ -222,7 +260,7 @@ function startEditPath(): void {
 function commitEditPath(): void {
   const p = pathDraft.value.trim();
   editingPath.value = false;
-  if (p && p !== cwd.value) void load(p);
+  if (p && p !== cwd.value) void visit(p);
 }
 
 // ---- new folder ----
@@ -471,8 +509,11 @@ onBeforeUnmount(() => {
          picker, then close -->
     <header class="flex items-center gap-1 px-2 h-8 border-b border-border shrink-0">
       <template v-if="status === 'ready'">
-        <button type="button" class="icon-btn" title="Up" :disabled="atRoot" @click="goUp">
-          <ArrowUp :size="14" />
+        <button type="button" class="icon-btn" title="Back" :disabled="!canGoBack" @click="goBack">
+          <ArrowLeft :size="14" />
+        </button>
+        <button type="button" class="icon-btn" title="Forward" :disabled="!canGoForward" @click="goForward">
+          <ArrowRight :size="14" />
         </button>
         <button type="button" class="icon-btn" title="Refresh" @click="refresh">
           <RefreshCw :size="14" :class="{ 'animate-spin': loading }" />
@@ -557,7 +598,7 @@ onBeforeUnmount(() => {
                 type="button"
                 class="px-1 py-0.5 rounded hover:bg-surface-2 truncate max-w-[140px]"
                 :class="i === crumbs.length - 1 ? 'text-fg font-medium' : 'text-fg-muted'"
-                @click="load(c.path)"
+                @click="visit(c.path)"
               >
                 {{ c.label }}
               </button>
@@ -601,6 +642,15 @@ onBeforeUnmount(() => {
         </p>
 
         <ul class="py-0.5">
+          <li
+            v-if="!atRoot"
+            class="group flex items-center gap-2 px-2.5 py-1 text-xs cursor-default select-none hover:bg-surface-2"
+            @click="goUp"
+            @dblclick="goUp"
+          >
+            <Folder :size="15" class="shrink-0 text-accent" />
+            <span class="flex-1 min-w-0 truncate text-fg">..</span>
+          </li>
           <li
             v-for="e in visibleEntries"
             :key="e.path"

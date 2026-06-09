@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import {
-  ArrowUp,
+  ArrowLeft,
+  ArrowRight,
   ChevronRight,
   Download,
   File as FileIcon,
@@ -78,6 +79,12 @@ const entries = ref<LocalEntry[]>([]);
 const loading = ref(false);
 const error = ref<string | null>(null);
 
+// ---- back/forward history ----
+const backStack = ref<string[]>([]);
+const forwardStack = ref<string[]>([]);
+const canGoBack = computed(() => backStack.value.length > 0);
+const canGoForward = computed(() => forwardStack.value.length > 0);
+
 // Hide dot-prefixed (hidden) entries unless the shared toggle is on.
 const visibleEntries = computed(() =>
   entries.value.filter((e) => showHiddenFiles.value || !e.name.startsWith(".")),
@@ -125,7 +132,7 @@ function startEditPath(): void {
 function commitEditPath(): void {
   const p = pathDraft.value.trim();
   editingPath.value = false;
-  if (p && p !== cwd.value) void load(p);
+  if (p && p !== cwd.value) void visit(p);
 }
 
 // ---- drive / volume picker ----
@@ -140,7 +147,7 @@ async function openDriveMenu(): Promise<void> {
   }
   if (!list.length) return;
   void popupMenu(
-    list.map((d) => ({ text: d.name, action: () => void load(d.path) })),
+    list.map((d) => ({ text: d.name, action: () => void visit(d.path) })),
   );
 }
 
@@ -193,6 +200,8 @@ async function load(path: string): Promise<void> {
 }
 
 async function init(): Promise<void> {
+  backStack.value = [];
+  forwardStack.value = [];
   try {
     await load(await localHomeDir());
   } catch (err) {
@@ -200,11 +209,40 @@ async function init(): Promise<void> {
   }
 }
 
+/** User-initiated navigation: push history, clear forward stack. */
+async function visit(path: string): Promise<void> {
+  const prev = cwd.value;
+  await load(path);
+  if (prev && cwd.value !== prev) {
+    backStack.value.push(prev);
+    forwardStack.value = [];
+  }
+}
+async function goBack(): Promise<void> {
+  const target = backStack.value[backStack.value.length - 1];
+  if (!target) return;
+  const prev = cwd.value;
+  await load(target);
+  if (cwd.value === target) {
+    backStack.value.pop();
+    forwardStack.value.push(prev);
+  }
+}
+async function goForward(): Promise<void> {
+  const target = forwardStack.value[forwardStack.value.length - 1];
+  if (!target) return;
+  const prev = cwd.value;
+  await load(target);
+  if (cwd.value === target) {
+    forwardStack.value.pop();
+    backStack.value.push(prev);
+  }
+}
 function navigate(e: LocalEntry): void {
-  if (e.is_dir) void load(e.path);
+  if (e.is_dir) void visit(e.path);
 }
 function goUp(): void {
-  if (parent.value) void load(parent.value);
+  if (parent.value) void visit(parent.value);
 }
 function refresh(): void {
   if (cwd.value) void load(cwd.value);
@@ -394,8 +432,11 @@ onBeforeUnmount(() => {
   <section class="flex flex-col h-full min-h-0 min-w-0 bg-surface-1 text-fg">
     <!-- header: nav actions, optional label, parent-injected actions, close -->
     <header class="flex items-center gap-1 px-2 h-8 border-b border-border shrink-0">
-      <button type="button" class="icon-btn" title="Up" :disabled="!parent" @click="goUp">
-        <ArrowUp :size="14" />
+      <button type="button" class="icon-btn" title="Back" :disabled="!canGoBack" @click="goBack">
+        <ArrowLeft :size="14" />
+      </button>
+      <button type="button" class="icon-btn" title="Forward" :disabled="!canGoForward" @click="goForward">
+        <ArrowRight :size="14" />
       </button>
       <button type="button" class="icon-btn" title="Refresh" @click="refresh">
         <RefreshCw :size="14" :class="{ 'animate-spin': loading }" />
@@ -463,7 +504,7 @@ onBeforeUnmount(() => {
               type="button"
               class="px-1 py-0.5 rounded hover:bg-surface-2 truncate max-w-[140px]"
               :class="i === crumbs.length - 1 ? 'text-fg font-medium' : 'text-fg-muted'"
-              @click="load(c.path)"
+              @click="visit(c.path)"
             >
               {{ c.label }}
             </button>
@@ -508,6 +549,15 @@ onBeforeUnmount(() => {
       </p>
 
       <ul class="py-0.5">
+        <li
+          v-if="parent"
+          class="group flex items-center gap-2 px-2.5 py-1 text-xs cursor-default select-none hover:bg-surface-2"
+          @click="goUp"
+          @dblclick="goUp"
+        >
+          <Folder :size="15" class="shrink-0 text-accent" />
+          <span class="flex-1 min-w-0 truncate text-fg">..</span>
+        </li>
         <li
           v-for="e in visibleEntries"
           :key="e.path"
