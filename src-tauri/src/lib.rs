@@ -210,6 +210,7 @@ pub fn run() {
             commands::get_config,
             commands::set_theme,
             commands::set_ui_prefs,
+            commands::set_terminal_prefs,
             commands::forget_tab,
             commands::frontend_log,
             commands::show_context_menu,

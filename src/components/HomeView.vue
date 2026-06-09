@@ -8,7 +8,7 @@ import HostEdit from "./HostEdit.vue";
 import HostList from "./HostList.vue";
 import KeyEdit from "./KeyEdit.vue";
 import KeyList from "./KeyList.vue";
-import ThemePresets from "./ThemePresets.vue";
+import Settings from "./Settings.vue";
 
 type Pane = "home" | "settings" | "custom" | "host-edit" | "keys" | "key-edit";
 
@@ -83,7 +83,7 @@ function closeKeyEditor() {
       @done="closeKeyEditor"
       @cancel="closeKeyEditor"
     />
-    <ThemePresets
+    <Settings
       v-show="pane === 'settings'"
       @back="pane = 'home'"
       @open-custom="pane = 'custom'"

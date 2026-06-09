@@ -9,7 +9,7 @@ use crossbeam_channel::unbounded;
 
 use crate::{
     activate_blank_window, configure_new_window,
-    config::{Config, Theme, UiPrefs},
+    config::{Config, TerminalPrefs, Theme, UiPrefs},
     error::{AppError, AppResult},
     localfs,
     protocol::{LocalDrive, LocalListing, SftpEntry, TabInfo, WindowBootstrap},
@@ -190,6 +190,22 @@ pub fn set_theme(config: State<'_, SharedConfig>, theme: Theme) -> AppResult<()>
 pub fn set_ui_prefs(config: State<'_, SharedConfig>, ui: UiPrefs) -> AppResult<()> {
     let mut guard = config.lock();
     guard.ui = ui;
+    guard.save()
+}
+
+/// Save the terminal-core settings. `shell` / `login_shell` /
+/// `scrollback_lines` are read from the live config when a tab spawns, so
+/// they apply to new tabs immediately; the font fields are consumed by the
+/// frontend renderer at startup and need a restart.
+#[tauri::command]
+pub fn set_terminal_prefs(config: State<'_, SharedConfig>, prefs: TerminalPrefs) -> AppResult<()> {
+    let mut guard = config.lock();
+    guard.font_family = prefs.font_family;
+    guard.font_size = prefs.font_size;
+    guard.line_height = prefs.line_height;
+    guard.shell = prefs.shell;
+    guard.login_shell = prefs.login_shell;
+    guard.scrollback_lines = prefs.scrollback_lines;
     guard.save()
 }
 

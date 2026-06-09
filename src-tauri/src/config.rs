@@ -7,14 +7,27 @@ use crate::paths;
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(default)]
 pub struct Config {
+    // f64 (not f32): TOML serialization of f32 values like 1.2 writes the
+    // nearest-f32 noise (1.2000000476837158) into the user-visible file.
     pub font_family: String,
-    pub font_size: f32,
-    pub line_height: f32,
+    pub font_size: f64,
+    pub line_height: f64,
     pub shell: Option<String>,
     pub login_shell: bool,
     pub scrollback_lines: usize,
     pub theme: Theme,
     pub ui: UiPrefs,
+}
+
+/// The terminal-core subset of `Config`, editable from the settings pane.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct TerminalPrefs {
+    pub font_family: String,
+    pub font_size: f64,
+    pub line_height: f64,
+    pub shell: Option<String>,
+    pub login_shell: bool,
+    pub scrollback_lines: usize,
 }
 
 /// UI behavior preferences (settings pane / file-browser menus). Window-layout
@@ -50,7 +63,11 @@ pub struct Theme {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            font_family: "\"Noto Nerd Font Mono\", Menlo, ui-monospace, monospace".into(),
+            // Just the bundled Nerd Font: it's shipped with the app and
+            // preloaded in the webview, so it always resolves. Glyphs it
+            // lacks fall through to the engine's system font fallback; users
+            // can append explicit fallbacks in Settings → Terminal.
+            font_family: "\"Noto Nerd Font Mono\"".into(),
             font_size: 13.0,
             line_height: 1.2,
             shell: None,

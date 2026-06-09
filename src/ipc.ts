@@ -217,6 +217,20 @@ export async function setUiPrefs(ui: UiPrefs): Promise<void> {
   await invoke("set_ui_prefs", { ui });
 }
 
+/** The terminal-core subset of `Config`, editable from the settings pane. */
+export interface TerminalPrefs {
+  font_family: string;
+  font_size: number;
+  line_height: number;
+  shell: string | null;
+  login_shell: boolean;
+  scrollback_lines: number;
+}
+
+export async function setTerminalPrefs(prefs: TerminalPrefs): Promise<void> {
+  await invoke("set_terminal_prefs", { prefs });
+}
+
 export function onRender(handler: (payload: RenderPayload) => void): Promise<UnlistenFn> {
   return listenScoped<RenderPayload>("terminal:render", handler);
 }
