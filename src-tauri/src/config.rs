@@ -40,6 +40,13 @@ pub struct UiPrefs {
     pub toast_notifications: bool,
     /// Show dot-prefixed entries in the file browsers.
     pub show_hidden_files: bool,
+    /// Show the size column in the file browsers.
+    pub show_size: bool,
+    /// Show the changed (modified) date column in the file browsers.
+    pub show_changed_date: bool,
+    /// Show the created date column in the file browsers (local only — the
+    /// SFTP protocol doesn't report creation time).
+    pub show_created_date: bool,
 }
 
 impl Default for UiPrefs {
@@ -47,6 +54,9 @@ impl Default for UiPrefs {
         Self {
             toast_notifications: true,
             show_hidden_files: false,
+            show_size: true,
+            show_changed_date: false,
+            show_created_date: false,
         }
     }
 }

@@ -80,6 +80,9 @@ export interface Config {
 export interface UiPrefs {
   toast_notifications: boolean;
   show_hidden_files: boolean;
+  show_size: boolean;
+  show_changed_date: boolean;
+  show_created_date: boolean;
 }
 
 export const FLAG_BOLD = 1 << 0;
@@ -585,6 +588,8 @@ export interface LocalEntry {
   size: number;
   /** mtime in epoch seconds, when available. */
   mtime: number | null;
+  /** Creation time in epoch seconds; null where the OS/filesystem lacks it. */
+  created: number | null;
 }
 
 /** A local directory listing: the canonical directory, its parent (null at a

@@ -118,24 +118,6 @@ function addSecond(): void {
 
 <template>
   <aside class="flex flex-col min-h-0 self-stretch bg-surface-1 border-l border-border text-fg">
-    <header class="flex items-center gap-1.5 px-2 h-8 border-b border-border shrink-0">
-      <span class="text-[11px] font-semibold uppercase tracking-wide text-fg-subtle flex-1">
-        Files
-      </span>
-      <button
-        v-if="canAddSecond"
-        type="button"
-        class="hdr-btn"
-        title="Open a second column (drag files between them)"
-        @click="addSecond"
-      >
-        <Columns2 :size="14" />
-      </button>
-      <button type="button" class="hdr-btn" title="Hide file browser" @click="emit('close')">
-        <X :size="14" />
-      </button>
-    </header>
-
     <div class="flex-1 min-h-0 flex">
       <LocalBrowser
         v-if="left === 'local'"
@@ -144,7 +126,22 @@ function addSecond(): void {
         :sources="sources"
         source-value="local"
         @update:source="left = decode($event)"
-      />
+      >
+        <template #actions>
+          <button
+            v-if="canAddSecond"
+            type="button"
+            class="hdr-btn"
+            title="Open a second column (drag files between them)"
+            @click="addSecond"
+          >
+            <Columns2 :size="14" />
+          </button>
+          <button type="button" class="hdr-btn" title="Hide file browser" @click="emit('close')">
+            <X :size="14" />
+          </button>
+        </template>
+      </LocalBrowser>
       <SftpBrowser
         v-else
         class="flex-1 min-w-0"
@@ -152,7 +149,22 @@ function addSecond(): void {
         :sources="sources"
         :source-value="encode(left)"
         @update:source="left = decode($event)"
-      />
+      >
+        <template #actions>
+          <button
+            v-if="canAddSecond"
+            type="button"
+            class="hdr-btn"
+            title="Open a second column (drag files between them)"
+            @click="addSecond"
+          >
+            <Columns2 :size="14" />
+          </button>
+          <button type="button" class="hdr-btn" title="Hide file browser" @click="emit('close')">
+            <X :size="14" />
+          </button>
+        </template>
+      </SftpBrowser>
       <template v-if="right !== null">
         <div class="w-px bg-border shrink-0" />
         <LocalBrowser

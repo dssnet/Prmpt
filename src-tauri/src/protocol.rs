@@ -106,6 +106,10 @@ pub struct LocalEntry {
     pub size: u64,
     /// mtime in epoch seconds, when the OS reports it.
     pub mtime: Option<i64>,
+    /// Creation time in epoch seconds. Native on Windows (CreationTime) and
+    /// macOS (birthtime); on Linux it needs statx + a filesystem that stores
+    /// btime (ext4/btrfs/xfs do), otherwise `None`.
+    pub created: Option<i64>,
 }
 
 /// One filesystem root the user can switch to from the browser's drive picker.

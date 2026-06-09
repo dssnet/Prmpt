@@ -38,6 +38,11 @@ pub fn list_dir(path: &str) -> AppResult<LocalListing> {
             .and_then(|m| m.modified().ok())
             .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
             .map(|d| d.as_secs() as i64);
+        let created = target_meta
+            .as_ref()
+            .and_then(|m| m.created().ok())
+            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+            .map(|d| d.as_secs() as i64);
         entries.push(LocalEntry {
             name: dent.file_name().to_string_lossy().into_owned(),
             path: p.to_string_lossy().into_owned(),
@@ -45,6 +50,7 @@ pub fn list_dir(path: &str) -> AppResult<LocalListing> {
             is_symlink,
             size,
             mtime,
+            created,
         });
     }
 

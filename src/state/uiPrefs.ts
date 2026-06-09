@@ -15,6 +15,16 @@ export const toastsEnabled = ref(true);
  *  local and SFTP browsers (toggling in one updates the other). */
 export const showHiddenFiles = ref(false);
 
+/** Show the size column in the file browsers. */
+export const showSize = ref(true);
+
+/** Show the changed (modified) date column in the file browsers. */
+export const showChangedDate = ref(false);
+
+/** Show the created date column in the file browsers (local only — the SFTP
+ *  protocol doesn't report creation time). */
+export const showCreatedDate = ref(false);
+
 /** Seed from the loaded config (called once at startup, before mount). Values
  *  left over in localStorage from when these prefs lived there are adopted
  *  into the config once, then removed. */
@@ -23,6 +33,9 @@ export function initUiPrefs(ui: UiPrefs): void {
   const lsHidden = localStorage.getItem("prmpt.showHiddenFiles");
   toastsEnabled.value = lsToasts !== null ? lsToasts !== "0" : ui.toast_notifications;
   showHiddenFiles.value = lsHidden !== null ? lsHidden === "1" : ui.show_hidden_files;
+  showSize.value = ui.show_size;
+  showChangedDate.value = ui.show_changed_date;
+  showCreatedDate.value = ui.show_created_date;
   if (lsToasts !== null || lsHidden !== null) {
     localStorage.removeItem("prmpt.toastsEnabled");
     localStorage.removeItem("prmpt.showHiddenFiles");
@@ -34,6 +47,9 @@ function persist(): Promise<void> {
   return setUiPrefs({
     toast_notifications: toastsEnabled.value,
     show_hidden_files: showHiddenFiles.value,
+    show_size: showSize.value,
+    show_changed_date: showChangedDate.value,
+    show_created_date: showCreatedDate.value,
   });
 }
 
@@ -44,5 +60,20 @@ export function setToastsEnabled(v: boolean): void {
 
 export function toggleHiddenFiles(): void {
   showHiddenFiles.value = !showHiddenFiles.value;
+  void persist();
+}
+
+export function toggleSize(): void {
+  showSize.value = !showSize.value;
+  void persist();
+}
+
+export function toggleChangedDate(): void {
+  showChangedDate.value = !showChangedDate.value;
+  void persist();
+}
+
+export function toggleCreatedDate(): void {
+  showCreatedDate.value = !showCreatedDate.value;
   void persist();
 }

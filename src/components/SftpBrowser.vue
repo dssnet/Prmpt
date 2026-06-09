@@ -49,7 +49,15 @@ import {
   transfers,
 } from "../state/transfers";
 import { popupMenu } from "../contextMenu";
-import { showHiddenFiles, toggleHiddenFiles } from "../state/uiPrefs";
+import {
+  showChangedDate,
+  showHiddenFiles,
+  showSize,
+  toggleChangedDate,
+  toggleHiddenFiles,
+  toggleSize,
+} from "../state/uiPrefs";
+import { columnWidth, startColumnResize } from "../state/fileColumns";
 import { ConfirmDialog } from "./ui";
 
 const props = withDefaults(
@@ -119,6 +127,15 @@ const crumbs = computed(() => {
 });
 
 const atRoot = computed(() => cwd.value === "/" || cwd.value === "");
+
+// Table columns: top-level refs so the template unwraps the shared widths.
+// (No created column here — the SFTP protocol doesn't report creation time.)
+const sizeW = columnWidth.size;
+const changedW = columnWidth.changed;
+// Cells after the name column (incl. the actions column) — the `..` row spans them.
+const trailingCols = computed(
+  () => (showSize.value ? 1 : 0) + (showChangedDate.value ? 1 : 0) + 1,
+);
 
 // ---- back/forward history ----
 const backStack = ref<string[]>([]);
@@ -386,6 +403,15 @@ function openToolbarMenu(): void {
       text: showHiddenFiles.value ? "Hide hidden files" : "Show hidden files",
       action: toggleHiddenFiles,
     },
+    {
+      text: showSize.value ? "Hide size" : "Show size",
+      action: toggleSize,
+    },
+    // No created-date item: the SFTP protocol doesn't report creation time.
+    {
+      text: showChangedDate.value ? "Hide changed date" : "Show changed date",
+      action: toggleChangedDate,
+    },
   ]);
 }
 function openRowMenu(e: SftpEntry): void {
@@ -541,6 +567,7 @@ onBeforeUnmount(() => {
         </option>
       </select>
       <span v-else class="flex-1" />
+      <slot name="actions" />
       <button
         v-if="canClose"
         type="button"
@@ -641,70 +668,102 @@ onBeforeUnmount(() => {
           Empty directory.
         </p>
 
-        <ul class="py-0.5">
-          <li
-            v-if="!atRoot"
-            class="group flex items-center gap-2 px-2.5 py-1 text-xs cursor-default select-none hover:bg-surface-2"
-            @click="goUp"
-            @dblclick="goUp"
-          >
-            <Folder :size="15" class="shrink-0 text-accent" />
-            <span class="flex-1 min-w-0 truncate text-fg">..</span>
-          </li>
-          <li
-            v-for="e in visibleEntries"
-            :key="e.path"
-            class="group flex items-center gap-2 px-2.5 py-1 text-xs cursor-default select-none hover:bg-surface-2"
-            :class="{
-              'bg-accent/15 ring-1 ring-accent/40':
-                e.is_dir && sftpDropHint && sftpDropHint.kind === 'sftp' && sftpDropHint.tabId === tabId && sftpDropHint.dir === e.path,
-            }"
-            :data-sftp-tab="tabId"
-            :data-sftp-folder="e.is_dir ? e.path : undefined"
-            @mousedown="onRowMouseDown($event, e)"
-            @dblclick="navigate(e)"
-            @contextmenu.prevent.stop="openRowMenu(e)"
-          >
-            <Link2 v-if="e.is_symlink" :size="15" class="shrink-0 text-accent" />
-            <Folder v-else-if="e.is_dir" :size="15" class="shrink-0 text-accent" />
-            <FileIcon v-else :size="15" class="shrink-0 text-fg-subtle" />
+        <table class="w-full table-fixed border-separate border-spacing-0 text-xs">
+          <colgroup>
+            <col />
+            <col v-if="showSize" :style="{ width: `${sizeW}px` }" />
+            <col v-if="showChangedDate" :style="{ width: `${changedW}px` }" />
+            <col style="width: 28px" />
+          </colgroup>
+          <thead>
+            <tr>
+              <th class="th-cell text-left pl-2.5 pr-1">Name</th>
+              <th v-if="showSize" class="th-cell relative text-right pr-2">
+                <span class="col-grip" @mousedown="startColumnResize('size', $event)" />
+                Size
+              </th>
+              <th v-if="showChangedDate" class="th-cell relative text-right pr-2">
+                <span class="col-grip" @mousedown="startColumnResize('changed', $event)" />
+                Changed
+              </th>
+              <th class="th-cell" />
+            </tr>
+          </thead>
+          <tbody>
+            <tr
+              v-if="!atRoot"
+              class="group cursor-default select-none hover:bg-surface-2"
+              @click="goUp"
+              @dblclick="goUp"
+            >
+              <td class="pl-2.5 pr-1 py-1">
+                <div class="flex items-center gap-2 min-w-0">
+                  <Folder :size="15" class="shrink-0 text-accent" />
+                  <span class="flex-1 min-w-0 truncate text-fg">..</span>
+                </div>
+              </td>
+              <td :colspan="trailingCols" />
+            </tr>
+            <tr
+              v-for="e in visibleEntries"
+              :key="e.path"
+              class="group cursor-default select-none hover:bg-surface-2"
+              :class="{
+                'bg-accent/15 ring-1 ring-accent/40':
+                  e.is_dir && sftpDropHint && sftpDropHint.kind === 'sftp' && sftpDropHint.tabId === tabId && sftpDropHint.dir === e.path,
+              }"
+              :data-sftp-tab="tabId"
+              :data-sftp-folder="e.is_dir ? e.path : undefined"
+              @mousedown="onRowMouseDown($event, e)"
+              @dblclick="navigate(e)"
+              @contextmenu.prevent.stop="openRowMenu(e)"
+            >
+              <td class="pl-2.5 pr-1 py-1">
+                <div class="flex items-center gap-2 min-w-0">
+                  <Link2 v-if="e.is_symlink" :size="15" class="shrink-0 text-accent" />
+                  <Folder v-else-if="e.is_dir" :size="15" class="shrink-0 text-accent" />
+                  <FileIcon v-else :size="15" class="shrink-0 text-fg-subtle" />
 
-            <template v-if="renamingPath === e.path">
-              <input
-                v-model="renameValue"
-                v-focus
-                :class="EDIT_INPUT_CLASS"
-                @keydown.enter="commitRename(e)"
-                @keydown.esc="renamingPath = null"
-                @blur="commitRename(e)"
-              />
-            </template>
-            <template v-else>
-              <button
-                type="button"
-                class="flex-1 min-w-0 truncate text-left"
-                :class="e.is_dir ? 'text-fg' : 'text-fg-muted'"
-                @click="navigate(e)"
-              >
-                {{ e.name }}
-              </button>
-              <span class="shrink-0 w-16 text-right text-fg-subtle tabular-nums">
+                  <input
+                    v-if="renamingPath === e.path"
+                    v-model="renameValue"
+                    v-focus
+                    :class="EDIT_INPUT_CLASS"
+                    @keydown.enter="commitRename(e)"
+                    @keydown.esc="renamingPath = null"
+                    @blur="commitRename(e)"
+                  />
+                  <button
+                    v-else
+                    type="button"
+                    class="flex-1 min-w-0 truncate text-left"
+                    :class="e.is_dir ? 'text-fg' : 'text-fg-muted'"
+                    @click="navigate(e)"
+                  >
+                    {{ e.name }}
+                  </button>
+                </div>
+              </td>
+              <td v-if="showSize" class="pr-2 py-1 text-right text-fg-subtle tabular-nums truncate">
                 {{ e.is_dir ? "" : fmtSize(e.size) }}
-              </span>
-              <span class="shrink-0 w-20 text-right text-fg-subtle hidden 2xl:inline">
+              </td>
+              <td v-if="showChangedDate" class="pr-2 py-1 text-right text-fg-subtle truncate">
                 {{ fmtDate(e.mtime) }}
-              </span>
-              <span
-                data-sftp-action
-                class="shrink-0 opacity-0 group-hover:opacity-100"
-              >
-                <button type="button" class="icon-btn" title="Actions" @click.stop="openRowMenu(e)">
-                  <MoreHorizontal :size="13" />
-                </button>
-              </span>
-            </template>
-          </li>
-        </ul>
+              </td>
+              <td class="py-0.5">
+                <span
+                  v-if="renamingPath !== e.path"
+                  data-sftp-action
+                  class="flex justify-end opacity-0 group-hover:opacity-100"
+                >
+                  <button type="button" class="icon-btn" title="Actions" @click.stop="openRowMenu(e)">
+                    <MoreHorizontal :size="13" />
+                  </button>
+                </span>
+              </td>
+            </tr>
+          </tbody>
+        </table>
       </div>
 
       <!-- transfers -->
@@ -788,5 +847,45 @@ onBeforeUnmount(() => {
 .icon-btn:disabled {
   opacity: 0.35;
   cursor: default;
+}
+.th-cell {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--surface-1, #181825);
+  border-bottom: 1px solid var(--border, #313244);
+  padding-top: 3px;
+  padding-bottom: 3px;
+  font-size: 10px;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--fg-subtle, #9399b2);
+  user-select: none;
+  white-space: nowrap;
+}
+/* Drag grip on a column's left edge (the name column absorbs the change). */
+.col-grip {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -3px;
+  width: 7px;
+  cursor: col-resize;
+  z-index: 2;
+}
+.col-grip::after {
+  content: "";
+  position: absolute;
+  left: 3px;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: var(--border, #313244);
+}
+.col-grip:hover::after {
+  left: 2px;
+  width: 3px;
+  background: var(--accent, #89b4fa);
 }
 </style>
