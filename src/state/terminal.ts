@@ -146,6 +146,7 @@ export function initTerminalSession(args: {
 }
 
 export function teardownTerminalSession(): void {
+  renderer?.dispose();
   renderer = null;
   canvasEl = null;
   hostEl = null;

@@ -551,5 +551,8 @@ export class WebGLRenderer implements Renderer {
     gl.deleteTexture(this.atlasTex);
     gl.deleteVertexArray(this.cellVAO);
     gl.deleteVertexArray(this.cursorVAO);
+    // Contexts are a scarce browser resource (~16/page); release ours now
+    // instead of waiting for the detached canvas to be garbage-collected.
+    gl.getExtension("WEBGL_lose_context")?.loseContext();
   }
 }
