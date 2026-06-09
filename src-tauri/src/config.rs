@@ -14,6 +14,28 @@ pub struct Config {
     pub login_shell: bool,
     pub scrollback_lines: usize,
     pub theme: Theme,
+    pub ui: UiPrefs,
+}
+
+/// UI behavior preferences (settings pane / file-browser menus). Window-layout
+/// state (panel visibility, widths, ratios) deliberately stays in the
+/// webview's localStorage — it's per-machine ephemera, not configuration.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(default)]
+pub struct UiPrefs {
+    /// Toast popups when a file operation finishes on a background tab.
+    pub toast_notifications: bool,
+    /// Show dot-prefixed entries in the file browsers.
+    pub show_hidden_files: bool,
+}
+
+impl Default for UiPrefs {
+    fn default() -> Self {
+        Self {
+            toast_notifications: true,
+            show_hidden_files: false,
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -35,6 +57,7 @@ impl Default for Config {
             login_shell: true,
             scrollback_lines: 10_000,
             theme: Theme::default(),
+            ui: UiPrefs::default(),
         }
     }
 }

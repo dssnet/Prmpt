@@ -9,15 +9,16 @@ import {
   File as FileIcon,
   Folder,
   Link2,
+  LoaderCircle,
   MoreHorizontal,
   Pencil,
   RefreshCw,
+  Trash2,
   Upload,
   X,
 } from "lucide-vue-next";
 
 import {
-  onSftpTransferProgress,
   sftpDownload,
   sftpListDir,
   sftpMkdir,
@@ -38,21 +39,32 @@ import {
   type SftpDragItem,
   type FileDropTarget,
 } from "../state/sftp";
+import {
+  allocTransferId,
+  dismissTransfer,
+  markTransferError,
+  tidySftpError,
+  trackTransfer,
+  transfers,
+} from "../state/transfers";
 import { popupMenu } from "../contextMenu";
-import { showHiddenFiles, toggleHiddenFiles } from "../state/fileBrowser";
+import { showHiddenFiles, toggleHiddenFiles } from "../state/uiPrefs";
 import { ConfirmDialog } from "./ui";
 
 const props = withDefaults(
   defineProps<{
     tabId: number;
-    connections?: { id: number; label: string }[];
+    /** Picker entries (panel mode): "local" + "sftp:<id>" values, see FilesPanel. */
+    sources?: { value: string; label: string }[];
+    /** The picker entry this column currently shows. */
+    sourceValue?: string;
     canClose?: boolean;
-    /** When set, show this label instead of the connection picker (docked mode). */
+    /** When set, show this label instead of the source picker (docked mode). */
     fixedLabel?: string;
   }>(),
-  { connections: () => [] },
+  { sources: () => [] },
 );
-const emit = defineEmits<{ "update:tabId": [id: number]; close: [] }>();
+const emit = defineEmits<{ "update:source": [value: string]; close: [] }>();
 
 // Focus a freshly-mounted inline editor (rename / new-folder fields).
 const vFocus = {
@@ -84,17 +96,13 @@ const newFolderValue = ref("");
 
 const pendingDelete = ref<SftpEntry | null>(null);
 
-interface Transfer {
-  id: number;
-  name: string;
-  dir: "up" | "down";
-  transferred: number;
-  total: number | null;
-  done: boolean;
-  error: string | null;
-}
-const transfers = ref<Transfer[]>([]);
-let nextTransferId = 1;
+// Transfers live in the global store (they outlive this component when the
+// panel unmounts on a tab switch); this column shows the ones destined for
+// the connection it's on.
+const transferKey = computed(() => `sftp:${props.tabId}`);
+const myTransfers = computed(() =>
+  transfers.value.filter((t) => t.key === transferKey.value),
+);
 
 const unlisteners: UnlistenFn[] = [];
 
@@ -146,18 +154,9 @@ function fmtDate(mtime: number | null): string {
     day: "numeric",
   });
 }
-/** Strip the internal `sftp:` prefix and collapse a `"X: X"` duplicate (russh-sftp
- *  renders `{status_code}: {error_message}`, and servers often echo the same words,
- *  e.g. `Permission denied: Permission denied`) into a single clear phrase. */
-function tidyError(message: string): string {
-  let m = message.replace(/^sftp:\s*/i, "").trim();
-  const dup = m.match(/^(.+?):\s*\1$/);
-  if (dup) m = dup[1];
-  return m;
-}
 function describeError(err: unknown): string {
   const raw = typeof err === "string" ? err : err instanceof Error ? err.message : String(err);
-  return tidyError(raw);
+  return tidySftpError(raw);
 }
 
 /** Map a backend error to a status change. Returns true if it was a
@@ -267,11 +266,18 @@ async function confirmDelete(): Promise<void> {
   const e = pendingDelete.value;
   pendingDelete.value = null;
   if (!e) return;
+  // Directory deletes are recursive and can take a while — track them in the
+  // transfers list (progress arrives as a count of removed entries). File
+  // deletes are instant and stay quiet, but still need a unique id.
+  const id = e.is_dir
+    ? trackTransfer(transferKey.value, props.tabId, e.name, "del")
+    : allocTransferId();
   try {
-    await sftpRemove(props.tabId, e.path, e.is_dir);
+    await sftpRemove(props.tabId, e.path, e.is_dir, id);
     refresh();
   } catch (err) {
-    error.value = describeError(err);
+    if (e.is_dir) markTransferError(id, describeError(err));
+    else error.value = describeError(err);
   }
 }
 
@@ -286,11 +292,7 @@ async function download(e: SftpEntry): Promise<void> {
     dest = await saveDialog({ defaultPath: e.name });
   }
   if (!dest) return;
-  const id = nextTransferId++;
-  transfers.value = [
-    ...transfers.value,
-    { id, name: e.name, dir: "down", transferred: 0, total: e.size || null, done: false, error: null },
-  ];
+  const id = trackTransfer(transferKey.value, props.tabId, e.name, "down", e.size || null);
   try {
     await sftpDownload(props.tabId, e.path, dest, id);
   } catch (err) {
@@ -312,24 +314,11 @@ async function pickAndUpload(directory: boolean): Promise<void> {
   const paths = Array.isArray(picked) ? picked : [picked];
   for (const localPath of paths) {
     const name = basename(localPath.replace(/\\/g, "/"));
-    const id = nextTransferId++;
-    transfers.value = [
-      ...transfers.value,
-      { id, name, dir: "up", transferred: 0, total: null, done: false, error: null },
-    ];
+    const id = trackTransfer(transferKey.value, props.tabId, name, "up");
     sftpUpload(props.tabId, localPath, joinRemote(cwd.value, name), id)
       .then(() => refresh())
       .catch((err) => markTransferError(id, describeError(err)));
   }
-}
-
-function markTransferError(id: number, message: string): void {
-  transfers.value = transfers.value.map((t) =>
-    t.id === id ? { ...t, done: true, error: message } : t,
-  );
-}
-function dismissTransfer(id: number): void {
-  transfers.value = transfers.value.filter((t) => t.id !== id);
 }
 
 // ---- drag & drop: pointer-based ------------------------------------------
@@ -376,7 +365,7 @@ function openRowMenu(e: SftpEntry): void {
 }
 
 async function onDrop(item: SftpDragItem, t: FileDropTarget): Promise<void> {
-  if (t.tabId === item.srcTabId) {
+  if (t.kind === "sftp" && t.tabId === item.srcTabId) {
     // Same connection → move into a folder (ignore drops into the current dir).
     if (t.dir === item.path || t.dir === parentDir(item.path)) return;
     try {
@@ -387,33 +376,27 @@ async function onDrop(item: SftpDragItem, t: FileDropTarget): Promise<void> {
     }
   } else {
     // Another column/browser → hand to the destination column to copy + track.
-    deliverSftpDrop(t.tabId, item, t.dir);
+    deliverSftpDrop(t, item);
   }
 }
 
-// Delivered drop (this column is the destination). A local item is uploaded; an
-// SFTP item from another host is relayed. Folders need a confirm before upload
-// (recursive) — relaying folders cross-host isn't supported.
-const pendingUpload = ref<{ item: SftpDragItem; dstDir: string } | null>(null);
+// Delivered drop (this column is the destination). A local item is uploaded;
+// an SFTP item from another host is relayed. Folders are recursive either way,
+// so they get a confirm dialog first.
+const pendingFolderDrop = ref<{ item: SftpDragItem; dstDir: string } | null>(null);
 
 async function relayInto(d: SftpDragItem, dstDir: string): Promise<void> {
-  if (d.source === "local") {
-    if (d.isDir) {
-      pendingUpload.value = { item: d, dstDir };
-      return;
-    }
-    await uploadLocalInto(d, dstDir);
-    return;
-  }
   if (d.isDir) {
-    error.value = "Copying folders between connections isn't supported yet.";
+    pendingFolderDrop.value = { item: d, dstDir };
     return;
   }
-  const id = nextTransferId++;
-  transfers.value = [
-    ...transfers.value,
-    { id, name: d.name, dir: "down", transferred: 0, total: null, done: false, error: null },
-  ];
+  if (d.source === "local") await uploadLocalInto(d, dstDir);
+  else await relayRemoteInto(d, dstDir);
+}
+
+/** Copy a file/folder from another connection into `dstDir` here. */
+async function relayRemoteInto(d: SftpDragItem, dstDir: string): Promise<void> {
+  const id = trackTransfer(transferKey.value, props.tabId, d.name, "down");
   try {
     await sftpRelay(d.srcTabId, d.path, props.tabId, joinRemote(dstDir, d.name), id);
     refresh();
@@ -425,11 +408,7 @@ async function relayInto(d: SftpDragItem, dstDir: string): Promise<void> {
 /** Upload a local file/folder dropped onto this connection (folders recurse in
  *  the backend `sftp_upload`). */
 async function uploadLocalInto(d: SftpDragItem, dstDir: string): Promise<void> {
-  const id = nextTransferId++;
-  transfers.value = [
-    ...transfers.value,
-    { id, name: d.name, dir: "up", transferred: 0, total: null, done: false, error: null },
-  ];
+  const id = trackTransfer(transferKey.value, props.tabId, d.name, "up");
   try {
     await sftpUpload(props.tabId, d.path, joinRemote(dstDir, d.name), id);
     refresh();
@@ -438,10 +417,12 @@ async function uploadLocalInto(d: SftpDragItem, dstDir: string): Promise<void> {
   }
 }
 
-function confirmUpload(): void {
-  const u = pendingUpload.value;
-  pendingUpload.value = null;
-  if (u) void uploadLocalInto(u.item, u.dstDir);
+function confirmFolderDrop(): void {
+  const u = pendingFolderDrop.value;
+  pendingFolderDrop.value = null;
+  if (!u) return;
+  if (u.item.source === "local") void uploadLocalInto(u.item, u.dstDir);
+  else void relayRemoteInto(u.item, u.dstDir);
 }
 
 // Register as a drop target so another column's release can deliver a copy
@@ -450,8 +431,8 @@ const dropHandler = (item: SftpDragItem, dstDir: string) => void relayInto(item,
 watch(
   () => props.tabId,
   (next, prev) => {
-    if (prev != null) unregisterSftpTarget(prev, dropHandler);
-    registerSftpTarget(next, dropHandler);
+    if (prev != null) unregisterSftpTarget("sftp", prev, dropHandler);
+    registerSftpTarget("sftp", next, dropHandler);
   },
   { immediate: true },
 );
@@ -462,26 +443,6 @@ watch(
 );
 
 onMounted(async () => {
-  unlisteners.push(
-    await onSftpTransferProgress((p) => {
-      if (p.tab_id !== props.tabId) return;
-      transfers.value = transfers.value.map((t) =>
-        t.id === p.transfer_id
-          ? {
-              ...t,
-              transferred: p.transferred,
-              total: p.total ?? t.total,
-              done: p.done,
-              error: p.error ? tidyError(p.error) : t.error,
-            }
-          : t,
-      );
-      if (p.done && !p.error) {
-        const id = p.transfer_id;
-        setTimeout(() => dismissTransfer(id), 2500);
-      }
-    }),
-  );
   unlisteners.push(
     await onSftpAvailability((p) => {
       if (p.tab_id !== props.tabId) return;
@@ -500,7 +461,7 @@ onMounted(async () => {
 onBeforeUnmount(() => {
   for (const fn of unlisteners) fn();
   unlisteners.length = 0;
-  unregisterSftpTarget(props.tabId, dropHandler);
+  unregisterSftpTarget("sftp", props.tabId, dropHandler);
 });
 </script>
 
@@ -528,16 +489,17 @@ onBeforeUnmount(() => {
         {{ fixedLabel }}
       </span>
       <select
-        v-else
-        :value="String(tabId)"
+        v-else-if="sources.length"
+        :value="sourceValue"
         class="flex-1 min-w-0 bg-surface-1 border border-border text-fg rounded-md px-1.5 py-1 text-xs focus:outline-none focus:border-border-strong"
-        title="Connection"
-        @change="emit('update:tabId', Number(($event.target as HTMLSelectElement).value))"
+        title="Location"
+        @change="emit('update:source', ($event.target as HTMLSelectElement).value)"
       >
-        <option v-for="c in connections" :key="c.id" :value="String(c.id)">
-          {{ c.label }}
+        <option v-for="s in sources" :key="s.value" :value="s.value">
+          {{ s.label }}
         </option>
       </select>
+      <span v-else class="flex-1" />
       <button
         v-if="canClose"
         type="button"
@@ -612,7 +574,7 @@ onBeforeUnmount(() => {
         class="flex-1 min-h-0 overflow-y-auto pb-3"
         :class="{
           'ring-1 ring-inset ring-accent/50':
-            sftpDropHint && sftpDropHint.tabId === tabId && sftpDropHint.dir === cwd,
+            sftpDropHint && sftpDropHint.kind === 'sftp' && sftpDropHint.tabId === tabId && sftpDropHint.dir === cwd,
         }"
         data-sftp-list
         :data-sftp-tab="tabId"
@@ -645,7 +607,7 @@ onBeforeUnmount(() => {
             class="group flex items-center gap-2 px-2.5 py-1 text-xs cursor-default select-none hover:bg-surface-2"
             :class="{
               'bg-accent/15 ring-1 ring-accent/40':
-                e.is_dir && sftpDropHint && sftpDropHint.tabId === tabId && sftpDropHint.dir === e.path,
+                e.is_dir && sftpDropHint && sftpDropHint.kind === 'sftp' && sftpDropHint.tabId === tabId && sftpDropHint.dir === e.path,
             }"
             :data-sftp-tab="tabId"
             :data-sftp-folder="e.is_dir ? e.path : undefined"
@@ -696,20 +658,27 @@ onBeforeUnmount(() => {
       </div>
 
       <!-- transfers -->
-      <div v-if="transfers.length" class="border-t border-border px-2.5 py-1.5 shrink-0 flex flex-col gap-1.5 max-h-40 overflow-y-auto">
-        <div v-for="t in transfers" :key="t.id" class="text-xs">
+      <div v-if="myTransfers.length" class="border-t border-border px-2.5 py-1.5 shrink-0 flex flex-col gap-1.5 max-h-40 overflow-y-auto">
+        <div v-for="t in myTransfers" :key="t.id" class="text-xs">
           <div class="flex items-center gap-1.5">
             <Upload v-if="t.dir === 'up'" :size="11" class="text-fg-subtle shrink-0" />
+            <Trash2 v-else-if="t.dir === 'del'" :size="11" class="text-fg-subtle shrink-0" />
             <Download v-else :size="11" class="text-fg-subtle shrink-0" />
             <span class="flex-1 min-w-0 truncate" :class="t.error ? 'text-danger' : 'text-fg-muted'">
               {{ t.name }}
             </span>
+            <LoaderCircle v-if="!t.done" :size="11" class="animate-spin text-fg-subtle shrink-0" />
             <span v-if="t.error" class="text-danger shrink-0" :title="t.error">failed</span>
             <span v-else-if="t.done" class="text-accent shrink-0">done</span>
             <span v-else-if="t.total" class="text-fg-subtle shrink-0 tabular-nums">
               {{ Math.floor((t.transferred / t.total) * 100) }}%
             </span>
-            <span v-else class="text-fg-subtle shrink-0 tabular-nums">{{ fmtSize(t.transferred) }}</span>
+            <!-- Nothing counted yet: the backend is still scanning the tree /
+                 opening the first file, not stalled. -->
+            <span v-else-if="t.transferred === 0" class="text-fg-subtle shrink-0">preparing…</span>
+            <span v-else class="text-fg-subtle shrink-0 tabular-nums">
+              {{ t.dir === "del" ? `${t.transferred} items` : fmtSize(t.transferred) }}
+            </span>
             <button type="button" class="icon-btn" title="Dismiss" @click="dismissTransfer(t.id)">
               <X :size="11" />
             </button>
@@ -739,13 +708,13 @@ onBeforeUnmount(() => {
     />
 
     <ConfirmDialog
-      :open="pendingUpload !== null"
-      title="Upload folder?"
-      :message="`Upload the folder “${pendingUpload?.item.name}” and all its contents to this connection?`"
-      confirm-label="Upload"
+      :open="pendingFolderDrop !== null"
+      :title="pendingFolderDrop?.item.source === 'local' ? 'Upload folder?' : 'Copy folder?'"
+      :message="`${pendingFolderDrop?.item.source === 'local' ? 'Upload' : 'Copy'} the folder “${pendingFolderDrop?.item.name}” and all its contents to this connection?`"
+      :confirm-label="pendingFolderDrop?.item.source === 'local' ? 'Upload' : 'Copy'"
       cancel-label="Cancel"
-      @confirm="confirmUpload"
-      @cancel="pendingUpload = null"
+      @confirm="confirmFolderDrop"
+      @cancel="pendingFolderDrop = null"
     />
   </section>
 </template>

@@ -9,7 +9,7 @@ use crossbeam_channel::unbounded;
 
 use crate::{
     activate_blank_window, configure_new_window,
-    config::{Config, Theme},
+    config::{Config, Theme, UiPrefs},
     error::{AppError, AppResult},
     localfs,
     protocol::{LocalDrive, LocalListing, SftpEntry, TabInfo, WindowBootstrap},
@@ -183,6 +183,13 @@ pub fn get_config(config: State<'_, SharedConfig>) -> Config {
 pub fn set_theme(config: State<'_, SharedConfig>, theme: Theme) -> AppResult<()> {
     let mut guard = config.lock();
     guard.theme = theme;
+    guard.save()
+}
+
+#[tauri::command]
+pub fn set_ui_prefs(config: State<'_, SharedConfig>, ui: UiPrefs) -> AppResult<()> {
+    let mut guard = config.lock();
+    guard.ui = ui;
     guard.save()
 }
 
@@ -651,11 +658,13 @@ pub async fn sftp_remove(
     tab_id: u64,
     path: String,
     is_dir: bool,
+    transfer_id: u64,
 ) -> AppResult<()> {
     let tx = registry.sftp_sender(tab_id)?;
     sftp_call(tx, |reply| SftpReq::Remove {
         path,
         is_dir,
+        transfer_id,
         reply,
     })
     .await
@@ -697,9 +706,9 @@ pub async fn sftp_upload(
     .await
 }
 
-/// Cross-connection copy: stream a remote file from one SSH tab's SFTP session
-/// straight to another's (relayed through this process). Progress lands on the
-/// destination tab via `sftp:transfer_progress`.
+/// Cross-connection copy: stream a remote file or directory tree from one SSH
+/// tab's SFTP session straight to another's (relayed through this process).
+/// Progress lands on the destination tab via `sftp:transfer_progress`.
 #[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub async fn sftp_relay(

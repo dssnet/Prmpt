@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
-import { Asterisk, ChevronDown, Columns2, Globe, X } from "lucide-vue-next";
+import { Asterisk, Bell, ChevronDown, Columns2, Globe, X } from "lucide-vue-next";
 
 import {
   closeTabAndForget,
@@ -10,6 +10,7 @@ import {
   useTabs,
   type TabState,
 } from "../state/tabs";
+import { bellTabs } from "../state/transfers";
 import { resetTabConsumed } from "../state/workspace";
 import {
   clearWorkspaceDragPreview,
@@ -403,6 +404,9 @@ const visibleTabs = computed(() => {
 const activeInOverflow = computed(() =>
   overflowTabs.value.some((t) => t.id === active.value?.id),
 );
+const bellInOverflow = computed(() =>
+  overflowTabs.value.some((t) => bellTabs.value.has(t.id)),
+);
 
 const menuOpen = ref(false);
 const triggerEl = ref<HTMLButtonElement | null>(null);
@@ -491,6 +495,7 @@ watch(overflowTabs, (n) => {
           :class="{ 'is-open': menuOpen }"
         />
         <span class="tabular-nums">{{ overflowTabs.length }}</span>
+        <Bell v-if="bellInOverflow" :size="10" class="flex-none text-accent" />
       </button>
       <Transition name="overflow-panel">
         <div
@@ -524,6 +529,12 @@ watch(overflowTabs, (n) => {
             <span class="flex-1 overflow-hidden text-ellipsis whitespace-nowrap">
               {{ labelFor(t) }}
             </span>
+            <Bell
+              v-if="bellTabs.has(t.id)"
+              :size="10"
+              class="flex-none text-accent"
+              title="A file operation finished on this tab"
+            />
             <span
               class="flex-none w-4 h-4 inline-flex items-center justify-center rounded-full text-fg-subtle opacity-0 group-hover:opacity-100 hover:text-fg"
               @click="closeOverflow(t, $event)"
@@ -566,6 +577,12 @@ watch(overflowTabs, (n) => {
           <span class="flex-1 overflow-hidden text-ellipsis whitespace-nowrap">
             {{ labelFor(t) }}
           </span>
+          <Bell
+            v-if="bellTabs.has(t.id)"
+            :size="11"
+            class="flex-none text-accent"
+            title="A file operation finished on this tab"
+          />
           <span
             class="w-4 h-4 inline-flex items-center justify-center rounded-full text-fg-subtle hover:text-fg transition-colors duration-100"
             @click="onCloseClick(t, $event)"

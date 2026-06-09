@@ -13,8 +13,9 @@ import {
 } from "../ipc";
 import { applyTheme, useTheme } from "../state/theme";
 import { findPresetMatch, PRESETS } from "../state/themes";
+import { setToastsEnabled, toastsEnabled } from "../state/uiPrefs";
 import { runUpdateCheck, useUpdate } from "../state/update";
-import { Button, ConfirmDialog, Input, Modal } from "./ui";
+import { Button, ConfirmDialog, Input, Modal, Switch } from "./ui";
 
 const emit = defineEmits<{ back: []; openCustom: [] }>();
 const { theme } = useTheme();
@@ -228,6 +229,20 @@ function errText(e: unknown): string {
         Current version {{ version }}
       </span>
     </div>
+
+    <h2 class="m-0 mt-2 text-base font-medium tracking-wide text-fg">
+      Notifications
+    </h2>
+    <label class="flex items-center gap-3 cursor-pointer self-start">
+      <Switch
+        :model-value="toastsEnabled"
+        @update:model-value="setToastsEnabled"
+      />
+      <span class="text-xs text-fg-muted">
+        Show toast notifications when a file operation finishes in the
+        background (tab-bar bells and transfer rows are unaffected)
+      </span>
+    </label>
 
     <h2 class="m-0 mt-2 text-base font-medium tracking-wide text-fg">
       Backup &amp; Restore

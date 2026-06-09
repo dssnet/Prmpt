@@ -112,6 +112,19 @@ export function listSshConnections(): {
   return out;
 }
 
+/** The top-level tab hosting `tabId`: itself for standalone tabs, or the
+ *  workspace slot that contains it as a pane. Null if it isn't open. */
+export function owningTabId(tabId: number): number | null {
+  for (const t of tabs.value) {
+    if (t.id === tabId) return t.id;
+    if (t.kind === "workspace") {
+      const ws = getWorkspace(t.id);
+      if (ws && collectLeaves(ws.root).some((l) => l.tabId === tabId)) return t.id;
+    }
+  }
+  return null;
+}
+
 export function isWorkspaceTab(t: TabState | null | undefined): boolean {
   return !!t && t.kind === "workspace";
 }

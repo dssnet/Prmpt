@@ -73,6 +73,13 @@ export interface Config {
   login_shell: boolean;
   scrollback_lines: number;
   theme: ThemeConfig;
+  ui: UiPrefs;
+}
+
+/** UI behavior preferences, persisted in config.toml's `[ui]` section. */
+export interface UiPrefs {
+  toast_notifications: boolean;
+  show_hidden_files: boolean;
 }
 
 export const FLAG_BOLD = 1 << 0;
@@ -204,6 +211,10 @@ export async function openFullDiskAccessSettings(): Promise<void> {
 
 export async function setTheme(theme: ThemeConfig): Promise<void> {
   await invoke("set_theme", { theme });
+}
+
+export async function setUiPrefs(ui: UiPrefs): Promise<void> {
+  await invoke("set_ui_prefs", { ui });
 }
 
 export function onRender(handler: (payload: RenderPayload) => void): Promise<UnlistenFn> {
@@ -474,8 +485,16 @@ export async function sftpRename(tabId: number, from: string, to: string): Promi
   await invoke("sftp_rename", { tabId, from, to });
 }
 
-export async function sftpRemove(tabId: number, path: string, isDir: boolean): Promise<void> {
-  await invoke("sftp_remove", { tabId, path, isDir });
+/** Delete a remote file or directory (recursive). Directory deletes report
+ *  progress via `onSftpTransferProgress` keyed by `transferId`, with
+ *  `transferred` counting removed entries (no byte total). */
+export async function sftpRemove(
+  tabId: number,
+  path: string,
+  isDir: boolean,
+  transferId: number,
+): Promise<void> {
+  await invoke("sftp_remove", { tabId, path, isDir, transferId });
 }
 
 /** Stream a remote file down to a local path. Progress arrives via

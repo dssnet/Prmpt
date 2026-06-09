@@ -82,6 +82,11 @@ const SFTP_CHUNK: usize = 64 * 1024;
 /// webview on large transfers; plus one final emit on completion.
 const SFTP_PROGRESS_STRIDE: u64 = 512 * 1024;
 
+/// Time-based progress floor for multi-entry operations (directory
+/// uploads/downloads/deletes): the byte stride alone can starve the UI when
+/// per-entry round trips dominate (many small files), so also emit on a clock.
+const SFTP_PROGRESS_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
+
 // ---------- inbound config types ----------
 
 /// Everything `connect_ssh_host` needs to open a session. The frontend
@@ -1027,8 +1032,8 @@ async fn pipe_socket_channel(sock: TcpStream, chan: Channel<client::Msg>) {
 /// Long-lived task draining the per-tab SFTP request channel. Reads the
 /// current `SftpSession` from `slot` per request (so it follows reconnects);
 /// rejects everything while the transport is down. Metadata ops run inline
-/// (fast, and naturally serialized); transfers are spawned so a big file
-/// doesn't block browsing.
+/// (fast, and naturally serialized); transfers and directory deletes are
+/// spawned so a big one doesn't block browsing.
 async fn sftp_service(
     mut rx: mpsc::Receiver<SftpReq>,
     slot: SftpSlot,
@@ -1043,7 +1048,9 @@ async fn sftp_service(
             continue;
         };
         match req {
-            SftpReq::Download { .. } | SftpReq::Upload { .. } => {
+            SftpReq::Download { .. }
+            | SftpReq::Upload { .. }
+            | SftpReq::Remove { is_dir: true, .. } => {
                 let app = app.clone();
                 let window = window.clone();
                 tokio::spawn(async move {
@@ -1136,19 +1143,13 @@ async fn run_sftp_meta(sftp: &SftpSession, req: SftpReq) {
         SftpReq::Rename { from, to, reply } => {
             let _ = reply.send(sftp.rename(from, to).await.map_err(sftp_err));
         }
-        SftpReq::Remove {
-            path,
-            is_dir,
-            reply,
-        } => {
-            let r = if is_dir {
-                sftp.remove_dir(path).await
-            } else {
-                sftp.remove_file(path).await
-            };
-            let _ = reply.send(r.map_err(sftp_err));
+        SftpReq::Remove { path, reply, .. } => {
+            // Directory removes are dispatched to a spawned task by
+            // `sftp_service` (long-running, emit progress); only files
+            // arrive here.
+            let _ = reply.send(sftp.remove_file(path).await.map_err(sftp_err));
         }
-        // Transfers are dispatched separately by `sftp_service`.
+        // Transfers (and dir removes) are dispatched separately by `sftp_service`.
         SftpReq::Download { .. } | SftpReq::Upload { .. } => {}
     }
 }
@@ -1173,6 +1174,64 @@ async fn sftp_list(sftp: &SftpSession, dir: &str) -> AppResult<Vec<SftpEntry>> {
             .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
     });
     Ok(out)
+}
+
+/// Recursive directory delete. SFTP's `RMDIR` only succeeds on an empty
+/// directory (a non-empty one fails with the generic SSH_FX_FAILURE), so walk
+/// the tree first: remove files as we go, collect directories, then remove
+/// those children-first. Symlinks are removed as files (never followed), so a
+/// link to a directory outside the tree can't widen the delete.
+///
+/// Progress is emitted as a count of removed entries; `total` stays `None`
+/// (the tree isn't pre-walked just to show a percentage).
+async fn sftp_remove_dir_all(
+    sftp: &SftpSession,
+    app: &AppHandle,
+    window: &str,
+    tab_id: u64,
+    transfer_id: u64,
+    dir: &str,
+) -> AppResult<()> {
+    let result = async {
+        let mut removed = 0u64;
+        let mut last_emit = std::time::Instant::now();
+        // Iterative DFS — async recursion would need boxing.
+        let mut stack = vec![dir.to_string()];
+        let mut dirs = Vec::new();
+        while let Some(d) = stack.pop() {
+            for entry in sftp.read_dir(&d).await.map_err(sftp_err)? {
+                let name = entry.file_name();
+                if name == "." || name == ".." {
+                    continue;
+                }
+                let path = join_remote(&d, &name);
+                let md = entry.metadata();
+                if md.is_dir() && !md.is_symlink() {
+                    stack.push(path);
+                } else {
+                    sftp.remove_file(path).await.map_err(sftp_err)?;
+                    removed += 1;
+                    if last_emit.elapsed() >= SFTP_PROGRESS_INTERVAL {
+                        last_emit = std::time::Instant::now();
+                        emit_progress(app, window, tab_id, transfer_id, removed, None, false, None);
+                    }
+                }
+            }
+            dirs.push(d);
+        }
+        // `dirs` is ordered parents-before-children; remove in reverse.
+        for d in dirs.into_iter().rev() {
+            sftp.remove_dir(d).await.map_err(sftp_err)?;
+            removed += 1;
+            if last_emit.elapsed() >= SFTP_PROGRESS_INTERVAL {
+                last_emit = std::time::Instant::now();
+                emit_progress(app, window, tab_id, transfer_id, removed, None, false, None);
+            }
+        }
+        Ok::<u64, AppError>(removed)
+    }
+    .await;
+    finish_transfer(app, window, tab_id, transfer_id, None, result)
 }
 
 async fn sftp_stat(sftp: &SftpSession, path: &str) -> AppResult<SftpEntry> {
@@ -1229,6 +1288,15 @@ async fn run_sftp_transfer(
             reply,
         } => {
             let r = sftp_upload(&sftp, &app, &window, tab_id, transfer_id, &local, &remote).await;
+            let _ = reply.send(r);
+        }
+        SftpReq::Remove {
+            path,
+            transfer_id,
+            reply,
+            ..
+        } => {
+            let r = sftp_remove_dir_all(&sftp, &app, &window, tab_id, transfer_id, &path).await;
             let _ = reply.send(r);
         }
         _ => {}
@@ -1391,6 +1459,9 @@ async fn sftp_upload_dir(
         Err(e) => return finish_transfer(app, window, tab_id, transfer_id, None, Err(e.into())),
     };
     let total = Some(bytes);
+    // Hand the UI the byte total right away so it can show a percentage even
+    // before the first stride of payload moves.
+    emit_progress(app, window, tab_id, transfer_id, 0, total, false, None);
     let result = async {
         // Create the destination root and every subdirectory (parents first).
         // `create_dir` errors are ignored: a dir that already exists is fine,
@@ -1403,6 +1474,7 @@ async fn sftp_upload_dir(
         let mut buf = vec![0u8; SFTP_CHUNK];
         let mut transferred = 0u64;
         let mut last = 0u64;
+        let mut last_emit = std::time::Instant::now();
         for f in &files {
             let rel = f.strip_prefix(local).unwrap_or(f);
             let rpath = remote_join(remote, rel);
@@ -1423,10 +1495,17 @@ async fn sftp_upload_dir(
                 transferred += n as u64;
                 if transferred - last >= SFTP_PROGRESS_STRIDE {
                     last = transferred;
+                    last_emit = std::time::Instant::now();
                     emit_progress(app, window, tab_id, transfer_id, transferred, total, false, None);
                 }
             }
             rf.shutdown().await?;
+            // Per-entry round trips dominate for trees of small files; keep
+            // the indicator moving even when the byte stride hasn't tripped.
+            if last_emit.elapsed() >= SFTP_PROGRESS_INTERVAL {
+                last_emit = std::time::Instant::now();
+                emit_progress(app, window, tab_id, transfer_id, transferred, total, false, None);
+            }
         }
         Ok::<u64, AppError>(transferred)
     }
@@ -1495,6 +1574,9 @@ async fn sftp_download_dir(
         Err(e) => return finish_transfer(app, window, tab_id, transfer_id, None, Err(e)),
     };
     let total = Some(bytes);
+    // Hand the UI the byte total right away so it can show a percentage even
+    // before the first stride of payload moves.
+    emit_progress(app, window, tab_id, transfer_id, 0, total, false, None);
     let result = async {
         // Create the destination root and every subdirectory (parents first).
         tokio::fs::create_dir_all(local).await?;
@@ -1504,6 +1586,7 @@ async fn sftp_download_dir(
         let mut buf = vec![0u8; SFTP_CHUNK];
         let mut transferred = 0u64;
         let mut last = 0u64;
+        let mut last_emit = std::time::Instant::now();
         for (rel, rpath) in &files {
             let mut rf = sftp.open(rpath).await.map_err(sftp_err)?;
             let mut lf = tokio::fs::File::create(local.join(rel)).await?;
@@ -1516,10 +1599,17 @@ async fn sftp_download_dir(
                 transferred += n as u64;
                 if transferred - last >= SFTP_PROGRESS_STRIDE {
                     last = transferred;
+                    last_emit = std::time::Instant::now();
                     emit_progress(app, window, tab_id, transfer_id, transferred, total, false, None);
                 }
             }
             lf.flush().await?;
+            // Per-entry round trips dominate for trees of small files; keep
+            // the indicator moving even when the byte stride hasn't tripped.
+            if last_emit.elapsed() >= SFTP_PROGRESS_INTERVAL {
+                last_emit = std::time::Instant::now();
+                emit_progress(app, window, tab_id, transfer_id, transferred, total, false, None);
+            }
         }
         Ok::<u64, AppError>(transferred)
     }
@@ -1527,10 +1617,10 @@ async fn sftp_download_dir(
     finish_transfer(app, window, tab_id, transfer_id, total, result)
 }
 
-/// Cross-connection copy: stream a file from one tab's SFTP session straight
-/// into another's, relayed through this process (there's no server-to-server
-/// SFTP). Progress is emitted against the destination tab. Must run on the SSH
-/// runtime (both sessions' channel drivers live there).
+/// Cross-connection copy: stream a file or directory tree from one tab's SFTP
+/// session straight into another's, relayed through this process (there's no
+/// server-to-server SFTP). Progress is emitted against the destination tab.
+/// Must run on the SSH runtime (both sessions' channel drivers live there).
 #[allow(clippy::too_many_arguments)]
 pub async fn relay(
     slots: SftpSlots,
@@ -1563,7 +1653,21 @@ pub async fn relay(
         .clone()
         .ok_or_else(|| AppError::Ssh("destination SFTP not connected".into()))?;
 
-    let total = src.metadata(&src_path).await.ok().and_then(|m| m.size);
+    let md = src.metadata(&src_path).await.ok();
+    if md.as_ref().map(|m| m.is_dir()).unwrap_or(false) {
+        return relay_dir(
+            &src,
+            &dst,
+            &app,
+            &window,
+            dst_tab,
+            transfer_id,
+            &src_path,
+            &dst_path,
+        )
+        .await;
+    }
+    let total = md.and_then(|m| m.size);
     let result = async {
         let mut rf = src.open(&src_path).await.map_err(sftp_err)?;
         let mut wf = dst
@@ -1593,6 +1697,77 @@ pub async fn relay(
     }
     .await;
     finish_transfer(&app, &window, dst_tab, transfer_id, total, result)
+}
+
+/// Recursively relay a directory between two connections: mirror the tree on
+/// the destination (best effort — existing dirs are fine) then stream every
+/// file, emitting a single transfer's progress against the summed byte total.
+/// Symlinks and special files are skipped, same as directory download/upload.
+#[allow(clippy::too_many_arguments)]
+async fn relay_dir(
+    src: &SftpSession,
+    dst: &SftpSession,
+    app: &AppHandle,
+    window: &str,
+    dst_tab: u64,
+    transfer_id: u64,
+    src_path: &str,
+    dst_path: &str,
+) -> AppResult<()> {
+    let (dirs, files, bytes) = match collect_remote_tree(src, src_path).await {
+        Ok(t) => t,
+        Err(e) => return finish_transfer(app, window, dst_tab, transfer_id, None, Err(e)),
+    };
+    let total = Some(bytes);
+    // Hand the UI the byte total right away so it can show a percentage even
+    // before the first stride of payload moves.
+    emit_progress(app, window, dst_tab, transfer_id, 0, total, false, None);
+    let result = async {
+        // Create the destination root and every subdirectory (parents first).
+        // `create_dir` errors are ignored: a dir that already exists is fine,
+        // and a genuine failure will surface when we try to write a file into it.
+        let _ = dst.create_dir(dst_path).await;
+        for rel in &dirs {
+            let _ = dst.create_dir(&remote_join(dst_path, rel)).await;
+        }
+        let mut buf = vec![0u8; SFTP_CHUNK];
+        let mut transferred = 0u64;
+        let mut last = 0u64;
+        let mut last_emit = std::time::Instant::now();
+        for (rel, rpath) in &files {
+            let mut rf = src.open(rpath).await.map_err(sftp_err)?;
+            let mut wf = dst
+                .open_with_flags(
+                    &remote_join(dst_path, rel),
+                    OpenFlags::CREATE | OpenFlags::TRUNCATE | OpenFlags::WRITE,
+                )
+                .await
+                .map_err(sftp_err)?;
+            loop {
+                let n = rf.read(&mut buf).await?;
+                if n == 0 {
+                    break;
+                }
+                wf.write_all(&buf[..n]).await?;
+                transferred += n as u64;
+                if transferred - last >= SFTP_PROGRESS_STRIDE {
+                    last = transferred;
+                    last_emit = std::time::Instant::now();
+                    emit_progress(app, window, dst_tab, transfer_id, transferred, total, false, None);
+                }
+            }
+            wf.shutdown().await?;
+            // Per-entry round trips dominate for trees of small files; keep
+            // the indicator moving even when the byte stride hasn't tripped.
+            if last_emit.elapsed() >= SFTP_PROGRESS_INTERVAL {
+                last_emit = std::time::Instant::now();
+                emit_progress(app, window, dst_tab, transfer_id, transferred, total, false, None);
+            }
+        }
+        Ok::<u64, AppError>(transferred)
+    }
+    .await;
+    finish_transfer(app, window, dst_tab, transfer_id, total, result)
 }
 
 /// Emit the terminal progress event for a transfer and collapse the result

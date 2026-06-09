@@ -1,12 +1,14 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import {
   ArrowUp,
   ChevronRight,
+  Download,
   File as FileIcon,
   Folder,
   HardDrive,
   Link2,
+  LoaderCircle,
   MoreHorizontal,
   Pencil,
   RefreshCw,
@@ -22,25 +24,44 @@ import {
   localRemove,
   localRename,
   localReveal,
+  sftpDownload,
   writeInput,
   type LocalEntry,
 } from "../ipc";
 import { popupMenu } from "../contextMenu";
-import { deliverSftpDrop, startFileDrag, type SftpDragItem } from "../state/sftp";
-import { showHiddenFiles, toggleHiddenFiles } from "../state/fileBrowser";
+import {
+  deliverSftpDrop,
+  registerSftpTarget,
+  sftpDropHint,
+  startFileDrag,
+  unregisterSftpTarget,
+  type FileDropTarget,
+  type SftpDragItem,
+} from "../state/sftp";
+import {
+  dismissTransfer,
+  markTransferError,
+  trackTransfer,
+  transfers,
+} from "../state/transfers";
+import { showHiddenFiles, toggleHiddenFiles } from "../state/uiPrefs";
 import { ConfirmDialog } from "./ui";
 
 const props = withDefaults(
   defineProps<{
     /** Terminal tab to target for `cd` / insert-path (active tab or pane). */
     targetTabId: number;
+    /** Picker entries (panel mode): "local" + "sftp:<id>" values, see FilesPanel. */
+    sources?: { value: string; label: string }[];
+    /** The picker entry this column currently shows. */
+    sourceValue?: string;
     canClose?: boolean;
     /** Shown in the header instead of the generic title (docked mode). */
     fixedLabel?: string;
   }>(),
-  { canClose: false },
+  { canClose: false, sources: () => [] },
 );
-const emit = defineEmits<{ close: [] }>();
+const emit = defineEmits<{ "update:source": [value: string]; close: [] }>();
 
 const IS_WIN =
   typeof navigator !== "undefined" && /Win/i.test(navigator.platform);
@@ -269,7 +290,9 @@ async function confirmDelete(): Promise<void> {
   }
 }
 
-// ---- drag source: drop onto an SFTP browser to upload ----
+// ---- drag & drop ----------------------------------------------------------
+// Drag source: drop onto an SFTP column to upload, or onto a local folder /
+// another local column to move on disk.
 function onRowMouseDown(ev: MouseEvent, e: LocalEntry): void {
   if ((ev.target as HTMLElement).closest("[data-local-action], input")) return;
   const item: SftpDragItem = {
@@ -279,8 +302,54 @@ function onRowMouseDown(ev: MouseEvent, e: LocalEntry): void {
     name: e.name,
     isDir: e.is_dir,
   };
-  startFileDrag(item, ev, (t) => deliverSftpDrop(t.tabId, item, t.dir));
+  startFileDrag(item, ev, (t) => void onDrop(item, t));
 }
+
+async function onDrop(item: SftpDragItem, t: FileDropTarget): Promise<void> {
+  if (t.kind === "local") {
+    // Any local column is this same filesystem → move into the folder (ignore
+    // drops into the file's own current/parent dir).
+    if (t.dir === item.path || t.dir === parentOf(item.path)) return;
+    try {
+      await localRename(item.path, joinLocal(t.dir, item.name));
+      refresh();
+    } catch (err) {
+      error.value = describeError(err);
+    }
+  } else {
+    // SFTP column → hand to that column to upload + track.
+    deliverSftpDrop(t, item);
+  }
+}
+
+// Drop target: an SFTP-sourced item dropped on this column is downloaded from
+// its connection into the destination dir (the source column handles its own
+// same-connection moves, so only cross-browser drops are delivered here).
+// Rows live in the global transfers store under the "local" key, shared by
+// every local column — all of them show the same filesystem.
+const myTransfers = computed(() => transfers.value.filter((t) => t.key === "local"));
+
+async function downloadInto(d: SftpDragItem, dstDir: string): Promise<void> {
+  if (d.source !== "sftp") return;
+  const id = trackTransfer("local", props.targetTabId, d.name, "down");
+  try {
+    await sftpDownload(d.srcTabId, d.path, joinLocal(dstDir, d.name), id);
+    refresh();
+  } catch (err) {
+    markTransferError(id, describeError(err));
+  }
+}
+
+const dropHandler = (item: SftpDragItem, dstDir: string) =>
+  void downloadInto(item, dstDir);
+watch(
+  () => props.targetTabId,
+  (next, prev) => {
+    if (prev != null) unregisterSftpTarget("local", prev, dropHandler);
+    registerSftpTarget("local", next, dropHandler);
+  },
+  { immediate: true },
+);
 
 // ---- native menus ----
 function openToolbarMenu(): void {
@@ -315,6 +384,10 @@ function openRowMenu(e: LocalEntry): void {
 }
 
 onMounted(() => void init());
+
+onBeforeUnmount(() => {
+  unregisterSftpTarget("local", props.targetTabId, dropHandler);
+});
 </script>
 
 <template>
@@ -337,8 +410,18 @@ onMounted(() => void init());
       >
         {{ fixedLabel }}
       </span>
+      <select
+        v-else-if="sources.length"
+        :value="sourceValue"
+        class="flex-1 min-w-0 bg-surface-1 border border-border text-fg rounded-md px-1.5 py-1 text-xs focus:outline-none focus:border-border-strong"
+        title="Location"
+        @change="emit('update:source', ($event.target as HTMLSelectElement).value)"
+      >
+        <option v-for="s in sources" :key="s.value" :value="s.value">
+          {{ s.label }}
+        </option>
+      </select>
       <span v-else class="flex-1" />
-      <slot name="actions" />
       <button
         v-if="canClose"
         type="button"
@@ -392,8 +475,18 @@ onMounted(() => void init());
       </template>
     </div>
 
-    <!-- listing -->
-    <div class="flex-1 min-h-0 overflow-y-auto pb-3">
+    <!-- listing (also a drop zone: SFTP items dropped here are downloaded) -->
+    <div
+      class="flex-1 min-h-0 overflow-y-auto pb-3"
+      :class="{
+        'ring-1 ring-inset ring-accent/50':
+          sftpDropHint && sftpDropHint.kind === 'local' && sftpDropHint.tabId === targetTabId && sftpDropHint.dir === cwd,
+      }"
+      data-sftp-list
+      data-sftp-kind="local"
+      :data-sftp-tab="targetTabId"
+      :data-sftp-cwd="cwd"
+    >
       <div v-if="creatingFolder" class="flex items-center gap-2 px-2.5 py-1.5">
         <Folder :size="15" class="text-accent shrink-0" />
         <input
@@ -419,6 +512,13 @@ onMounted(() => void init());
           v-for="e in visibleEntries"
           :key="e.path"
           class="group flex items-center gap-2 px-2.5 py-1 text-xs cursor-default select-none hover:bg-surface-2"
+          :class="{
+            'bg-accent/15 ring-1 ring-accent/40':
+              e.is_dir && sftpDropHint && sftpDropHint.kind === 'local' && sftpDropHint.tabId === targetTabId && sftpDropHint.dir === e.path,
+          }"
+          data-sftp-kind="local"
+          :data-sftp-tab="targetTabId"
+          :data-sftp-folder="e.is_dir ? e.path : undefined"
           @mousedown="onRowMouseDown($event, e)"
           @dblclick="e.is_dir ? navigate(e) : openInOs(e)"
           @contextmenu.prevent.stop="openRowMenu(e)"
@@ -463,6 +563,37 @@ onMounted(() => void init());
           </template>
         </li>
       </ul>
+    </div>
+
+    <!-- transfers (downloads dropped onto a local column) -->
+    <div v-if="myTransfers.length" class="border-t border-border px-2.5 py-1.5 shrink-0 flex flex-col gap-1.5 max-h-40 overflow-y-auto">
+      <div v-for="t in myTransfers" :key="t.id" class="text-xs">
+        <div class="flex items-center gap-1.5">
+          <Download :size="11" class="text-fg-subtle shrink-0" />
+          <span class="flex-1 min-w-0 truncate" :class="t.error ? 'text-danger' : 'text-fg-muted'">
+            {{ t.name }}
+          </span>
+          <LoaderCircle v-if="!t.done" :size="11" class="animate-spin text-fg-subtle shrink-0" />
+          <span v-if="t.error" class="text-danger shrink-0" :title="t.error">failed</span>
+          <span v-else-if="t.done" class="text-accent shrink-0">done</span>
+          <span v-else-if="t.total" class="text-fg-subtle shrink-0 tabular-nums">
+            {{ Math.floor((t.transferred / t.total) * 100) }}%
+          </span>
+          <!-- Nothing counted yet: the backend is still scanning the tree /
+               opening the first file, not stalled. -->
+          <span v-else-if="t.transferred === 0" class="text-fg-subtle shrink-0">preparing…</span>
+          <span v-else class="text-fg-subtle shrink-0 tabular-nums">{{ fmtSize(t.transferred) }}</span>
+          <button type="button" class="icon-btn" title="Dismiss" @click="dismissTransfer(t.id)">
+            <X :size="11" />
+          </button>
+        </div>
+        <div v-if="t.error" class="text-danger truncate mt-0.5 pl-[19px]" :title="t.error">
+          {{ t.error }}
+        </div>
+        <div v-if="!t.done && t.total" class="h-0.5 mt-1 rounded bg-surface-2 overflow-hidden">
+          <div class="h-full bg-accent" :style="{ width: `${(t.transferred / t.total) * 100}%` }" />
+        </div>
+      </div>
     </div>
 
     <p v-if="error" class="px-2.5 py-1.5 text-xs text-danger border-t border-border shrink-0 truncate" :title="error">

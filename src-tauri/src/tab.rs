@@ -142,6 +142,9 @@ pub enum SftpReq {
     Remove {
         path: String,
         is_dir: bool,
+        /// Directory deletes run like transfers (spawned, long-running) and
+        /// report progress under this id as a count of removed entries.
+        transfer_id: u64,
         reply: tokio::sync::oneshot::Sender<AppResult<()>>,
     },
     Download {

@@ -209,6 +209,7 @@ pub fn run() {
             commands::list_tabs,
             commands::get_config,
             commands::set_theme,
+            commands::set_ui_prefs,
             commands::forget_tab,
             commands::frontend_log,
             commands::show_context_menu,

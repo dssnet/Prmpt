@@ -5,10 +5,9 @@ import { PanelBottom, PanelRight, X } from "lucide-vue-next";
 import { wheelScroll, showContextMenu, type Config } from "../ipc";
 import { isSftpVisible, sftpDragGhost, toggleSftpPanel } from "../state/sftp";
 import { isLocalVisible, toggleLocalBrowser } from "../state/localBrowser";
+import FilesPanel from "./FilesPanel.vue";
 import LocalBrowser from "./LocalBrowser.vue";
-import LocalPanel from "./LocalPanel.vue";
 import SftpBrowser from "./SftpBrowser.vue";
-import SftpPanel from "./SftpPanel.vue";
 import TerminalScrollbar from "./TerminalScrollbar.vue";
 import {
   applyRendererTheme,
@@ -702,8 +701,9 @@ watch(theme, (next) => {
       aria-label="Resize file browser"
       @mousedown="onSftpDividerDown"
     />
-    <SftpPanel
+    <FilesPanel
       :tab-id="sftpTarget.id"
+      kind="ssh"
       class="flex-none"
       :style="{
         width: `${sftpWidth}px`,
@@ -724,8 +724,9 @@ watch(theme, (next) => {
       aria-label="Resize file browser"
       @mousedown="onLocalDividerDown"
     />
-    <LocalPanel
-      :target-tab-id="localTarget"
+    <FilesPanel
+      :tab-id="localTarget"
+      kind="terminal"
       class="flex-none"
       :style="{
         width: `${localWidth}px`,

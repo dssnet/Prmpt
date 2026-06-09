@@ -73,6 +73,7 @@ import { UPDATE_CHECK_INTERVAL_MS } from "./updater";
 import TabBar from "./components/TabBar.vue";
 import TerminalView from "./components/TerminalView.vue";
 import TitleBar from "./components/TitleBar.vue";
+import Toasts from "./components/Toasts.vue";
 
 const props = defineProps<{ config: Config }>();
 
@@ -671,4 +672,5 @@ onBeforeUnmount(() => {
     @close="dismissConnectError"
   />
   <UpdateModal />
+  <Toasts />
 </template>
