@@ -541,7 +541,7 @@ impl TabRegistry {
         }
         reply_rx
             .recv_timeout(Duration::from_secs(5))
-            .map_err(|_| AppError::UnknownTab(id))
+            .map_err(|_| AppError::Other(format!("tab {id} did not answer copy request within 5s")))
     }
 
     /// Clone the SFTP request sender for an SSH tab. Errors when the tab is
