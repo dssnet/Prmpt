@@ -38,6 +38,18 @@ const connections = computed(() => {
     .map((c) => ({ id: c.id, label: c.label }));
 });
 
+// Collapse or repair the dual view when a shown connection goes away
+// (e.g. the user closes one of the SSH tabs).
+watch(connections, (list) => {
+  const has = (id: number | null) => id !== null && list.some((c) => c.id === id);
+  if (!has(rightId.value)) rightId.value = null;
+  if (!has(leftId.value) && rightId.value !== null) {
+    // Left connection died: promote the right column instead of showing a dead pane.
+    leftId.value = rightId.value;
+    rightId.value = null;
+  }
+});
+
 const canAddSecond = computed(
   () => rightId.value === null && connections.value.length >= 2,
 );

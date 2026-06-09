@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from "vue";
+import { computed, ref, watch } from "vue";
 import { Columns2, X } from "lucide-vue-next";
 
 import { listSshConnections } from "../state/tabs";
@@ -21,6 +21,13 @@ const connections = computed(() => {
   return listSshConnections()
     .filter((c) => !c.disableSftp)
     .map((c) => ({ id: c.id, label: c.label }));
+});
+
+// Collapse the SFTP column when its connection goes away.
+watch(connections, (list) => {
+  if (sftpId.value !== null && !list.some((c) => c.id === sftpId.value)) {
+    sftpId.value = null;
+  }
 });
 
 const canAddSftp = computed(() => sftpId.value === null && connections.value.length >= 1);
