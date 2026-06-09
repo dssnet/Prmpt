@@ -312,7 +312,41 @@ fn write_boot_password_file(path: &Path, key: &[u8; 32]) -> AppResult<()> {
         .map_err(|e| AppError::Crypto(format!("write {}: {e}", path.display())))?;
     f.sync_all()
         .map_err(|e| AppError::Crypto(format!("fsync {}: {e}", path.display())))?;
+    #[cfg(windows)]
+    restrict_acl_to_current_user(path);
     Ok(())
+}
+
+/// Unix gets 0o600 at open time; Windows files inherit the parent ACL, which
+/// typically lets other authenticated users read them. Strip inheritance and
+/// grant only the current user. Best-effort: the keychain already failed when
+/// this fallback runs, so a logged warning beats not persisting the key.
+#[cfg(windows)]
+fn restrict_acl_to_current_user(path: &Path) {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let user = match std::env::var("USERNAME") {
+        Ok(u) if !u.is_empty() => u,
+        _ => {
+            eprintln!(
+                "[secure_store] USERNAME unset; leaving default ACL on {}",
+                path.display()
+            );
+            return;
+        }
+    };
+    let result = std::process::Command::new("icacls")
+        .arg(path)
+        .arg("/inheritance:r")
+        .arg("/grant:r")
+        .arg(format!("{user}:F"))
+        .creation_flags(CREATE_NO_WINDOW)
+        .status();
+    match result {
+        Ok(s) if s.success() => {}
+        Ok(s) => eprintln!("[secure_store] icacls on {} exited with {s}", path.display()),
+        Err(e) => eprintln!("[secure_store] icacls on {} failed: {e}", path.display()),
+    }
 }
 
 fn data_dir() -> AppResult<PathBuf> {
