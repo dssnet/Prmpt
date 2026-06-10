@@ -891,17 +891,20 @@ fn rgb_to_u32(c: RgbColor) -> u32 {
 }
 
 /// Extract the text of an inclusive screen-absolute range `[start, end]` from
-/// the full grid (including scrollback), one `\n` per visual row with trailing
-/// whitespace trimmed. `start`/`end` are `(col, screen_row)` and must already
-/// be ordered (start before end in reading order). Reads each cell via
-/// `grid_ref(Point::Screen(..))`, which can address rows above the viewport —
-/// that's what lets copy reach scrollback the render snapshot never shipped.
+/// the full grid (including scrollback). Hard-broken rows are joined with
+/// `\n` (trailing whitespace trimmed); soft-wrapped rows are joined with
+/// nothing, so a logical line that merely wrapped (e.g. `cat`ing an ssh pub
+/// key) copies back out as the original single line. `start`/`end` are
+/// `(col, screen_row)` and must already be ordered (start before end in
+/// reading order). Reads each cell via `grid_ref(Point::Screen(..))`, which
+/// can address rows above the viewport — that's what lets copy reach
+/// scrollback the render snapshot never shipped.
 fn extract_screen_text(terminal: &Terminal, start: (u16, u32), end: (u16, u32), cols: u16) -> String {
     if cols == 0 || end.1 < start.1 {
         return String::new();
     }
     let last_col = cols - 1;
-    let mut lines: Vec<String> = Vec::with_capacity((end.1 - start.1 + 1) as usize);
+    let mut out = String::new();
     let mut buf = [' '; 32];
     for row in start.1..=end.1 {
         let c0 = if row == start.1 { start.0 } else { 0 };
@@ -918,9 +921,14 @@ fn extract_screen_text(terminal: &Terminal, start: (u16, u32), end: (u16, u32), 
                     continue;
                 }
             };
-            // Skip the trailing spacer that follows a wide cell — its glyph
-            // already came from the wide cell itself.
-            if matches!(gr.cell().and_then(|c| c.wide()), Ok(CellWide::SpacerTail)) {
+            // Skip spacer cells around wide glyphs: the tail follows a wide
+            // cell on the same row (its glyph already came from the wide
+            // cell), the head pads the end of a row when a wide glyph had to
+            // wrap to the next one. Neither holds copyable text.
+            if matches!(
+                gr.cell().and_then(|c| c.wide()),
+                Ok(CellWide::SpacerTail | CellWide::SpacerHead)
+            ) {
                 col += 1;
                 continue;
             }
@@ -939,9 +947,25 @@ fn extract_screen_text(terminal: &Terminal, start: (u16, u32), end: (u16, u32), 
             }
             col += 1;
         }
-        lines.push(line.trim_end().to_string());
+        // Soft-wrapped onto the next row: keep the line intact (a wrapped
+        // row is content right up to the last column — trimming could eat
+        // real mid-line spaces) and join without a newline.
+        let wrapped = terminal
+            .grid_ref(Point::Screen(PointCoordinate { x: 0, y: row }))
+            .ok()
+            .and_then(|gr| gr.row().ok())
+            .and_then(|r| r.is_wrapped().ok())
+            .unwrap_or(false);
+        if wrapped && row < end.1 {
+            out.push_str(&line);
+        } else {
+            out.push_str(line.trim_end());
+            if row < end.1 {
+                out.push('\n');
+            }
+        }
     }
-    lines.join("\n")
+    out
 }
 
 fn resolve_style_color(sc: StyleColor, palette: &[RgbColor; 256]) -> Option<RgbColor> {
