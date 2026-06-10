@@ -19,7 +19,13 @@ import SftpBrowser from "./SftpBrowser.vue";
 // unmounts this panel entirely, and the dual-pane layout should still be
 // there when the user comes back.
 
-const props = defineProps<{ tabId: number; kind: "ssh" | "terminal" }>();
+const props = defineProps<{
+  tabId: number;
+  kind: "ssh" | "terminal";
+  /** Full-width mode (SFTP-only tabs): no terminal to reclaim, so no close
+   *  affordance — and no left border, the panel isn't docked to anything. */
+  hideClose?: boolean;
+}>();
 const emit = defineEmits<{ close: []; expand: [] }>();
 
 const cols = panelColumns[props.kind];
@@ -117,7 +123,10 @@ function addSecond(): void {
 </script>
 
 <template>
-  <aside class="flex flex-col min-h-0 self-stretch bg-surface-1 border-l border-border text-fg">
+  <aside
+    class="flex flex-col min-h-0 self-stretch bg-surface-1 text-fg"
+    :class="hideClose ? '' : 'border-l border-border'"
+  >
     <div class="flex-1 min-h-0 flex">
       <LocalBrowser
         v-if="left === 'local'"
@@ -137,7 +146,13 @@ function addSecond(): void {
           >
             <Columns2 :size="14" />
           </button>
-          <button type="button" class="hdr-btn" title="Hide file browser" @click="emit('close')">
+          <button
+            v-if="!hideClose"
+            type="button"
+            class="hdr-btn"
+            title="Hide file browser"
+            @click="emit('close')"
+          >
             <X :size="14" />
           </button>
         </template>
@@ -160,7 +175,13 @@ function addSecond(): void {
           >
             <Columns2 :size="14" />
           </button>
-          <button type="button" class="hdr-btn" title="Hide file browser" @click="emit('close')">
+          <button
+            v-if="!hideClose"
+            type="button"
+            class="hdr-btn"
+            title="Hide file browser"
+            @click="emit('close')"
+          >
             <X :size="14" />
           </button>
         </template>

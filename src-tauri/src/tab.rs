@@ -220,6 +220,10 @@ pub struct TabHandle {
     /// Command handlers clone this to drive the file browser. `None` for
     /// local tabs and for SSH hosts where SFTP is disabled/unavailable.
     pub sftp_tx: Option<tokio::sync::mpsc::Sender<SftpReq>>,
+    /// SSH per-host flags, kept so `TabInfo` (hydrate/tear-off) can restore
+    /// the right tab chrome in whichever window ends up owning the tab.
+    pub disable_sftp: bool,
+    pub disable_ssh: bool,
 }
 
 pub struct TabRegistry {
@@ -263,6 +267,8 @@ impl TabRegistry {
         pty_rx: Receiver<PtyEvent>,
         out_tx: tokio::sync::mpsc::Sender<SshIoCmd>,
         sftp_tx: tokio::sync::mpsc::Sender<SftpReq>,
+        disable_sftp: bool,
+        disable_ssh: bool,
     ) -> AppResult<()> {
         let (cmd_tx, cmd_rx) = unbounded::<TabCmd>();
         self.start_tab_thread(
@@ -288,6 +294,8 @@ impl TabRegistry {
                 host_id: Some(host_id),
                 host_label: Some(host_label),
                 sftp_tx: Some(sftp_tx),
+                disable_sftp,
+                disable_ssh,
             },
         );
         self.windows.lock().insert(id, owner_window);
@@ -413,6 +421,8 @@ impl TabRegistry {
                 host_id: None,
                 host_label: None,
                 sftp_tx: None,
+                disable_sftp: false,
+                disable_ssh: false,
             },
         );
         self.windows.lock().insert(id, owner_window);
@@ -1202,5 +1212,7 @@ fn handle_to_info(h: &TabHandle) -> TabInfo {
         kind: h.kind.as_wire().to_string(),
         host_id: h.host_id,
         host_label: h.host_label.clone(),
+        disable_sftp: h.disable_sftp,
+        disable_ssh: h.disable_ssh,
     }
 }

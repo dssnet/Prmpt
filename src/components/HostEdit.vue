@@ -43,6 +43,9 @@ const emit = defineEmits<{ done: []; cancel: []; manageKeys: [] }>();
 
 type WorkingForward = SshPortForwardRow & { _uiId: number; _delete: boolean };
 type PwMode = "saved" | "replace" | "empty";
+/** Maps onto the `disable_sftp` / `disable_ssh` host flags — a single select
+ *  keeps "both disabled" unrepresentable. */
+type ConnectionMode = "both" | "shell" | "sftp";
 
 const form = reactive({
   label: "",
@@ -53,7 +56,7 @@ const form = reactive({
   password: "",
   key_id: "" as string,
   group_id: "" as string,
-  disable_sftp: false,
+  connection_mode: "both" as ConnectionMode,
 });
 
 const pwMode = ref<PwMode>("replace");
@@ -83,6 +86,18 @@ const authOptions = [
   { value: "key", label: "Private key" },
   { value: "agent", label: "ssh-agent" },
 ];
+
+const connectionModeOptions = [
+  { value: "both", label: "Shell + SFTP" },
+  { value: "shell", label: "Shell only" },
+  { value: "sftp", label: "SFTP only" },
+];
+
+const CONNECTION_MODE_HELP: Record<ConnectionMode, string> = {
+  both: "Opens a terminal with the file browser panel alongside it.",
+  shell: "Opens a terminal only — the file browser panel stays hidden.",
+  sftp: "Opens the file browser only — no terminal. For accounts restricted to SFTP (e.g. ForceCommand internal-sftp).",
+};
 
 const AUTH_HELP: Record<SshAuthMethod, string> = {
   agent:
@@ -169,7 +184,7 @@ function serialize(): string {
     auth_method: form.auth_method,
     key_id: form.key_id,
     group_id: form.group_id,
-    disable_sftp: form.disable_sftp,
+    connection_mode: form.connection_mode,
     password: form.password,
     pwMode: pwMode.value,
     forwards: forwards.value
@@ -240,7 +255,10 @@ async function load() {
   form.password = "";
   form.key_id = h?.key_id ? String(h.key_id) : "";
   form.group_id = h?.group_id ? String(h.group_id) : "";
-  form.disable_sftp = h?.disable_sftp ?? false;
+  // Both-set rows are only possible by hand-editing the DB; collapse to
+  // "sftp" (the backend treats disable_ssh as authoritative) — saving
+  // normalizes them.
+  form.connection_mode = h?.disable_ssh ? "sftp" : h?.disable_sftp ? "shell" : "both";
   pwMode.value = h?.has_password ? "saved" : "replace";
   showPw.value = false;
   errorText.value = null;
@@ -356,7 +374,8 @@ async function onSubmit() {
       key_id: auth === "key" ? keyId : null,
       group_id: form.group_id ? Number(form.group_id) : null,
       has_password: hasPassword,
-      disable_sftp: form.disable_sftp,
+      disable_sftp: form.connection_mode === "shell",
+      disable_ssh: form.connection_mode === "sftp",
     });
 
     if (newPassword != null) {
@@ -697,13 +716,16 @@ async function onSubmit() {
             <h3 class="m-0 text-sm font-semibold text-fg">Advanced</h3>
           </header>
           <div class="px-3.5 py-3 flex flex-col gap-2.5">
-            <FormRow label="Disable SFTP" html-for="ssh-host-disable-sftp">
-              <div class="flex items-center gap-3">
-                <Switch id="ssh-host-disable-sftp" v-model="form.disable_sftp" />
-                <p class="text-xs text-fg-subtle leading-snug">
-                  Don't open the file browser panel for this connection.
-                </p>
-              </div>
+            <FormRow stack label="Connection mode" html-for="ssh-host-connection-mode">
+              <DropdownMenu
+                id="ssh-host-connection-mode"
+                :options="connectionModeOptions"
+                :model-value="form.connection_mode"
+                @update:model-value="form.connection_mode = $event as ConnectionMode"
+              />
+              <p class="text-xs text-fg-subtle mt-1">
+                {{ CONNECTION_MODE_HELP[form.connection_mode] }}
+              </p>
             </FormRow>
           </div>
         </section>

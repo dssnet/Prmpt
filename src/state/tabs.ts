@@ -36,6 +36,9 @@ export interface TabState {
   hostId?: number;
   /** SSH tabs only: the host opted out of SFTP, so no file-browser panel. */
   disableSftp?: boolean;
+  /** SSH tabs only: SFTP-only host — no shell; renders as a full-width
+   *  file browser instead of a terminal. */
+  disableSsh?: boolean;
 }
 
 export interface TabHydrateInfo {
@@ -43,6 +46,8 @@ export interface TabHydrateInfo {
   kind?: "terminal" | "ssh";
   host_id?: number | null;
   host_label?: string | null;
+  disable_sftp?: boolean;
+  disable_ssh?: boolean;
 }
 
 // Reactive state. The tabs array drives the tab bar; activeId picks the focused
@@ -136,6 +141,7 @@ function originOf(t: TabState): TabOrigin {
     hostLabel: t.hostLabel,
     hostId: t.hostId,
     disableSftp: t.disableSftp,
+    disableSsh: t.disableSsh,
   };
 }
 
@@ -196,6 +202,7 @@ export async function spawnSsh(args: {
     hostLabel: args.hostLabel,
     hostId: args.hostId,
     disableSftp: args.config.disable_sftp,
+    disableSsh: args.config.disable_ssh,
   });
   activeId.value = id;
   return id;
@@ -246,6 +253,9 @@ export function dropTabIntoTarget(
   if (!dragged || !target || dragged.kind === "home" || target.kind === "home") {
     return null;
   }
+  // SFTP-only tabs render as a full-width file browser, not a terminal pane —
+  // they never join workspaces, in either role.
+  if (dragged.disableSsh || target.disableSsh) return null;
   const draggedLeaf = makeLeaf(draggedTabId, originOf(dragged));
 
   if (target.kind === "workspace") {
@@ -335,6 +345,7 @@ function revertOrRemoveSlot(slotId: number, survivor: LeafNode | null): void {
     slot.hostLabel = o.hostLabel;
     slot.hostId = o.hostId;
     slot.disableSftp = o.disableSftp;
+    slot.disableSsh = o.disableSsh;
     if (activeId.value === slotId) activeId.value = survivor.tabId;
   } else {
     spliceTab(slotId);
@@ -427,6 +438,7 @@ export function detachWorkspaceLeaf(slotId: number, tabId: number): void {
       hostLabel: leaf.origin.hostLabel,
       hostId: leaf.origin.hostId,
       disableSftp: leaf.origin.disableSftp,
+      disableSsh: leaf.origin.disableSsh,
     });
   }
   applyWorkspaceRemoval(slotId, tabId, newRoot);
@@ -485,6 +497,8 @@ export function hydrateTabs(infos: TabHydrateInfo[]): void {
       title: fallbackTitle,
       hostId: info.host_id ?? undefined,
       hostLabel: info.host_label ?? undefined,
+      disableSftp: info.disable_sftp ?? undefined,
+      disableSsh: info.disable_ssh ?? undefined,
     });
   }
   const firstTerminal = tabs.value.find((t) => t.kind !== "home");
@@ -504,6 +518,8 @@ export function attachTab(info: TabHydrateInfo): void {
     title: fallbackTitle,
     hostId: info.host_id ?? undefined,
     hostLabel: info.host_label ?? undefined,
+    disableSftp: info.disable_sftp ?? undefined,
+    disableSsh: info.disable_ssh ?? undefined,
   });
   activeId.value = info.id;
 }

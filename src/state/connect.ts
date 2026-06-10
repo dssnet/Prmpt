@@ -100,6 +100,7 @@ export async function connectHost(host: SshHostRow): Promise<void> {
       auth,
       stored_fingerprint: host.host_fp_sha256,
       disable_sftp: host.disable_sftp,
+      disable_ssh: host.disable_ssh,
       forwards: fwds
         .filter((f) => f.enabled)
         .map((f) => ({
@@ -112,5 +113,7 @@ export async function connectHost(host: SshHostRow): Promise<void> {
         })),
     },
   });
-  focusCanvas();
+  // SFTP-only tabs mount the file browser instead of the canvas — nothing
+  // useful to focus there.
+  if (!host.disable_ssh) focusCanvas();
 }

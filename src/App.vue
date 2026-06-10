@@ -19,6 +19,7 @@ import {
   onSshHostKeyFirstConnect,
   onSshHostKeyMismatch,
   onSshPortForwardError,
+  onSshReconnecting,
   onTabAttached,
   onWindowActivateBlank,
   openNewWindow,
@@ -60,6 +61,7 @@ import {
   selectAll,
 } from "./state/terminal";
 import { toggleLocalBrowser } from "./state/localBrowser";
+import { showToast } from "./state/toasts";
 import FullDiskAccessModal from "./components/FullDiskAccessModal.vue";
 import HomeView from "./components/HomeView.vue";
 import HostKeyFirstConnectModal from "./components/HostKeyFirstConnectModal.vue";
@@ -580,6 +582,22 @@ onMounted(async () => {
   }));
   unlisteners.push(await onSshConnectError((p) => {
     connectErrorModal.value = p;
+  }));
+  // Shell tabs surface "connection lost — reconnecting…" as a banner in the
+  // terminal; SFTP-only tabs have no visible VT, so toast instead.
+  unlisteners.push(await onSshReconnecting((p) => {
+    const t = tabs.value.find((t) => t.id === p.tab_id);
+    if (t?.kind === "ssh" && t.disableSsh) {
+      showToast(
+        {
+          host: p.host_label,
+          title: "Connection lost",
+          detail: "Reconnecting…",
+          kind: "error",
+        },
+        8000,
+      );
+    }
   }));
 
   // Bootstrap: ask the backend whether this window is a pre-warmed

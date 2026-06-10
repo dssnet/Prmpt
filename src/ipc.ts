@@ -248,6 +248,10 @@ export interface TabInfo {
   kind: "terminal" | "ssh";
   host_id: number | null;
   host_label: string | null;
+  /** SSH per-host flags, carried so hydrate/tear-off restores the right
+   *  tab chrome. Always `false` for local tabs. */
+  disable_sftp: boolean;
+  disable_ssh: boolean;
 }
 
 /** The `window:tab_attached` event used to carry just `{ tab_id }`; it now
@@ -347,6 +351,8 @@ export interface SshConnectConfig {
   stored_fingerprint: string | null;
   /** Per-host opt-out: skip opening the SFTP subsystem entirely. */
   disable_sftp: boolean;
+  /** Per-host opt-in for SFTP-only connections: never open a shell channel. */
+  disable_ssh: boolean;
   forwards: SshForwardConfig[];
 }
 
@@ -462,6 +468,21 @@ export function onSshConnectError(
   handler: (payload: SshConnectError) => void,
 ): Promise<UnlistenFn> {
   return listenScoped<SshConnectError>("ssh:connect_error", handler);
+}
+
+/** Fires whenever a working session drops and the backend is about to retry.
+ *  Shell tabs already show the reconnect banner in the terminal; SFTP-only
+ *  tabs have no visible VT, so the frontend toasts off this instead. */
+export interface SshReconnecting {
+  tab_id: number;
+  host_id: number;
+  host_label: string;
+}
+
+export function onSshReconnecting(
+  handler: (payload: SshReconnecting) => void,
+): Promise<UnlistenFn> {
+  return listenScoped<SshReconnecting>("ssh:reconnecting", handler);
 }
 
 // ---------------- SFTP file browser ----------------

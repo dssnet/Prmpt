@@ -90,6 +90,7 @@ pub const MIGRATIONS: &[(i64, &str, &str)] = &[
     (4, "groups", include_str!("../migrations/0004_groups.sql")),
     (5, "group_flags", include_str!("../migrations/0005_group_flags.sql")),
     (6, "disable_sftp", include_str!("../migrations/0006_disable_sftp.sql")),
+    (7, "disable_ssh", include_str!("../migrations/0007_disable_ssh.sql")),
 ];
 
 /// Migrations consumed by `tauri-plugin-sql` at startup, built from

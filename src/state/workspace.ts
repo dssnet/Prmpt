@@ -17,6 +17,9 @@ export interface TabOrigin {
   hostId?: number;
   /** SSH panes only: the host opted out of SFTP. */
   disableSftp?: boolean;
+  /** SSH panes only: SFTP-only host (no shell). Such tabs never actually
+   *  join workspaces; carried for completeness when origins are copied. */
+  disableSsh?: boolean;
 }
 
 export interface LeafNode {

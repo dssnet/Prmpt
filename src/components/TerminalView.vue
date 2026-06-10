@@ -65,7 +65,16 @@ const { active, tabs, renderSeq } = useTabs();
 const sftpTarget = computed<{ id: number; hostLabel?: string } | null>(() => {
   const a = active.value;
   if (!a || a.kind !== "ssh") return null; // workspaces use docked browsers
-  return a.disableSftp ? null : { id: a.id, hostLabel: a.hostLabel };
+  // SFTP-only tabs use the full-width browser below, not the side panel.
+  return a.disableSftp || a.disableSsh ? null : { id: a.id, hostLabel: a.hostLabel };
+});
+
+// SFTP-only SSH tab (host has `disable_ssh`): no shell, no canvas — the file
+// browser takes over the whole host area as an overlay.
+const fullSftp = computed<{ id: number; hostLabel?: string } | null>(() => {
+  const a = active.value;
+  if (!a || a.kind !== "ssh" || !a.disableSsh) return null;
+  return { id: a.id, hostLabel: a.hostLabel };
 });
 const showSftp = computed(
   () => sftpTarget.value != null && isSftpVisible(sftpTarget.value.id),
@@ -237,7 +246,9 @@ function onLocalExpand() {
 const { selectionTick } = useTerminalSelection();
 const { theme } = useTheme();
 
-const canvasVisible = computed(() => active.value?.kind !== "home");
+const canvasVisible = computed(
+  () => active.value?.kind !== "home" && !fullSftp.value,
+);
 
 // Drop highlight (shared with the tab drag handlers in TabBar) + divider
 // overlays. Layout is read from the cache in state/terminal.
@@ -667,9 +678,24 @@ watch(theme, (next) => {
       :rect="{ x: p.x, y: p.y, w: p.w, h: p.h }"
     />
     <TerminalScrollbar
-      v-if="panes.length === 0 && active && (active.kind === 'terminal' || active.kind === 'ssh')"
+      v-if="panes.length === 0 && !fullSftp && active && (active.kind === 'terminal' || active.kind === 'ssh')"
       :tab-id="active.id"
     />
+    <!-- SFTP-only connection: the file browser is the whole tab. -->
+    <div
+      v-if="fullSftp"
+      class="absolute inset-0 z-20"
+      @mousedown.stop
+      @wheel.stop
+      @contextmenu.stop
+    >
+      <FilesPanel
+        :tab-id="fullSftp.id"
+        kind="ssh"
+        hide-close
+        class="h-full w-full"
+      />
+    </div>
     <slot />
     <!-- Reopen the SFTP panel after it's been hidden on this SSH connection. -->
     <button

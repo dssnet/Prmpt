@@ -544,6 +544,8 @@ pub fn connect_ssh_host(
     let rows = args.rows.max(1);
     let host_id = args.config.host_id;
     let host_label = args.config.label.clone();
+    let disable_sftp = args.config.disable_sftp;
+    let disable_ssh = args.config.disable_ssh;
 
     let id = registry.next_tab_id();
     let (pty_tx, pty_rx) = unbounded::<PtyEvent>();
@@ -572,6 +574,8 @@ pub fn connect_ssh_host(
         pty_rx,
         out_tx,
         sftp_tx,
+        disable_sftp,
+        disable_ssh,
     )?;
 
     let _ = args.cell_width_px;

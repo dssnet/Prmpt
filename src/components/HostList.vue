@@ -521,6 +521,10 @@ async function confirmDeleteGroup() {
             <div class="flex flex-col gap-0.5 min-w-0 flex-1">
               <div class="font-medium text-fg flex items-center gap-1.5">
                 <span>{{ h.label }}</span>
+                <Badge
+                  v-if="h.disable_ssh"
+                  title="SFTP-only host — connecting opens the file browser, no terminal."
+                >SFTP</Badge>
                 <AlertTriangle
                   v-if="h.broken"
                   :size="14"

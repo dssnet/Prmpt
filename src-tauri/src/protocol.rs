@@ -67,6 +67,11 @@ pub struct TabInfo {
     /// render payload to refresh the tab bar.
     pub host_id: Option<i64>,
     pub host_label: Option<String>,
+    /// SSH per-host flags, carried so hydrate/tear-off restores the right
+    /// tab chrome (SFTP side panel suppressed / full-width file browser).
+    /// Always `false` for local tabs.
+    pub disable_sftp: bool,
+    pub disable_ssh: bool,
 }
 
 pub const CURSOR_STYLE_BLOCK: u8 = 0;
@@ -190,6 +195,17 @@ pub struct SftpTransferProgress {
     /// True on the final emit (success or error); `error` is set on failure.
     pub done: bool,
     pub error: Option<String>,
+}
+
+/// Emitted whenever a working session drops and the task is about to retry.
+/// Shell tabs already show the "connection lost — reconnecting…" banner in
+/// the terminal; SFTP-only tabs have no visible VT, so the frontend listens
+/// for this and surfaces a toast instead.
+#[derive(Serialize, Clone, Debug)]
+pub struct SshReconnecting {
+    pub tab_id: u64,
+    pub host_id: i64,
+    pub host_label: String,
 }
 
 /// Emitted when the SSH session task could not establish or sustain a

@@ -42,6 +42,7 @@ use crate::{
     protocol::{
         SftpAvailability, SftpEntry, SftpTransferProgress, SshConnectError,
         SshHostKeyFirstConnect, SshHostKeyMismatch, SshPortForwardError,
+        SshReconnecting,
     },
     tab::{PtyEvent, SftpReq, SshIoCmd},
 };
@@ -112,6 +113,11 @@ pub struct SshConnectConfig {
     /// configs deserializing cleanly.
     #[serde(default)]
     pub disable_sftp: bool,
+    /// Per-host opt-in for SFTP-only connections: when true, never open a
+    /// shell channel (the target may be a `ForceCommand internal-sftp`
+    /// account that rejects shells) — SFTP becomes mandatory instead.
+    #[serde(default)]
+    pub disable_ssh: bool,
 }
 
 /// Holds plaintext credentials only while a session is being established;
@@ -421,7 +427,7 @@ async fn session_task(
                         SshConnectError {
                             tab_id,
                             host_id,
-                            host_label,
+                            host_label: host_label.clone(),
                             hostname,
                             kind: classify_connect_error(&raw).to_string(),
                             message: raw,
@@ -436,12 +442,23 @@ async fn session_task(
             }
         }
 
-        // Only reached when we intend to reconnect.
+        // Only reached when we intend to reconnect. The banner covers shell
+        // tabs; the event covers SFTP-only tabs whose VT is never shown (the
+        // frontend decides who actually toasts).
         let _ = pty_tx.send(PtyEvent::Data(
             "\r\n\x1b[33m\u{26a0} connection lost \u{2014} reconnecting\u{2026}\x1b[0m\r\n"
                 .as_bytes()
                 .to_vec(),
         ));
+        let _ = app.emit_to(
+            EventTarget::webview_window(&owner_window),
+            "ssh:reconnecting",
+            SshReconnecting {
+                tab_id,
+                host_id,
+                host_label: host_label.clone(),
+            },
+        );
         if wait_or_close(&mut out_rx, &mut cols, &mut rows, backoff_secs).await {
             break; // tab closed during the backoff wait
         }
@@ -588,26 +605,37 @@ async fn run_session(
         *stored_fp = Some(fp);
     }
 
-    let mut channel = session
-        .channel_open_session()
-        .await
-        .map_err(|e| AppError::Ssh(format!("channel open: {e}")))?;
-    channel
-        .request_pty(false, "xterm-256color", *cols as u32, *rows as u32, 0, 0, &[])
-        .await
-        .map_err(|e| AppError::Ssh(format!("request pty: {e}")))?;
-    channel
-        .request_shell(false)
-        .await
-        .map_err(|e| AppError::Ssh(format!("request shell: {e}")))?;
-
-    let _ = pty_tx.send(PtyEvent::Data(
-        "\r\n\x1b[32m\u{2713} connected.\x1b[0m\r\n".as_bytes().to_vec(),
-    ));
-
-    // Share the Handle with forward tasks (the shell channel is owned
-    // by the loop below).
+    // Share the Handle with forward tasks (the shell channel, when one is
+    // opened, is owned by the loop below).
     let session = Arc::new(tokio::sync::Mutex::new(session));
+
+    // Shell channel — skipped entirely for SFTP-only hosts: real-world
+    // targets are `ForceCommand internal-sftp` accounts that reject shell
+    // requests, so we must not even ask.
+    let mut channel = if config.disable_ssh {
+        None
+    } else {
+        let ch = session
+            .lock()
+            .await
+            .channel_open_session()
+            .await
+            .map_err(|e| AppError::Ssh(format!("channel open: {e}")))?;
+        ch.request_pty(false, "xterm-256color", *cols as u32, *rows as u32, 0, 0, &[])
+            .await
+            .map_err(|e| AppError::Ssh(format!("request pty: {e}")))?;
+        ch.request_shell(false)
+            .await
+            .map_err(|e| AppError::Ssh(format!("request shell: {e}")))?;
+        Some(ch)
+    };
+
+    let connected_banner = if config.disable_ssh {
+        "\r\n\x1b[32m\u{2713} connected (SFTP only).\x1b[0m\r\n"
+    } else {
+        "\r\n\x1b[32m\u{2713} connected.\x1b[0m\r\n"
+    };
+    let _ = pty_tx.send(PtyEvent::Data(connected_banner.as_bytes().to_vec()));
     let mut forward_tasks: Vec<JoinHandle<()>> = Vec::new();
     for fw in config.forwards.clone() {
         let handle = session.clone();
@@ -633,12 +661,21 @@ async fn run_session(
 
     // Best-effort SFTP subsystem on a second channel of the same session.
     // Failures (server without the subsystem, or the per-host opt-out) leave
-    // the slot empty so the panel shows "unavailable" — the shell is unaffected.
-    let sftp = if config.disable_sftp {
+    // the slot empty so the panel shows "unavailable" — the shell is
+    // unaffected. For SFTP-only hosts the opt-out is ignored and a missing
+    // subsystem is fatal: there is nothing else this connection could do.
+    let sftp = if config.disable_sftp && !config.disable_ssh {
         None
     } else {
         open_sftp(&session).await
     };
+    if config.disable_ssh && sftp.is_none() {
+        let s = session.lock().await;
+        let _ = s.disconnect(Disconnect::ByApplication, "", "").await;
+        return Err(AppError::Ssh(
+            "SFTP subsystem unavailable on this host".into(),
+        ));
+    }
     let sftp_available = sftp.is_some();
     *sftp_slot.lock().await = sftp;
     // Tell the (already-mounted) panel SFTP is ready to query — it waits for
@@ -653,7 +690,10 @@ async fn run_session(
         },
     );
 
-    let outcome = drive_channel_loop(&mut channel, pty_tx, out_rx, cols, rows).await;
+    let outcome = match channel.as_mut() {
+        Some(ch) => drive_channel_loop(ch, pty_tx, out_rx, cols, rows).await,
+        None => drive_sftp_only_loop(&session, out_rx).await,
+    };
 
     // Drop the SFTP session before tearing down the transport so in-flight
     // browser requests fail fast (and so a reconnect installs a fresh one).
@@ -816,6 +856,35 @@ async fn drive_channel_loop(
                     }
                     None => return SessionOutcome::Dropped,
                     _ => {}
+                }
+            }
+        }
+    }
+}
+
+/// Shell-less drive loop for SFTP-only sessions. Input/resize commands are
+/// ignored (there is no PTY); `Close` still tears the tab down. With no
+/// channel to `wait()` on, transport loss is detected by polling the client
+/// handle so the auto-reconnect path in `session_task` still engages —
+/// russh 0.49 offers no async "closed" future.
+async fn drive_sftp_only_loop(
+    session: &Arc<tokio::sync::Mutex<Handle<ClientHandler>>>,
+    out_rx: &mut mpsc::Receiver<SshIoCmd>,
+) -> SessionOutcome {
+    let mut tick = tokio::time::interval(std::time::Duration::from_secs(2));
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        tokio::select! {
+            biased;
+            cmd = out_rx.recv() => {
+                match cmd {
+                    Some(SshIoCmd::Close) | None => return SessionOutcome::LocalClose,
+                    Some(SshIoCmd::Write(_)) | Some(SshIoCmd::Resize { .. }) => {}
+                }
+            }
+            _ = tick.tick() => {
+                if session.lock().await.is_closed() {
+                    return SessionOutcome::Dropped;
                 }
             }
         }

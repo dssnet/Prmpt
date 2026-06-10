@@ -847,6 +847,9 @@ export function resolveDropAt(
   const { active } = useTabs();
   const activeTab = active.value;
   if (!activeTab || activeTab.kind === "home") return null;
+  // SFTP-only tabs render as a full-width file browser and never join
+  // workspaces (dropTabIntoTarget rejects them too) — no drop preview.
+  if (activeTab.kind === "ssh" && activeTab.disableSsh) return null;
   const lp = clientToLocal(clientX, clientY);
   if (!lp) return null;
 
