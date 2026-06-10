@@ -2,7 +2,7 @@
 import { computed, watch } from "vue";
 import { Columns2, X } from "lucide-vue-next";
 
-import { panelColumns, type PanelSource as Source } from "../state/filesPanel";
+import { getPanelColumns, type PanelSource as Source } from "../state/filesPanel";
 import { listSshConnections } from "../state/tabs";
 import { workspaceTick } from "../state/workspace";
 import LocalBrowser from "./LocalBrowser.vue";
@@ -11,13 +11,14 @@ import SftpBrowser from "./SftpBrowser.vue";
 // Unified file panel: one or two columns, each showing either the local file
 // browser or one SSH connection's SFTP browser (any combination — drag between
 // them to upload/download/relay). `tabId` is the focused tab: for `kind:
-// "ssh"` it seeds the left column with that connection and the left column
-// follows focus; for `kind: "terminal"` the left column starts on local files
-// and `tabId` is the terminal the local browser targets for cd / insert-path.
+// "ssh"` it seeds the left column with that connection; for `kind:
+// "terminal"` the left column starts on local files and `tabId` is the
+// terminal the local browser targets for cd / insert-path.
 //
-// Column state lives in `state/filesPanel.ts`: switching to another tab
-// unmounts this panel entirely, and the dual-pane layout should still be
-// there when the user comes back.
+// Column state lives in `state/filesPanel.ts`, keyed per hosting tab —
+// switching to another tab unmounts this panel entirely (or retargets
+// `tabId`), and each tab's single/dual layout should still be there when the
+// user comes back.
 
 const props = defineProps<{
   tabId: number;
@@ -28,33 +29,19 @@ const props = defineProps<{
 }>();
 const emit = defineEmits<{ close: []; expand: [] }>();
 
-const cols = panelColumns[props.kind];
-const { left, right } = cols;
-if (!cols.seeded) {
-  cols.seeded = true;
-  left.value = props.kind === "ssh" ? props.tabId : "local";
-}
-
-watch(
-  () => props.tabId,
-  (v) => {
-    if (props.kind !== "ssh") return;
-    if (v === left.value) return;
-    // Focusing the connection shown on the right (e.g. clicking its workspace
-    // pane) swaps the columns instead of collapsing the dual view.
-    if (v === right.value) {
-      right.value = left.value;
-      left.value = v;
-      return;
-    }
-    // Follow focus in the first SFTP column; don't displace a local column.
-    if (left.value !== "local") left.value = v;
-    else if (right.value !== null && right.value !== "local") right.value = v;
+const cols = computed(() => getPanelColumns(props.kind, props.tabId));
+const left = computed<Source>({
+  get: () => cols.value.left.value,
+  set: (v) => {
+    cols.value.left.value = v;
   },
-  // Re-sync on remount: focus may have moved to another connection while the
-  // panel was unmounted.
-  { immediate: true },
-);
+});
+const right = computed<Source | null>({
+  get: () => cols.value.right.value,
+  set: (v) => {
+    cols.value.right.value = v;
+  },
+});
 
 // All SSH connections that offer SFTP, for the per-column pickers.
 const connections = computed(() => {
@@ -79,10 +66,11 @@ function decode(v: string): Source {
 
 // Collapse or repair columns when a shown connection goes away (e.g. the user
 // closes one of the SSH tabs). Immediate: connections may have closed while
-// the panel was unmounted, with stale ids persisted in the column store.
+// the panel was unmounted, with stale ids persisted in the column store. Also
+// re-runs when the panel retargets to another tab's column set.
 watch(
-  connections,
-  (list) => {
+  [connections, cols] as const,
+  ([list]) => {
     const valid = (s: Source) => s === "local" || list.some((c) => c.id === s);
     if (right.value !== null && !valid(right.value)) right.value = null;
     if (!valid(left.value)) {

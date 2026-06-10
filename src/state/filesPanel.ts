@@ -1,8 +1,8 @@
 /**
  * Files-panel column state, hoisted out of the component so the dual-pane
  * layout survives the panel unmounting (switching to another tab swaps the
- * whole panel out of the DOM). One slot per panel kind: the SSH-tab panel and
- * the terminal-tab panel keep independent layouts.
+ * whole panel out of the DOM). One slot per panel kind + hosting tab, so each
+ * tab keeps its own single/dual layout.
  */
 import { ref, type Ref } from "vue";
 
@@ -13,18 +13,28 @@ export type PanelSource = number | "local";
 export interface PanelColumns {
   left: Ref<PanelSource>;
   right: Ref<PanelSource | null>;
-  /** False until the first FilesPanel mount seeds `left` for this kind. */
-  seeded: boolean;
 }
 
-export const panelColumns: Record<"ssh" | "terminal", PanelColumns> = {
-  ssh: { left: ref<PanelSource>("local"), right: ref<PanelSource | null>(null), seeded: false },
-  terminal: {
-    left: ref<PanelSource>("local"),
-    right: ref<PanelSource | null>(null),
-    seeded: false,
-  },
-};
+const columnsByKey = new Map<string, PanelColumns>();
+
+/** Column state for one panel instance. Created on first use, seeded to the
+ *  hosting tab's own connection (SSH panels) or local files. Session-only;
+ *  tab ids are never reused, so entries for closed tabs just sit unused. */
+export function getPanelColumns(
+  kind: "ssh" | "terminal",
+  tabId: number,
+): PanelColumns {
+  const key = `${kind}:${tabId}`;
+  let cols = columnsByKey.get(key);
+  if (!cols) {
+    cols = {
+      left: ref<PanelSource>(kind === "ssh" ? tabId : "local"),
+      right: ref<PanelSource | null>(null),
+    };
+    columnsByKey.set(key, cols);
+  }
+  return cols;
+}
 
 /** Last visited directory + nav history per browser, so a remount (the
  *  browsers unmount on every tab switch) resumes where the user left off
