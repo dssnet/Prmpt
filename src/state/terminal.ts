@@ -1,4 +1,7 @@
-import { readText as readClipboardText } from "@tauri-apps/plugin-clipboard-manager";
+import {
+  readImage as readClipboardImage,
+  readText as readClipboardText,
+} from "@tauri-apps/plugin-clipboard-manager";
 import { ref } from "vue";
 
 import {
@@ -790,12 +793,26 @@ export function inputTargetTabId(): number | null {
 export async function pasteFromClipboard(): Promise<void> {
   const target = inputTargetTabId();
   if (target == null) return;
+  let text: string | null = null;
   try {
-    const text = await readClipboardText();
-    if (!text) return;
+    text = await readClipboardText();
+  } catch {
+    // No text flavor on the clipboard (e.g. a screenshot) — not an
+    // error; fall through to the image check.
+  }
+  if (text) {
     void writeInput(target, new TextEncoder().encode(text));
-  } catch (err) {
-    console.error("clipboard read failed:", err);
+    return;
+  }
+  // Image-only clipboard: a terminal can't paste pixels, but TUI apps
+  // (Claude Code, …) read the clipboard image themselves when they see
+  // Ctrl+V — forward that byte so the paste chord works for them too.
+  try {
+    const img = await readClipboardImage();
+    await img.close();
+    void writeInput(target, new Uint8Array([0x16]));
+  } catch {
+    // Clipboard empty or an unsupported flavor: nothing to paste.
   }
 }
 

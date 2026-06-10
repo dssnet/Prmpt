@@ -344,11 +344,15 @@ impl TabRegistry {
         }
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
-        // When packaged as an AppImage, hand the shell the user's
-        // login environment, not our bundled-runtime one (otherwise
-        // e.g. `flatpak` crashes on our older bundled GLib). No-op for
-        // .deb/.rpm/.app and when not run from an AppImage.
+        // Strip the launching terminal's identity vars (dev runs inherit
+        // Ghostty/iTerm/… markers, which make apps enable protocols we
+        // don't speak) and, when packaged as an AppImage, hand the shell
+        // the user's login environment, not our bundled-runtime one
+        // (otherwise e.g. `flatpak` crashes on our older bundled GLib).
         platform::sanitize_child_env(&mut cmd);
+        // After the scrub so the remove doesn't clobber our own identity.
+        cmd.env("TERM_PROGRAM", "Prmpt");
+        cmd.env("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION"));
 
         let child = pair
             .slave

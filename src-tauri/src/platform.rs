@@ -96,6 +96,63 @@ pub fn home_dir() -> Option<PathBuf> {
     directories::BaseDirs::new().map(|d| d.home_dir().to_path_buf())
 }
 
+/// Identity markers of whatever terminal launched *us* (a dev run from
+/// Ghostty/iTerm, `bun tauri dev` inside VS Code, …). If they leak into
+/// the child shell, programs that sniff them — Claude Code, shell
+/// prompts, anything doing terminal feature detection — believe they're
+/// running inside that other terminal and enable protocols we don't
+/// speak (e.g. the kitty CSI-u keyboard protocol, which breaks
+/// Shift+Tab / Ctrl+V decoding in Claude Code). The child's terminal is
+/// Prmpt; scrub everyone else's calling cards.
+const FOREIGN_TERMINAL_VARS: &[&str] = &[
+    // Generic (Terminal.app, Ghostty, iTerm2, VS Code all set these)
+    "TERM_PROGRAM",
+    "TERM_PROGRAM_VERSION",
+    "TERM_SESSION_ID",
+    // Ghostty
+    "GHOSTTY_RESOURCES_DIR",
+    "GHOSTTY_BIN_DIR",
+    // kitty
+    "KITTY_WINDOW_ID",
+    "KITTY_PID",
+    "KITTY_PUBLIC_KEY",
+    "KITTY_INSTALLATION_DIR",
+    "KITTY_LISTEN_ON",
+    // iTerm2 (LC_TERMINAL is its ssh-forwarded identity)
+    "ITERM_SESSION_ID",
+    "ITERM_PROFILE",
+    "LC_TERMINAL",
+    "LC_TERMINAL_VERSION",
+    // WezTerm
+    "WEZTERM_EXECUTABLE",
+    "WEZTERM_EXECUTABLE_DIR",
+    "WEZTERM_CONFIG_DIR",
+    "WEZTERM_CONFIG_FILE",
+    "WEZTERM_PANE",
+    "WEZTERM_UNIX_SOCKET",
+    // Alacritty
+    "ALACRITTY_SOCKET",
+    "ALACRITTY_LOG",
+    "ALACRITTY_WINDOW_ID",
+    // Konsole / VTE-based (GNOME Terminal, …)
+    "KONSOLE_VERSION",
+    "KONSOLE_DBUS_SESSION",
+    "KONSOLE_DBUS_SERVICE",
+    "KONSOLE_DBUS_WINDOW",
+    "VTE_VERSION",
+    "GNOME_TERMINAL_SCREEN",
+    "GNOME_TERMINAL_SERVICE",
+    // Windows Terminal
+    "WT_SESSION",
+    "WT_PROFILE_ID",
+    // Multiplexers: the child is not inside the parent's tmux/screen
+    "TMUX",
+    "TMUX_PANE",
+    "STY",
+    // X11 window id of the launching terminal
+    "WINDOWID",
+];
+
 /// Strip AppImage-injected variables from a child command's environment.
 ///
 /// The AppImage runtime / linuxdeploy `AppRun` *prepends* `$APPDIR/...`
@@ -114,8 +171,11 @@ pub fn home_dir() -> Option<PathBuf> {
 /// rest. No-op when not launched from an AppImage (`APPDIR` unset) and
 /// on non-Linux targets.
 #[cfg(all(not(target_os = "ios"), not(target_os = "android")))]
-#[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
 pub fn sanitize_child_env(cmd: &mut portable_pty::CommandBuilder) {
+    for var in FOREIGN_TERMINAL_VARS {
+        cmd.env_remove(var);
+    }
+
     #[cfg(target_os = "linux")]
     {
         let appdir = match std::env::var("APPDIR") {

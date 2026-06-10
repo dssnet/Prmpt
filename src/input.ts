@@ -34,7 +34,9 @@ export function encodeKey(e: KeyboardEvent): Uint8Array | null {
       bytes = new Uint8Array([0x7f]);
       break;
     case "Tab":
-      bytes = new Uint8Array([0x09]);
+      // Back-tab (CSI Z) — apps like Claude Code bind Shift+Tab; a bare
+      // 0x09 is indistinguishable from plain Tab.
+      bytes = e.shiftKey ? encoder.encode("\x1b[Z") : new Uint8Array([0x09]);
       break;
     case "Escape":
       bytes = new Uint8Array([0x1b]);
