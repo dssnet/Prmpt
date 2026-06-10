@@ -59,6 +59,7 @@ import {
 } from "../state/uiPrefs";
 import { columnWidth, startColumnResize } from "../state/fileColumns";
 import { browserLocations } from "../state/filesPanel";
+import { fitCrumbs } from "../lib/crumbs";
 import { ConfirmDialog } from "./ui";
 
 const props = withDefaults(
@@ -147,6 +148,45 @@ const crumbs = computed(() => {
   }
   return acc;
 });
+
+// Paths wider than the bar collapse just enough of the middle into an "…"
+// menu: root › … › nearest ancestors that fit › current. The hidden levels
+// stay reachable via the menu (deepest first). Width comes from a
+// ResizeObserver on the bar; the fitting math lives in lib/crumbs.ts.
+const crumbBarRef = ref<HTMLElement | null>(null);
+const crumbAvail = ref(0);
+const crumbFont = ref("12px sans-serif");
+const crumbRo = new ResizeObserver((entries) => {
+  crumbAvail.value = entries[0]?.contentRect.width ?? 0;
+});
+// The bar mounts/unmounts with path editing, so follow the ref.
+watch(crumbBarRef, (el, prev) => {
+  if (prev) crumbRo.unobserve(prev);
+  if (el) {
+    const s = getComputedStyle(el);
+    crumbFont.value = s.font || `${s.fontWeight} ${s.fontSize} ${s.fontFamily}`;
+    crumbAvail.value = el.clientWidth;
+    crumbRo.observe(el);
+  }
+});
+
+const crumbItems = computed(() =>
+  fitCrumbs(crumbs.value, crumbAvail.value, crumbFont.value),
+);
+const hiddenCrumbs = computed(() => {
+  const items = crumbItems.value;
+  if (!items.some((i) => i.kind === "ellipsis")) return [];
+  const tail = items.length - 2; // root + … + tail crumbs
+  return crumbs.value.slice(1, crumbs.value.length - tail);
+});
+function openCrumbMenu(): void {
+  void popupMenu(
+    hiddenCrumbs.value
+      .slice()
+      .reverse()
+      .map((c) => ({ text: c.label, action: () => void visit(c.path) })),
+  );
+}
 
 // ---- address bar (editable path) ----
 const editingPath = ref(false);
@@ -293,11 +333,12 @@ function navigate(e: LocalEntry): void {
   if (e.is_dir) void visit(e.path);
 }
 /** Name-button click: modifier clicks are selection gestures (handled on the
- *  row's mousedown), so only a plain click navigates / inserts the path. */
+ *  row's mousedown). Folders open on double-click only (single click selects)
+ *  so a stray click can't accidentally traverse; a plain click on a file
+ *  still inserts its path into the terminal. */
 function onNameClick(ev: MouseEvent, e: LocalEntry): void {
   if (ev.shiftKey || ev.metaKey || ev.ctrlKey) return;
-  if (e.is_dir) navigate(e);
-  else insertPath(e);
+  if (!e.is_dir) insertPath(e);
 }
 function goUp(): void {
   if (parent.value) void visit(parent.value);
@@ -592,6 +633,7 @@ onMounted(() => void init());
 
 onBeforeUnmount(() => {
   saveLocation();
+  crumbRo.disconnect();
   unregisterSftpTarget("local", props.targetTabId, dropHandler);
 });
 </script>
@@ -666,16 +708,29 @@ onBeforeUnmount(() => {
         @blur="editingPath = false"
       />
       <template v-else>
-        <div class="flex items-center flex-wrap gap-0.5 flex-1 min-w-0">
-          <template v-for="(c, i) in crumbs" :key="c.path">
+        <div
+          ref="crumbBarRef"
+          class="flex items-center gap-0.5 flex-1 min-w-0 overflow-hidden whitespace-nowrap"
+        >
+          <template v-for="(c, i) in crumbItems" :key="c.kind === 'crumb' ? c.path : '…'">
             <ChevronRight v-if="i > 0" :size="11" class="text-fg-subtle shrink-0" />
             <button
+              v-if="c.kind === 'crumb'"
               type="button"
-              class="px-1 py-0.5 rounded hover:bg-surface-2 truncate max-w-[140px]"
-              :class="i === crumbs.length - 1 ? 'text-fg font-medium' : 'text-fg-muted'"
+              class="px-1 py-0.5 rounded hover:bg-surface-2 truncate max-w-[140px] min-w-0"
+              :class="i === crumbItems.length - 1 ? 'text-fg font-medium' : 'text-fg-muted'"
               @click="visit(c.path)"
             >
               {{ c.label }}
+            </button>
+            <button
+              v-else
+              type="button"
+              class="px-1 py-0.5 rounded hover:bg-surface-2 text-fg-muted shrink-0"
+              title="Show full path"
+              @click="openCrumbMenu"
+            >
+              …
             </button>
           </template>
         </div>
@@ -760,7 +815,6 @@ onBeforeUnmount(() => {
           <tr
             v-if="parent"
             class="group cursor-default select-none hover:bg-surface-2"
-            @click="goUp"
             @dblclick="goUp"
           >
             <td class="pl-2.5 pr-1 py-1">
