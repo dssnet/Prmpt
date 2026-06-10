@@ -79,9 +79,6 @@ const fullSftp = computed<{ id: number; hostLabel?: string } | null>(() => {
 const showSftp = computed(
   () => sftpTarget.value != null && isSftpVisible(sftpTarget.value.id),
 );
-const sftpReopenVisible = computed(
-  () => sftpTarget.value != null && !isSftpVisible(sftpTarget.value.id),
-);
 
 // Docked browsers (workspace SSH panes), refreshed from the cached layout.
 const sftpDocks = ref<SftpDock[]>([]);
@@ -95,9 +92,6 @@ const localTarget = computed<number | null>(() => {
 });
 const showLocal = computed(
   () => localTarget.value != null && isLocalVisible(localTarget.value),
-);
-const localReopenVisible = computed(
-  () => localTarget.value != null && !isLocalVisible(localTarget.value),
 );
 const localDocks = ref<LocalDock[]>([]);
 
@@ -557,8 +551,9 @@ watch(theme, (next) => {
       }"
       @mousedown="onDividerDown(d, $event)"
     />
-    <!-- Per-pane hover bar: appears at the top of each pane; drag to move,
-         button to close. -->
+    <!-- Per-pane hover header: a grip hint at the top of each pane; hovering
+         it reveals a pill with the title, browser toggle, and close button.
+         The pill doubles as the drag handle. -->
     <div
       v-for="p in panes"
       :key="p.tabId"
@@ -570,43 +565,46 @@ watch(theme, (next) => {
         height: `${p.h}px`,
       }"
     >
-      <div
-        class="pane-bar"
-        :title="p.title"
-        @mousedown="onPaneBarDown(p, $event)"
-      >
-        <span class="pane-title">{{ p.title }}</span>
-        <button
-          v-if="p.sftpDockable"
-          type="button"
-          class="pane-close"
-          :class="{ 'pane-tool-on': p.sftpVisible }"
-          :title="p.sftpVisible ? 'Hide file browser' : 'Show file browser'"
-          @mousedown.stop.prevent
-          @click.stop="togglePaneDock(p.tabId)"
+      <div class="pane-hover">
+        <div class="pane-grip">⋯</div>
+        <div
+          class="pane-pill pane-pill-drag"
+          :title="p.title"
+          @mousedown="onPaneBarDown(p, $event)"
         >
-          <PanelBottom :size="12" :stroke-width="2.25" />
-        </button>
-        <button
-          v-if="p.localDockable"
-          type="button"
-          class="pane-close"
-          :class="{ 'pane-tool-on': p.localVisible }"
-          :title="p.localVisible ? 'Hide file browser' : 'Show file browser'"
-          @mousedown.stop.prevent
-          @click.stop="togglePaneLocalDock(p.tabId)"
-        >
-          <PanelBottom :size="12" :stroke-width="2.25" />
-        </button>
-        <button
-          type="button"
-          class="pane-close"
-          title="Close pane"
-          @mousedown.stop.prevent
-          @click.stop="onPaneClose(p)"
-        >
-          <X :size="12" :stroke-width="2.25" />
-        </button>
+          <span class="pane-title">{{ p.title }}</span>
+          <button
+            v-if="p.sftpDockable"
+            type="button"
+            class="pane-close"
+            :class="{ 'pane-tool-on': p.sftpVisible }"
+            :title="p.sftpVisible ? 'Hide file browser' : 'Show file browser'"
+            @mousedown.stop.prevent
+            @click.stop="togglePaneDock(p.tabId)"
+          >
+            <PanelBottom :size="12" :stroke-width="2.25" />
+          </button>
+          <button
+            v-if="p.localDockable"
+            type="button"
+            class="pane-close"
+            :class="{ 'pane-tool-on': p.localVisible }"
+            :title="p.localVisible ? 'Hide file browser' : 'Show file browser'"
+            @mousedown.stop.prevent
+            @click.stop="togglePaneLocalDock(p.tabId)"
+          >
+            <PanelBottom :size="12" :stroke-width="2.25" />
+          </button>
+          <button
+            type="button"
+            class="pane-close"
+            title="Close pane"
+            @mousedown.stop.prevent
+            @click.stop="onPaneClose(p)"
+          >
+            <X :size="12" :stroke-width="2.25" />
+          </button>
+        </div>
       </div>
     </div>
     <!-- Docked SFTP browsers: one per SSH workspace pane, carved out of the
@@ -697,26 +695,37 @@ watch(theme, (next) => {
       />
     </div>
     <slot />
-    <!-- Reopen the SFTP panel after it's been hidden on this SSH connection. -->
-    <button
-      v-if="sftpReopenVisible && sftpTarget"
-      type="button"
-      class="sftp-reopen"
-      title="Show file browser"
-      @click="toggleSftpPanel(sftpTarget.id)"
+    <!-- Hover header for plain terminal/SSH tabs: same grip + pill as
+         workspace panes, but just the title and a file-browser toggle. -->
+    <div
+      v-if="panes.length === 0 && !fullSftp && active && (active.kind === 'terminal' || active.kind === 'ssh')"
+      class="pane-hover"
     >
-      <PanelRight :size="15" />
-    </button>
-    <!-- Reopen the local file browser after it's been hidden (terminal tabs). -->
-    <button
-      v-if="localReopenVisible && localTarget != null"
-      type="button"
-      class="sftp-reopen"
-      title="Show file browser"
-      @click="toggleLocalBrowser(localTarget)"
-    >
-      <PanelRight :size="15" />
-    </button>
+      <div class="pane-grip">⋯</div>
+      <div class="pane-pill" :title="active.title">
+        <span class="pane-title">{{ active.title }}</span>
+        <button
+          v-if="localTarget != null"
+          type="button"
+          class="pane-close"
+          :class="{ 'pane-tool-on': showLocal }"
+          :title="showLocal ? 'Hide file browser' : 'Show file browser'"
+          @click="toggleLocalBrowser(localTarget)"
+        >
+          <PanelRight :size="12" :stroke-width="2.25" />
+        </button>
+        <button
+          v-else-if="sftpTarget"
+          type="button"
+          class="pane-close"
+          :class="{ 'pane-tool-on': showSftp }"
+          :title="showSftp ? 'Hide file browser' : 'Show file browser'"
+          @click="toggleSftpPanel(sftpTarget.id)"
+        >
+          <PanelRight :size="12" :stroke-width="2.25" />
+        </button>
+      </div>
+    </div>
   </div>
   <!-- SFTP file browser: resizable divider + panel, SSH connections only. -->
   <template v-if="showSftp && sftpTarget">
@@ -799,40 +808,69 @@ watch(theme, (next) => {
     );
   border-radius: var(--pane-radius);
 }
-.pane-bar {
+/* Hover header: a centered grip hint + pill at the top of a terminal. Only
+   this small centered strip captures the pointer; the rest of the top row
+   stays interactive for the terminal beneath. */
+.pane-hover {
   position: absolute;
   top: 0;
-  left: 0;
-  right: 0;
-  height: 22px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 20;
+  display: flex;
+  justify-content: center;
+  padding: 4px 8px 6px;
+  pointer-events: auto;
+}
+.pane-grip {
+  position: absolute;
+  top: 2px;
+  left: 50%;
+  transform: translateX(-50%);
+  pointer-events: none;
+  user-select: none;
+  font-size: 11px;
+  line-height: 1;
+  letter-spacing: 1px;
+  color: var(--fg-subtle, #9399b2);
+  opacity: 0.6;
+  transition: opacity 120ms ease;
+}
+.pane-hover:hover .pane-grip,
+.pane-hover:active .pane-grip {
+  opacity: 0;
+}
+.pane-pill {
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 0 4px 0 8px;
+  height: 24px;
+  max-width: 240px;
+  padding: 0 4px 0 12px;
   box-sizing: border-box;
-  pointer-events: auto;
-  cursor: grab;
+  border-radius: 9999px;
   user-select: none;
   font-size: 11px;
   color: var(--fg-muted, #cdd6f4);
-  background: color-mix(in srgb, var(--surface-3, #313244) 80%, transparent);
-  border-bottom: 1px solid
+  background: color-mix(in srgb, var(--surface-3, #313244) 88%, transparent);
+  border: 1px solid
     color-mix(
       in srgb,
       var(--border-strong, rgba(255, 255, 255, 0.18)) 60%,
       transparent
     );
-  /* Sit flush inside the overlay's rounded corner (minus its 1px border). */
-  border-radius: calc(var(--pane-radius) - 1px) calc(var(--pane-radius) - 1px) 0
-    0;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
   opacity: 0;
   transition: opacity 120ms ease;
 }
-.pane-bar:hover,
-.pane-bar:active {
+.pane-hover:hover .pane-pill,
+.pane-hover:active .pane-pill {
   opacity: 1;
 }
-.pane-bar:active {
+.pane-pill-drag {
+  cursor: grab;
+}
+.pane-pill-drag:active {
   cursor: grabbing;
 }
 .pane-title {
@@ -953,28 +991,4 @@ watch(theme, (next) => {
   background: color-mix(in srgb, var(--accent, #89b4fa) 40%, transparent);
 }
 
-/* Floating affordance to bring the hidden file browser back. */
-.sftp-reopen {
-  position: absolute;
-  top: 8px;
-  right: 8px;
-  z-index: 20;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 26px;
-  height: 26px;
-  border-radius: 7px;
-  color: var(--fg-subtle, #9399b2);
-  background: color-mix(in srgb, var(--surface-3, #313244) 85%, transparent);
-  border: 1px solid
-    color-mix(in srgb, var(--border-strong, rgba(255, 255, 255, 0.18)) 50%, transparent);
-  cursor: pointer;
-  opacity: 0.7;
-  transition: opacity 120ms ease, color 120ms ease;
-}
-.sftp-reopen:hover {
-  opacity: 1;
-  color: var(--fg, #e6e6e6);
-}
 </style>
