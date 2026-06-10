@@ -61,7 +61,7 @@ import {
 import { columnWidth, startColumnResize } from "../state/fileColumns";
 import { browserLocations } from "../state/filesPanel";
 import { fitCrumbs } from "../lib/crumbs";
-import { ConfirmDialog } from "./ui";
+import { ConfirmDialog, DropdownMenu, Input } from "./ui";
 
 const props = withDefaults(
   defineProps<{
@@ -83,7 +83,12 @@ const IS_WIN =
   typeof navigator !== "undefined" && /Win/i.test(navigator.platform);
 
 // Focus a freshly-mounted inline editor (rename / new-folder fields).
-const vFocus = { mounted: (el: HTMLInputElement) => el.focus() };
+// Focus a freshly-mounted inline editor (rename / new-folder fields). Also
+// works on a component root (e.g. ui/Input) by reaching for its inner input.
+const vFocus = {
+  mounted: (el: HTMLElement) =>
+    (el instanceof HTMLInputElement ? el : el.querySelector("input"))?.focus(),
+};
 
 const EDIT_INPUT_CLASS =
   "flex-1 min-w-0 bg-surface-1 border border-border text-fg rounded-md px-2 py-1 text-xs focus:outline-none focus:border-border-strong";
@@ -681,28 +686,27 @@ onBeforeUnmount(() => {
       >
         {{ fixedLabel }}
       </span>
-      <select
+      <DropdownMenu
         v-else-if="sources.length"
-        :value="sourceValue"
-        class="flex-1 min-w-0 bg-surface-1 border border-border text-fg rounded-md px-1.5 py-1 text-xs focus:outline-none focus:border-border-strong"
+        size="sm"
+        class="min-w-0"
         title="Location"
-        @change="emit('update:source', ($event.target as HTMLSelectElement).value)"
-      >
-        <option v-for="s in sources" :key="s.value" :value="s.value">
-          {{ s.label }}
-        </option>
-      </select>
-      <span v-else class="flex-1" />
-      <input
-        v-if="filterOpen"
-        v-model="filterText"
-        v-focus
-        placeholder="Filter"
-        spellcheck="false"
-        class="w-28 min-w-0 shrink bg-bg border border-border text-fg rounded-md px-1.5 py-0.5 text-xs focus:outline-none focus:border-border-strong"
-        @keydown.esc="closeFilter"
-        @blur="onFilterBlur"
+        :options="sources"
+        :model-value="sourceValue"
+        @update:model-value="emit('update:source', String($event))"
       />
+      <span v-else class="flex-1" />
+      <div v-if="filterOpen" class="w-28 min-w-0 flex">
+        <Input
+          v-model="filterText"
+          v-focus
+          size="sm"
+          placeholder="Filter"
+          :spellcheck="false"
+          @keydown.esc="closeFilter"
+          @focusout="onFilterBlur"
+        />
+      </div>
       <button
         v-else
         type="button"

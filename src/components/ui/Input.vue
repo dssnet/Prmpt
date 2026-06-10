@@ -23,8 +23,11 @@ const props = withDefaults(
     id?: string;
     disabled?: boolean;
     autocomplete?: string;
+    spellcheck?: boolean;
+    /** "sm" is a compact variant for tight chrome (toolbar/header rows). */
+    size?: "md" | "sm";
   }>(),
-  { type: "text" },
+  { type: "text", size: "md" },
 );
 
 const emit = defineEmits<{
@@ -105,7 +108,9 @@ onBeforeUnmount(stopHold);
       :max="max"
       :disabled="disabled"
       :autocomplete="autocomplete"
-      class="num-input flex-1 w-full bg-surface-1 border border-border text-fg rounded-md px-2 py-1.5 text-sm focus:outline-none focus:border-border-strong disabled:opacity-50"
+      :spellcheck="spellcheck"
+      class="num-input flex-1 w-full bg-surface-1 border border-border text-fg rounded-md focus:outline-none focus:border-border-strong disabled:opacity-50"
+      :class="size === 'sm' ? 'px-1.5 py-0.5 text-xs' : 'px-2 py-1.5 text-sm'"
       @input="onInput($event, type === 'number')"
       @wheel="onWheel"
     />

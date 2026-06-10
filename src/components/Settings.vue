@@ -395,7 +395,7 @@ function errText(e: unknown): string {
               <Input
                 v-model="term.shell"
                 class="w-72 shrink-0"
-                spellcheck="false"
+                :spellcheck="false"
                 placeholder="System default"
               />
             </div>

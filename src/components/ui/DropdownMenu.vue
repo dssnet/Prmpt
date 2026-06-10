@@ -5,13 +5,18 @@ import { computed, onBeforeUnmount, ref, watch } from "vue";
 type OptionValue = string | number;
 type Option = { value: OptionValue; label: string; disabled?: boolean };
 
-const props = defineProps<{
-  modelValue?: OptionValue;
-  options: Option[];
-  id?: string;
-  disabled?: boolean;
-  placeholder?: string;
-}>();
+const props = withDefaults(
+  defineProps<{
+    modelValue?: OptionValue;
+    options: Option[];
+    id?: string;
+    disabled?: boolean;
+    placeholder?: string;
+    /** "sm" is a compact variant for tight chrome (toolbar/header rows). */
+    size?: "md" | "sm";
+  }>(),
+  { size: "md" },
+);
 
 const emit = defineEmits<{ "update:modelValue": [value: OptionValue] }>();
 
@@ -99,15 +104,18 @@ onBeforeUnmount(() => {
       :disabled="disabled"
       :aria-haspopup="'listbox'"
       :aria-expanded="open"
-      class="w-full flex items-center justify-between gap-2 bg-surface-1 border border-border text-fg rounded-md px-2 py-1.5 text-sm focus:outline-none focus:border-border-strong disabled:opacity-50 cursor-pointer"
-      :class="{ 'border-border-strong': open }"
+      class="w-full flex items-center justify-between bg-surface-1 border border-border text-fg rounded-md focus:outline-none focus:border-border-strong disabled:opacity-50 cursor-pointer"
+      :class="[
+        size === 'sm' ? 'gap-1 px-1.5 py-0.5 text-xs' : 'gap-2 px-2 py-1.5 text-sm',
+        { 'border-border-strong': open },
+      ]"
       @click="toggle"
     >
       <span :class="selected ? '' : 'text-fg-subtle'" class="truncate">
         {{ buttonLabel }}
       </span>
       <ChevronDown
-        :size="14"
+        :size="size === 'sm' ? 12 : 14"
         class="chevron shrink-0 text-fg-muted"
         :class="{ 'is-open': open }"
       />
@@ -124,9 +132,10 @@ onBeforeUnmount(() => {
           role="option"
           :aria-selected="String(opt.value) === String(modelValue)"
           :aria-disabled="opt.disabled || undefined"
-          class="dropdown-option pl-1.5 pr-2.5 py-1.5 text-sm cursor-pointer rounded-md flex items-center gap-1.5"
+          class="dropdown-option cursor-pointer rounded-md flex items-center gap-1.5"
           :style="{ '--i': i }"
           :class="[
+            size === 'sm' ? 'pl-1 pr-2 py-1 text-xs' : 'pl-1.5 pr-2.5 py-1.5 text-sm',
             opt.disabled
               ? 'text-fg-subtle cursor-default'
               : i === activeIndex
