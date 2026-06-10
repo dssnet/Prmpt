@@ -56,6 +56,7 @@ import {
   toggleSize,
 } from "../state/uiPrefs";
 import { columnWidth, startColumnResize } from "../state/fileColumns";
+import { browserLocations } from "../state/filesPanel";
 import { ConfirmDialog } from "./ui";
 
 const props = withDefaults(
@@ -222,9 +223,34 @@ async function load(path: string): Promise<void> {
   }
 }
 
+/** Remember the current location so the next mount (browsers unmount on
+ *  every tab switch) resumes it. One shared slot — the local cwd already
+ *  persists across target-tab changes while mounted. */
+function saveLocation(): void {
+  if (!cwd.value) return;
+  browserLocations.set("local", {
+    cwd: cwd.value,
+    back: [...backStack.value],
+    forward: [...forwardStack.value],
+  });
+}
+
 async function init(): Promise<void> {
   backStack.value = [];
   forwardStack.value = [];
+  // Resume the last visited directory; if it no longer loads (deleted,
+  // permissions…) forget it and fall back to the home directory.
+  const mem = browserLocations.get("local");
+  if (mem) {
+    backStack.value = [...mem.back];
+    forwardStack.value = [...mem.forward];
+    await load(mem.cwd);
+    if (cwd.value === mem.cwd) return;
+    browserLocations.delete("local");
+    backStack.value = [];
+    forwardStack.value = [];
+    error.value = null;
+  }
   try {
     await load(await localHomeDir());
   } catch (err) {
@@ -459,6 +485,7 @@ function openRowMenu(e: LocalEntry): void {
 onMounted(() => void init());
 
 onBeforeUnmount(() => {
+  saveLocation();
   unregisterSftpTarget("local", props.targetTabId, dropHandler);
 });
 </script>

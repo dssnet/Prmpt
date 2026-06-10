@@ -58,6 +58,7 @@ import {
   toggleSize,
 } from "../state/uiPrefs";
 import { columnWidth, startColumnResize } from "../state/fileColumns";
+import { browserLocations } from "../state/filesPanel";
 import { ConfirmDialog } from "./ui";
 
 const props = withDefaults(
@@ -213,6 +214,17 @@ async function load(path: string): Promise<void> {
   }
 }
 
+/** Remember the current location so the next mount of this connection's
+ *  browser (the panel unmounts on every tab switch) resumes it. */
+function saveLocation(tabId: number): void {
+  if (!cwd.value) return;
+  browserLocations.set(`sftp:${tabId}`, {
+    cwd: cwd.value,
+    back: [...backStack.value],
+    forward: [...forwardStack.value],
+  });
+}
+
 async function init(): Promise<void> {
   entries.value = [];
   cwd.value = "";
@@ -220,6 +232,23 @@ async function init(): Promise<void> {
   forwardStack.value = [];
   error.value = null;
   status.value = "connecting";
+  // Resume the last visited directory first. A "not connected yet" failure
+  // leaves cwd empty and status "connecting"; the availability event re-runs
+  // init() and retries. A real failure (directory gone) falls through to home.
+  const mem = browserLocations.get(`sftp:${props.tabId}`);
+  if (mem) {
+    backStack.value = [...mem.back];
+    forwardStack.value = [...mem.forward];
+    await load(mem.cwd);
+    if (cwd.value === mem.cwd) return; // restored
+    if (error.value == null) return; // not connected yet / unavailable
+    // The remembered directory no longer loads (deleted, permissions…) —
+    // forget it and fall back to the home directory.
+    browserLocations.delete(`sftp:${props.tabId}`);
+    backStack.value = [];
+    forwardStack.value = [];
+    error.value = null;
+  }
   try {
     const home = await sftpRealpath(props.tabId, ".");
     await load(home || "/");
@@ -503,7 +532,12 @@ watch(
 
 watch(
   () => props.tabId,
-  () => void init(),
+  (_next, prev) => {
+    // Same component instance switched to another connection (e.g. the
+    // column picker): bank the old connection's location before resetting.
+    if (prev != null) saveLocation(prev);
+    void init();
+  },
 );
 
 onMounted(async () => {
@@ -523,6 +557,7 @@ onMounted(async () => {
 });
 
 onBeforeUnmount(() => {
+  saveLocation(props.tabId);
   for (const fn of unlisteners) fn();
   unlisteners.length = 0;
   unregisterSftpTarget("sftp", props.tabId, dropHandler);

@@ -25,3 +25,18 @@ export const panelColumns: Record<"ssh" | "terminal", PanelColumns> = {
     seeded: false,
   },
 };
+
+/** Last visited directory + nav history per browser, so a remount (the
+ *  browsers unmount on every tab switch) resumes where the user left off
+ *  instead of starting over at the home directory. SFTP browsers are keyed
+ *  by connection tab id (`sftp:<id>`); the local browser shares one slot
+ *  (`local`) — its cwd already persists across target-tab changes while
+ *  mounted, so the memory mirrors that. Session-only; tab ids are never
+ *  reused, so stale SFTP entries just sit unused. */
+export interface BrowserLocation {
+  cwd: string;
+  back: string[];
+  forward: string[];
+}
+
+export const browserLocations = new Map<string, BrowserLocation>();
