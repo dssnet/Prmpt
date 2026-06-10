@@ -14,6 +14,7 @@ import {
   MoreHorizontal,
   Pencil,
   RefreshCw,
+  Search,
   Trash2,
   Upload,
   X,
@@ -94,10 +95,28 @@ type Status = "connecting" | "ready" | "unavailable";
 
 const cwd = ref<string>("");
 const entries = ref<SftpEntry[]>([]);
-// Hide dot-prefixed (hidden) entries unless the shared toggle is on.
-const visibleEntries = computed(() =>
-  entries.value.filter((e) => showHiddenFiles.value || !e.name.startsWith(".")),
-);
+// Header name filter — applies to the currently shown folder only (navigation
+// resets it). Collapsed to a search icon until clicked.
+const filterOpen = ref(false);
+const filterText = ref("");
+function onFilterBlur(): void {
+  if (!filterText.value) filterOpen.value = false;
+}
+function closeFilter(): void {
+  filterText.value = "";
+  filterOpen.value = false;
+}
+watch(cwd, closeFilter);
+// Hide dot-prefixed (hidden) entries unless the shared toggle is on; then
+// apply the name filter.
+const visibleEntries = computed(() => {
+  const q = filterText.value.trim().toLowerCase();
+  return entries.value.filter(
+    (e) =>
+      (showHiddenFiles.value || !e.name.startsWith(".")) &&
+      (!q || e.name.toLowerCase().includes(q)),
+  );
+});
 const loading = ref(false);
 const error = ref<string | null>(null);
 const status = ref<Status>("connecting");
@@ -763,6 +782,27 @@ onBeforeUnmount(() => {
         </option>
       </select>
       <span v-else class="flex-1" />
+      <template v-if="status === 'ready'">
+        <input
+          v-if="filterOpen"
+          v-model="filterText"
+          v-focus
+          placeholder="Filter"
+          spellcheck="false"
+          class="w-28 min-w-0 shrink bg-bg border border-border text-fg rounded-md px-1.5 py-0.5 text-xs focus:outline-none focus:border-border-strong"
+          @keydown.esc="closeFilter"
+          @blur="onFilterBlur"
+        />
+        <button
+          v-else
+          type="button"
+          class="icon-btn"
+          title="Filter this folder"
+          @click="filterOpen = true"
+        >
+          <Search :size="14" />
+        </button>
+      </template>
       <slot name="actions" />
       <button
         v-if="canClose"
@@ -887,7 +927,7 @@ onBeforeUnmount(() => {
           v-if="!loading && visibleEntries.length === 0 && !creatingFolder"
           class="px-3 py-6 text-center text-xs text-fg-subtle"
         >
-          Empty directory.
+          {{ filterText ? "No matches." : "Empty directory." }}
         </p>
 
         <table class="w-full table-fixed border-separate border-spacing-0 text-xs">
