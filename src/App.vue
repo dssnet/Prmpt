@@ -9,7 +9,6 @@ import {
   bootstrapWindow,
   closeCurrentWindow,
   currentWindowLabel,
-  fullDiskAccessGranted,
   onExit,
   onMenuCopy,
   onMenuPaste,
@@ -62,7 +61,6 @@ import {
 } from "./state/terminal";
 import { toggleLocalBrowser } from "./state/localBrowser";
 import { showToast } from "./state/toasts";
-import FullDiskAccessModal from "./components/FullDiskAccessModal.vue";
 import HomeView from "./components/HomeView.vue";
 import HostKeyFirstConnectModal from "./components/HostKeyFirstConnectModal.vue";
 import HostKeyMismatchModal from "./components/HostKeyMismatchModal.vue";
@@ -76,6 +74,7 @@ import TabBar from "./components/TabBar.vue";
 import TerminalView from "./components/TerminalView.vue";
 import TitleBar from "./components/TitleBar.vue";
 import Toasts from "./components/Toasts.vue";
+import WelcomeOverlay from "./components/welcome/WelcomeOverlay.vue";
 
 const props = defineProps<{ config: Config }>();
 
@@ -83,9 +82,17 @@ const { tabs, active } = useTabs();
 const hostKeyModal = ref<SshHostKeyMismatch | null>(null);
 const firstConnectModal = ref<SshHostKeyFirstConnect | null>(null);
 const connectErrorModal = ref<SshConnectError | null>(null);
-const fdaModal = ref(false);
 
 const myLabel = currentWindowLabel();
+
+// First-boot welcome (hello → Full Disk Access → backup import): primary
+// window only, once per machine. Initialized synchronously so the overlay
+// is up on first paint, covering the terminal that boots underneath.
+// Deliberately ignores the legacy prmpt.fdaOnboardingSeen flag — existing
+// installs see the new welcome once too.
+const welcomeOpen = ref(
+  myLabel === "main" && !localStorage.getItem("prmpt.welcomeSeen"),
+);
 
 // Recurring background update check (in addition to the once-on-launch
 // one). Cleared in onBeforeUnmount so tear-off windows don't leak timers.
@@ -97,10 +104,16 @@ let updateTimer: ReturnType<typeof setInterval> | undefined;
 // N spawnNewTab calls, polluting the new window with extra shells.
 const unlisteners: UnlistenFn[] = [];
 
-function dismissFda(): void {
-  // First-run only: once seen, never nag again on this machine.
-  localStorage.setItem("prmpt.fdaOnboardingSeen", "1");
-  fdaModal.value = false;
+function dismissWelcome(): void {
+  // Once seen, never again on this machine. (The import path never gets
+  // here — useBackupImport sets the flag in beforeRelaunch instead.)
+  localStorage.setItem("prmpt.welcomeSeen", "1");
+  localStorage.removeItem("prmpt.fdaOnboardingSeen"); // legacy key cleanup
+  welcomeOpen.value = false;
+  // The launch update check was deferred while the welcome was up.
+  void runUpdateCheck();
+  // Hand focus to the terminal that booted underneath.
+  focusCanvas();
 }
 
 function dismissConnectError(): void {
@@ -432,6 +445,10 @@ const shortcuts: Shortcut[] = [
 ];
 
 function onKeyDown(e: KeyboardEvent) {
+  // While the welcome overlay is up, keep keystrokes and app shortcuts away
+  // from the terminal booting underneath. No preventDefault — the welcome's
+  // own inputs (backup passphrase) must keep native typing.
+  if (welcomeOpen.value) return;
   // When focus is on a form input, don't hijack standard editing shortcuts
   // (a/c/v/x) for the terminal — let the field handle them natively (or
   // let the Edit menu accelerators route through the menu handlers).
@@ -482,6 +499,8 @@ function onKeyDown(e: KeyboardEvent) {
 }
 
 function onPaste(e: ClipboardEvent) {
+  // Welcome overlay up: nothing here should reach the PTY underneath.
+  if (welcomeOpen.value) return;
   // Let focused text inputs receive the paste natively (SFTP name fields, etc.).
   if (focusedEditable(e.target) != null) return;
   const text = e.clipboardData?.getData("text");
@@ -618,24 +637,14 @@ onMounted(async () => {
   // mode === "reserve": stay idle. onTabAttached + onWindowActivateBlank
   // (installed above) handle whichever activation fires.
 
-  // First-run macOS Full Disk Access explainer: primary window only, once
-  // per machine, and only if it isn't already granted. Off macOS the
-  // backend reports granted=true so this never fires.
-  if (myLabel === "main" && !localStorage.getItem("prmpt.fdaOnboardingSeen")) {
-    try {
-      if (!(await fullDiskAccessGranted())) fdaModal.value = true;
-    } catch (err) {
-      console.error("Full Disk Access check failed:", err);
-    }
-  }
-
   // Updater: silent check on launch, then on a recurring interval.
   // Only the primary window drives this — a relaunch tears down every
   // window, so multiple windows racing the same check is pointless.
   // Kept off the critical path (no await) so first paint never waits on
-  // the network.
+  // the network. While the welcome overlay is up the launch check is
+  // deferred to dismissWelcome() so UpdateModal can't pop over it.
   if (myLabel === "main") {
-    void runUpdateCheck();
+    if (!welcomeOpen.value) void runUpdateCheck();
     updateTimer = setInterval(() => {
       void runUpdateCheck();
     }, UPDATE_CHECK_INTERVAL_MS);
@@ -679,7 +688,7 @@ onBeforeUnmount(() => {
     :payload="firstConnectModal"
     @close="firstConnectModal = null"
   />
-  <FullDiskAccessModal v-if="fdaModal" @close="dismissFda" />
+  <WelcomeOverlay v-if="welcomeOpen" @close="dismissWelcome" />
   <PassphrasePromptModal
     v-if="passphrasePromptState"
     :state="passphrasePromptState"

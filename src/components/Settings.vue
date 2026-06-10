@@ -10,16 +10,10 @@ import {
 import { computed, ref, watch } from "vue";
 
 import { getVersion } from "@tauri-apps/api/app";
-import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
-import { relaunch } from "@tauri-apps/plugin-process";
+import { save as saveDialog } from "@tauri-apps/plugin-dialog";
 
-import {
-  BACKUP_ENCRYPTED_NEEDS_PASSPHRASE,
-  exportBackup,
-  getConfig,
-  importBackup,
-  setTerminalPrefs,
-} from "../ipc";
+import { errText, useBackupImport } from "../composables/useBackupImport";
+import { exportBackup, getConfig, setTerminalPrefs } from "../ipc";
 import { applyTheme, useTheme } from "../state/theme";
 import { findPresetMatch, PRESETS } from "../state/themes";
 import { setToastsEnabled, toastsEnabled } from "../state/uiPrefs";
@@ -186,82 +180,30 @@ async function confirmExport() {
   }
 }
 
-// Import: destructive, replaces all data, then relaunches.
-const pendingImportPath = ref<string | null>(null);
-const showImportConfirm = ref(false);
-const showImportPass = ref(false);
-const importPass = ref("");
-const importPassError = ref<string | null>(null);
-
-async function openImport() {
-  backupStatus.value = null;
-  let path: string | string[] | null;
-  try {
-    path = await openDialog({
-      multiple: false,
-      directory: false,
-      filters: [{ name: "Prmpt backup", extensions: ["prmpt"] }],
-    });
-  } catch (e) {
-    backupStatus.value = { tone: "err", text: `Import failed: ${errText(e)}` };
-    return;
-  }
-  if (typeof path !== "string") return; // cancelled
-  pendingImportPath.value = path;
-  showImportConfirm.value = true;
-}
-
-function cancelImport() {
-  showImportConfirm.value = false;
-  showImportPass.value = false;
-  pendingImportPath.value = null;
-  importPass.value = "";
-  importPassError.value = null;
-}
-
-// First attempt: no passphrase. If the file turns out to be encrypted the
-// backend asks for one (sentinel error) and we surface the passphrase modal.
-async function confirmImport() {
-  showImportConfirm.value = false;
-  await runImport(undefined);
-}
-
-async function submitImportPass() {
-  if (!importPass.value) return;
-  importPassError.value = null;
-  await runImport(importPass.value);
-}
-
-async function runImport(passphrase: string | undefined) {
-  const path = pendingImportPath.value;
-  if (!path) return;
-  backupBusy.value = true;
-  try {
-    await importBackup(path, passphrase);
-    // Staged successfully — relaunch so the swap is applied before the DB
-    // is reopened. The new process picks up the imported data on boot.
+// Import: destructive, replaces all data, then relaunches. The state
+// machine lives in useBackupImport (shared with the first-boot welcome).
+const {
+  busy: importBusy,
+  showConfirm: showImportConfirm,
+  showPassPrompt: showImportPass,
+  passphrase: importPass,
+  passError: importPassError,
+  pickFile,
+  confirm: confirmImport,
+  cancel: cancelImport,
+  submitPassphrase: submitImportPass,
+} = useBackupImport({
+  beforeRelaunch: () => {
     backupStatus.value = { tone: "ok", text: "Imported. Restarting…" };
-    await relaunch();
-  } catch (e) {
-    const msg = errText(e);
-    if (msg.includes(BACKUP_ENCRYPTED_NEEDS_PASSPHRASE)) {
-      // Encrypted backup, no/blank passphrase yet — prompt for one.
-      showImportPass.value = true;
-    } else if (showImportPass.value) {
-      // We're already prompting; a failure here is almost always a bad
-      // passphrase. Keep the modal open and show why.
-      importPassError.value = msg;
-    } else {
-      cancelImport();
-      backupStatus.value = { tone: "err", text: `Import failed: ${msg}` };
-    }
-  } finally {
-    backupBusy.value = false;
-  }
-}
+  },
+  onError: (msg) => {
+    backupStatus.value = { tone: "err", text: `Import failed: ${msg}` };
+  },
+});
 
-function errText(e: unknown): string {
-  return typeof e === "string" ? e : e instanceof Error ? e.message : String(e);
+function openImport() {
+  backupStatus.value = null;
+  void pickFile();
 }
 </script>
 
@@ -473,8 +415,14 @@ function errText(e: unknown): string {
             </p>
           </header>
           <div class="flex items-center gap-3">
-            <Button :disabled="backupBusy" @click="openExport">Export backup…</Button>
-            <Button variant="secondary" :disabled="backupBusy" @click="openImport">
+            <Button :disabled="backupBusy || importBusy" @click="openExport">
+              Export backup…
+            </Button>
+            <Button
+              variant="secondary"
+              :disabled="backupBusy || importBusy"
+              @click="openImport"
+            >
               Import backup…
             </Button>
             <span
@@ -542,7 +490,7 @@ function errText(e: unknown): string {
       </p>
       <div class="flex gap-2 justify-end mt-1.5">
         <Button variant="secondary" @click="cancelImport">Cancel</Button>
-        <Button type="submit" :disabled="!importPass || backupBusy">
+        <Button type="submit" :disabled="!importPass || importBusy">
           Decrypt and import
         </Button>
       </div>
