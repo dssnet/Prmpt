@@ -37,6 +37,8 @@ import {
   unregisterSftpTarget,
   deliverSftpDrop,
   startFileDrag,
+  startMarqueeSelect,
+  type MarqueeRect,
   type SftpDragItem,
   type FileDropTarget,
 } from "../state/sftp";
@@ -104,7 +106,7 @@ const renameValue = ref("");
 const creatingFolder = ref(false);
 const newFolderValue = ref("");
 
-const pendingDelete = ref<SftpEntry | null>(null);
+const pendingDelete = ref<SftpEntry[] | null>(null);
 
 // Transfers live in the global store (they outlive this component when the
 // panel unmounts on a tab switch); this column shows the ones destined for
@@ -289,6 +291,12 @@ async function goForward(): Promise<void> {
 function navigate(e: SftpEntry): void {
   if (e.is_dir) void visit(e.path);
 }
+/** Name-button click: modifier clicks are selection gestures (handled on the
+ *  row's mousedown), so only a plain click navigates. */
+function onNameClick(ev: MouseEvent, e: SftpEntry): void {
+  if (ev.shiftKey || ev.metaKey || ev.ctrlKey) return;
+  navigate(e);
+}
 function goUp(): void {
   if (!atRoot.value) void visit(parentDir(cwd.value));
 }
@@ -346,23 +354,44 @@ async function commitRename(e: SftpEntry): Promise<void> {
 }
 
 // ---- delete ----
-async function confirmDelete(): Promise<void> {
-  const e = pendingDelete.value;
-  pendingDelete.value = null;
-  if (!e) return;
-  // Directory deletes are recursive and can take a while — track them in the
-  // transfers list (progress arrives as a count of removed entries). File
-  // deletes are instant and stay quiet, but still need a unique id.
-  const id = e.is_dir
-    ? trackTransfer(transferKey.value, props.tabId, e.name, "del")
-    : allocTransferId();
-  try {
-    await sftpRemove(props.tabId, e.path, e.is_dir, id);
-    refresh();
-  } catch (err) {
-    if (e.is_dir) markTransferError(id, describeError(err));
-    else error.value = describeError(err);
+// One confirm covers the whole selection; the dialog lists what's going.
+const deleteTitle = computed(() => {
+  const items = pendingDelete.value ?? [];
+  if (items.length === 1) return items[0].is_dir ? "Delete folder?" : "Delete file?";
+  return `Delete ${items.length} items?`;
+});
+const deleteMessage = computed(() => {
+  const items = pendingDelete.value ?? [];
+  if (items.length === 1) {
+    return `Permanently delete “${items[0].name}” on the remote host?`;
   }
+  const shown = items.slice(0, 8).map((e) => `• ${e.name}${e.is_dir ? "/" : ""}`);
+  if (items.length > 8) shown.push(`…and ${items.length - 8} more`);
+  return `Permanently delete these ${items.length} items on the remote host?\n${shown.join("\n")}`;
+});
+
+async function confirmDelete(): Promise<void> {
+  const items = pendingDelete.value;
+  pendingDelete.value = null;
+  if (!items?.length) return;
+  await Promise.all(
+    items.map(async (e) => {
+      // Directory deletes are recursive and can take a while — track them in
+      // the transfers list (progress arrives as a count of removed entries).
+      // File deletes are instant and stay quiet, but still need a unique id.
+      const id = e.is_dir
+        ? trackTransfer(transferKey.value, props.tabId, e.name, "del")
+        : allocTransferId();
+      try {
+        await sftpRemove(props.tabId, e.path, e.is_dir, id);
+      } catch (err) {
+        if (e.is_dir) markTransferError(id, describeError(err));
+        else error.value = describeError(err);
+      }
+    }),
+  );
+  clearSelection();
+  refresh();
 }
 
 // ---- transfers ----
@@ -405,20 +434,83 @@ async function pickAndUpload(directory: boolean): Promise<void> {
   }
 }
 
+// ---- selection -------------------------------------------------------------
+// Multi-select for drag & drop: click selects, Cmd/Ctrl+click toggles,
+// Shift+click extends from the last plain/toggled row. Dragging any selected
+// row drags the whole selection. Navigation clears it.
+const selected = ref<Set<string>>(new Set());
+let selectionAnchor: string | null = null;
+
+function clearSelection(): void {
+  if (selected.value.size) selected.value = new Set();
+  selectionAnchor = null;
+}
+watch(cwd, clearSelection);
+
+function applyRowSelection(ev: MouseEvent, e: SftpEntry): void {
+  const paths = visibleEntries.value.map((x) => x.path);
+  if (ev.shiftKey && selectionAnchor != null && paths.includes(selectionAnchor)) {
+    const a = paths.indexOf(selectionAnchor);
+    const b = paths.indexOf(e.path);
+    const [lo, hi] = a < b ? [a, b] : [b, a];
+    selected.value = new Set(paths.slice(lo, hi + 1));
+  } else if (ev.metaKey || ev.ctrlKey) {
+    const next = new Set(selected.value);
+    if (next.has(e.path)) next.delete(e.path);
+    else next.add(e.path);
+    selected.value = next;
+    selectionAnchor = e.path;
+  } else if (!selected.value.has(e.path)) {
+    selected.value = new Set([e.path]);
+    selectionAnchor = e.path;
+  }
+  // A plain mousedown on an already-selected row keeps the group so it can be
+  // dragged; if it turns out to be a click, startFileDrag's onClick collapses.
+}
+
+// Mousedown on the empty area: clear (plain) or keep (modifier) the current
+// selection, then start a rubber-band selection — dragging draws a rectangle
+// that selects every row it touches.
+const listRef = ref<HTMLElement | null>(null);
+const marqueeRect = ref<MarqueeRect | null>(null);
+
+function onListMouseDown(ev: MouseEvent): void {
+  if ((ev.target as HTMLElement).closest("tr, input, button")) return;
+  const additive = ev.shiftKey || ev.metaKey || ev.ctrlKey;
+  if (!additive) clearSelection();
+  if (!listRef.value) return;
+  startMarqueeSelect(listRef.value, ev, new Set(selected.value), (sel, rect) => {
+    selected.value = sel;
+    marqueeRect.value = rect;
+  });
+}
+
 // ---- drag & drop: pointer-based ------------------------------------------
 // Drag a row out via the shared `startFileDrag` helper (the hit-test contract
 // + ghost/hint live in state/sftp.ts so this and the local browser share them).
 function onRowMouseDown(ev: MouseEvent, e: SftpEntry): void {
   // Don't begin a drag from the row's action buttons or the rename field.
   if ((ev.target as HTMLElement).closest("[data-sftp-action], input")) return;
-  const item: SftpDragItem = {
+  applyRowSelection(ev, e);
+  // Dragging a selected row takes the whole selection (in listing order).
+  const group =
+    selected.value.has(e.path) && selected.value.size > 1
+      ? visibleEntries.value.filter((x) => selected.value.has(x.path))
+      : [e];
+  const items: SftpDragItem[] = group.map((x) => ({
     source: "sftp",
     srcTabId: props.tabId,
-    path: e.path,
-    name: e.name,
-    isDir: e.is_dir,
-  };
-  startFileDrag(item, ev, (t) => void onDrop(item, t));
+    path: x.path,
+    name: x.name,
+    isDir: x.is_dir,
+  }));
+  startFileDrag(items, ev, (t) => void onDrop(items, t), () => {
+    // Plain click (no drag) on a selected row collapses a multi-selection.
+    if (!ev.shiftKey && !ev.metaKey && !ev.ctrlKey) {
+      selected.value = new Set([e.path]);
+      selectionAnchor = e.path;
+    }
+  });
 }
 
 // ---- native menus ----
@@ -444,47 +536,64 @@ function openToolbarMenu(): void {
   ]);
 }
 function openRowMenu(e: SftpEntry): void {
+  // Right-clicking outside the current selection re-targets it to this row
+  // (Finder-style); inside it, the menu acts on the whole selection.
+  if (!selected.value.has(e.path)) {
+    selected.value = new Set([e.path]);
+    selectionAnchor = e.path;
+  }
+  const group =
+    selected.value.size > 1
+      ? visibleEntries.value.filter((x) => selected.value.has(x.path))
+      : [e];
   void popupMenu([
     { text: "Download", action: () => void download(e) },
     { text: "Rename", action: () => startRename(e) },
     null,
     {
-      text: "Delete",
+      text: group.length > 1 ? `Delete ${group.length} items` : "Delete",
       action: () => {
-        pendingDelete.value = e;
+        pendingDelete.value = group;
       },
     },
   ]);
 }
 
-async function onDrop(item: SftpDragItem, t: FileDropTarget): Promise<void> {
-  if (t.kind === "sftp" && t.tabId === item.srcTabId) {
-    // Same connection → move into a folder (ignore drops into the current dir).
-    if (t.dir === item.path || t.dir === parentDir(item.path)) return;
+async function onDrop(items: SftpDragItem[], t: FileDropTarget): Promise<void> {
+  if (t.kind === "sftp" && t.tabId === props.tabId) {
+    // Same connection → move into a folder (skip items already there).
+    const movable = items.filter(
+      (i) => t.dir !== i.path && t.dir !== parentDir(i.path),
+    );
+    if (!movable.length) return;
     try {
-      await sftpRename(props.tabId, item.path, joinRemote(t.dir, item.name));
+      for (const i of movable) {
+        await sftpRename(props.tabId, i.path, joinRemote(t.dir, i.name));
+      }
       refresh();
     } catch (err) {
       error.value = describeError(err);
+      refresh();
     }
   } else {
     // Another column/browser → hand to the destination column to copy + track.
-    deliverSftpDrop(t, item);
+    deliverSftpDrop(t, items);
   }
 }
 
-// Delivered drop (this column is the destination). A local item is uploaded;
-// an SFTP item from another host is relayed. Folders are recursive either way,
-// so they get a confirm dialog first.
-const pendingFolderDrop = ref<{ item: SftpDragItem; dstDir: string } | null>(null);
+// Delivered drop (this column is the destination). Local items are uploaded;
+// SFTP items from another host are relayed. Folders are recursive either way,
+// so they get one confirm dialog (covering all dropped folders) first.
+const pendingFolderDrop = ref<{ items: SftpDragItem[]; dstDir: string } | null>(null);
 
-async function relayInto(d: SftpDragItem, dstDir: string): Promise<void> {
-  if (d.isDir) {
-    pendingFolderDrop.value = { item: d, dstDir };
-    return;
+function relayInto(items: SftpDragItem[], dstDir: string): void {
+  for (const d of items) {
+    if (d.isDir) continue;
+    if (d.source === "local") void uploadLocalInto(d, dstDir);
+    else void relayRemoteInto(d, dstDir);
   }
-  if (d.source === "local") await uploadLocalInto(d, dstDir);
-  else await relayRemoteInto(d, dstDir);
+  const folders = items.filter((d) => d.isDir);
+  if (folders.length) pendingFolderDrop.value = { items: folders, dstDir };
 }
 
 /** Copy a file/folder from another connection into `dstDir` here. */
@@ -510,17 +619,32 @@ async function uploadLocalInto(d: SftpDragItem, dstDir: string): Promise<void> {
   }
 }
 
+// Dialog copy: the verb tracks the items' source (all items in one drop come
+// from the same browser), the label collapses multi-folder drops to a count.
+const folderDropVerb = computed(() =>
+  pendingFolderDrop.value?.items[0]?.source === "local" ? "Upload" : "Copy",
+);
+const folderDropCount = computed(() => pendingFolderDrop.value?.items.length ?? 0);
+const folderDropLabel = computed(() => {
+  const items = pendingFolderDrop.value?.items ?? [];
+  return items.length === 1
+    ? `the folder “${items[0].name}”`
+    : `${items.length} folders`;
+});
+
 function confirmFolderDrop(): void {
   const u = pendingFolderDrop.value;
   pendingFolderDrop.value = null;
   if (!u) return;
-  if (u.item.source === "local") void uploadLocalInto(u.item, u.dstDir);
-  else void relayRemoteInto(u.item, u.dstDir);
+  for (const item of u.items) {
+    if (item.source === "local") void uploadLocalInto(item, u.dstDir);
+    else void relayRemoteInto(item, u.dstDir);
+  }
 }
 
 // Register as a drop target so another column's release can deliver a copy
 // here (re-register when the picker changes which connection we show).
-const dropHandler = (item: SftpDragItem, dstDir: string) => void relayInto(item, dstDir);
+const dropHandler = (items: SftpDragItem[], dstDir: string) => relayInto(items, dstDir);
 watch(
   () => props.tabId,
   (next, prev) => {
@@ -674,7 +798,8 @@ onBeforeUnmount(() => {
 
       <!-- listing (also a drop zone for cross-connection copy into cwd) -->
       <div
-        class="flex-1 min-h-0 overflow-y-auto pb-3"
+        ref="listRef"
+        class="relative flex-1 min-h-0 overflow-y-auto pb-3"
         :class="{
           'ring-1 ring-inset ring-accent/50':
             sftpDropHint && sftpDropHint.kind === 'sftp' && sftpDropHint.tabId === tabId && sftpDropHint.dir === cwd,
@@ -682,7 +807,19 @@ onBeforeUnmount(() => {
         data-sftp-list
         :data-sftp-tab="tabId"
         :data-sftp-cwd="cwd"
+        @mousedown="onListMouseDown"
       >
+        <!-- Rubber-band selection rectangle (content coords, scrolls with rows). -->
+        <div
+          v-if="marqueeRect"
+          class="absolute z-10 pointer-events-none border border-accent/60 bg-accent/10 rounded-sm"
+          :style="{
+            left: `${marqueeRect.x}px`,
+            top: `${marqueeRect.y}px`,
+            width: `${marqueeRect.w}px`,
+            height: `${marqueeRect.h}px`,
+          }"
+        />
         <div v-if="creatingFolder" class="flex items-center gap-2 px-2.5 py-1.5">
           <Folder :size="15" class="text-accent shrink-0" />
           <input
@@ -746,9 +883,11 @@ onBeforeUnmount(() => {
               :class="{
                 'bg-accent/15 ring-1 ring-accent/40':
                   e.is_dir && sftpDropHint && sftpDropHint.kind === 'sftp' && sftpDropHint.tabId === tabId && sftpDropHint.dir === e.path,
+                'bg-accent/10': selected.has(e.path),
               }"
               :data-sftp-tab="tabId"
               :data-sftp-folder="e.is_dir ? e.path : undefined"
+              :data-marquee-path="e.path"
               @mousedown="onRowMouseDown($event, e)"
               @dblclick="navigate(e)"
               @contextmenu.prevent.stop="openRowMenu(e)"
@@ -773,7 +912,7 @@ onBeforeUnmount(() => {
                     type="button"
                     class="flex-1 min-w-0 truncate text-left"
                     :class="e.is_dir ? 'text-fg' : 'text-fg-muted'"
-                    @click="navigate(e)"
+                    @click="onNameClick($event, e)"
                   >
                     {{ e.name }}
                   </button>
@@ -843,8 +982,8 @@ onBeforeUnmount(() => {
 
     <ConfirmDialog
       :open="pendingDelete !== null"
-      :title="pendingDelete?.is_dir ? 'Delete folder?' : 'Delete file?'"
-      :message="`Permanently delete “${pendingDelete?.name}” on the remote host?`"
+      :title="deleteTitle"
+      :message="deleteMessage"
       confirm-label="Delete"
       cancel-label="Cancel"
       @confirm="confirmDelete"
@@ -853,9 +992,9 @@ onBeforeUnmount(() => {
 
     <ConfirmDialog
       :open="pendingFolderDrop !== null"
-      :title="pendingFolderDrop?.item.source === 'local' ? 'Upload folder?' : 'Copy folder?'"
-      :message="`${pendingFolderDrop?.item.source === 'local' ? 'Upload' : 'Copy'} the folder “${pendingFolderDrop?.item.name}” and all its contents to this connection?`"
-      :confirm-label="pendingFolderDrop?.item.source === 'local' ? 'Upload' : 'Copy'"
+      :title="`${folderDropVerb} ${folderDropCount === 1 ? 'folder' : 'folders'}?`"
+      :message="`${folderDropVerb} ${folderDropLabel} and all ${folderDropCount === 1 ? 'its' : 'their'} contents to this connection?`"
+      :confirm-label="folderDropVerb"
       cancel-label="Cancel"
       @confirm="confirmFolderDrop"
       @cancel="pendingFolderDrop = null"
