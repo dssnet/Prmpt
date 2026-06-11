@@ -12,7 +12,7 @@ use crate::{
     config::{Config, TerminalPrefs, Theme, UiPrefs},
     error::{AppError, AppResult},
     localfs,
-    protocol::{LocalDrive, LocalListing, SftpEntry, TabInfo, WindowBootstrap},
+    protocol::{KeyEventWire, LocalDrive, LocalListing, SftpEntry, TabInfo, WindowBootstrap},
     schedule_refill,
     ssh::{self, SftpSlots, SshConnectConfig},
     stronghold::{self, StrongholdUnlock},
@@ -85,6 +85,29 @@ pub fn write_input(
     bytes: Vec<u8>,
 ) -> AppResult<()> {
     registry.write_input(tab_id, bytes)
+}
+
+/// Forward a keyboard event to the tab thread, where libghostty-vt's key
+/// encoder turns it into bytes against the terminal's live modes (DECCKM,
+/// keypad mode, kitty keyboard protocol flags).
+#[tauri::command]
+pub fn write_key(
+    registry: State<'_, SharedRegistry>,
+    tab_id: u64,
+    event: KeyEventWire,
+) -> AppResult<()> {
+    registry.write_key(tab_id, event)
+}
+
+/// Paste text into a tab. The tab thread wraps it in bracketed-paste
+/// markers when the application enabled DEC mode 2004.
+#[tauri::command]
+pub fn write_paste(
+    registry: State<'_, SharedRegistry>,
+    tab_id: u64,
+    bytes: Vec<u8>,
+) -> AppResult<()> {
+    registry.write_paste(tab_id, bytes)
 }
 
 #[tauri::command]

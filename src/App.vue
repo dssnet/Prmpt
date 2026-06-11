@@ -3,7 +3,7 @@ import { readText as readClipboardText } from "@tauri-apps/plugin-clipboard-mana
 import type { UnlistenFn } from "@tauri-apps/api/event";
 import { onMounted, onBeforeUnmount, ref } from "vue";
 
-import { encodeKey } from "./input";
+import { isModifierKey, toWireKeyEvent } from "./input";
 import {
   attachTab,
   bootstrapWindow,
@@ -20,13 +20,15 @@ import {
   onSshPortForwardError,
   onSshReconnecting,
   onTabAttached,
+  onTerminalNotification,
   onWindowActivateBlank,
   openNewWindow,
   scrollTab,
   showContextMenu,
   tearOffTab,
   windowAtScreenPoint,
-  writeInput,
+  writeKey,
+  writePaste,
   type Config,
   type SshConnectError,
   type SshHostKeyFirstConnect,
@@ -39,8 +41,10 @@ import {
   handleExit,
   handleRender,
   hydrateTabs,
+  owningTabId,
   removeTabLocal,
   setActive,
+  snapshotFor,
   spawnTerminal,
   useTabs,
   type TabHydrateInfo,
@@ -60,6 +64,7 @@ import {
   selectAll,
 } from "./state/terminal";
 import { toggleLocalBrowser } from "./state/localBrowser";
+import { notify } from "./state/notifications";
 import { showToast } from "./state/toasts";
 import HomeView from "./components/HomeView.vue";
 import HostKeyFirstConnectModal from "./components/HostKeyFirstConnectModal.vue";
@@ -488,14 +493,30 @@ function onKeyDown(e: KeyboardEvent) {
   // their own keystrokes natively instead of forwarding them to the PTY.
   if (editable) return;
 
-  const bytes = encodeKey(e);
-  if (bytes) {
-    const target = inputTargetTabId();
-    if (target == null) return;
-    e.preventDefault();
-    clearSelection();
-    void writeInput(target, bytes);
-  }
+  const target = inputTargetTabId();
+  if (target == null) return;
+  // Bare modifier presses only produce bytes under the kitty keyboard
+  // protocol — skip the IPC round-trip (and the preventDefault) otherwise.
+  if (isModifierKey(e) && (snapshotFor(target)?.kitty_flags ?? 0) === 0) return;
+  const wire = toWireKeyEvent(e, e.repeat ? "repeat" : "press");
+  if (!wire) return;
+  e.preventDefault();
+  clearSelection();
+  void writeKey(target, wire);
+}
+
+function onKeyUp(e: KeyboardEvent) {
+  if (welcomeOpen.value) return;
+  if (focusedEditable(e.target) != null) return;
+  if (e.metaKey || isPrimaryMod(e)) return;
+  const target = inputTargetTabId();
+  if (target == null) return;
+  // Key releases only matter when the app asked for them (kitty
+  // REPORT_EVENTS, bit 2) — the encoder discards them otherwise.
+  if (((snapshotFor(target)?.kitty_flags ?? 0) & 2) === 0) return;
+  const wire = toWireKeyEvent(e, "release");
+  if (!wire) return;
+  void writeKey(target, wire);
 }
 
 function onPaste(e: ClipboardEvent) {
@@ -508,7 +529,7 @@ function onPaste(e: ClipboardEvent) {
   const target = inputTargetTabId();
   if (target == null) return;
   e.preventDefault();
-  void writeInput(target, new TextEncoder().encode(text));
+  void writePaste(target, text);
 }
 
 function onContextMenu(e: MouseEvent) {
@@ -527,6 +548,7 @@ function onContextMenu(e: MouseEvent) {
 
 onMounted(async () => {
   window.addEventListener("keydown", onKeyDown);
+  window.addEventListener("keyup", onKeyUp);
   window.addEventListener("paste", onPaste);
   window.addEventListener("contextmenu", onContextMenu);
 
@@ -591,6 +613,18 @@ onMounted(async () => {
       selectAll();
     }
   }));
+  // Bell / OSC notification (e.g. Claude Code finishing a task), routed
+  // through the centralized dispatch: chime always (if enabled), toast +
+  // tab-bar bell only when the user isn't looking at the originating tab.
+  unlisteners.push(await onTerminalNotification((p) => {
+    const t = tabs.value.find((x) => x.id === (owningTabId(p.tab_id) ?? p.tab_id));
+    notify({
+      tabId: p.tab_id,
+      host: t?.hostLabel ?? "Local",
+      title: p.title || (p.source === "bell" ? "Terminal bell" : "Notification"),
+      detail: p.body || t?.title || "A program requested attention",
+    });
+  }));
   unlisteners.push(await onSshHostKeyMismatch((p) => (hostKeyModal.value = p)));
   // The SSH handshake is parked in the backend until the modal answers.
   unlisteners.push(await onSshHostKeyFirstConnect((p) => (firstConnectModal.value = p)));
@@ -653,6 +687,7 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   window.removeEventListener("keydown", onKeyDown);
+  window.removeEventListener("keyup", onKeyUp);
   window.removeEventListener("paste", onPaste);
   window.removeEventListener("contextmenu", onContextMenu);
   if (updateTimer !== undefined) clearInterval(updateTimer);

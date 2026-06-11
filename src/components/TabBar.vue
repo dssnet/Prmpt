@@ -10,8 +10,9 @@ import {
   useTabs,
   type TabState,
 } from "../state/tabs";
-import { bellTabs } from "../state/transfers";
+import { bellTabs } from "../state/notifications";
 import { resetTabConsumed } from "../state/workspace";
+import NotificationCenter from "./NotificationCenter.vue";
 import {
   clearWorkspaceDragPreview,
   commitWorkspaceDrop,
@@ -371,6 +372,7 @@ const GAP = 6;
 const OUTER_PX = 16;
 const HOME_W = 40;
 const PLUS_W = 24;
+const BELL_W = 24; // notification-center trigger at the far right
 const DROPDOWN_W = 36; // compact trigger: chevron + count
 
 const visibleCount = computed(() => {
@@ -379,12 +381,12 @@ const visibleCount = computed(() => {
   if (w <= 0 || total === 0) return total;
   const inner = w - OUTER_PX;
 
-  // All fit without a dropdown: home + strip + plus → 3 children, 2 gaps.
+  // All fit without a dropdown: home + strip + plus + bell → 4 children, 3 gaps.
   const stripAllWidth = total * (TAB_MIN_W + GAP) - GAP;
-  if (inner >= HOME_W + stripAllWidth + PLUS_W + 2 * GAP) return total;
+  if (inner >= HOME_W + stripAllWidth + PLUS_W + BELL_W + 3 * GAP) return total;
 
-  // With dropdown: home + dropdown + strip + plus → 4 children, 3 gaps.
-  const budget = inner - HOME_W - DROPDOWN_W - PLUS_W - 3 * GAP;
+  // With dropdown: home + dropdown + strip + plus + bell → 5 children, 4 gaps.
+  const budget = inner - HOME_W - DROPDOWN_W - PLUS_W - BELL_W - 4 * GAP;
   if (budget < TAB_MIN_W) return 0;
   return Math.max(0, Math.floor((budget + GAP) / (TAB_MIN_W + GAP)));
 });
@@ -533,7 +535,7 @@ watch(overflowTabs, (n) => {
               v-if="bellTabs.has(t.id)"
               :size="10"
               class="flex-none text-accent"
-              title="A file operation finished on this tab"
+              title="A task finished on this tab"
             />
             <span
               class="flex-none w-4 h-4 inline-flex items-center justify-center rounded-full text-fg-subtle opacity-0 group-hover:opacity-100 hover:text-fg"
@@ -581,7 +583,7 @@ watch(overflowTabs, (n) => {
             v-if="bellTabs.has(t.id)"
             :size="11"
             class="flex-none text-accent"
-            title="A file operation finished on this tab"
+            title="A task finished on this tab"
           />
           <span
             class="w-4 h-4 inline-flex items-center justify-center rounded-full text-fg-subtle hover:text-fg transition-colors duration-100"
@@ -599,6 +601,7 @@ watch(overflowTabs, (n) => {
     >
       +
     </div>
+    <NotificationCenter class="ml-auto" />
   </div>
   <Teleport to="body">
     <div

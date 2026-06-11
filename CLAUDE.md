@@ -66,15 +66,19 @@ bun tauri dev
 - `CursorVisualStyle` is `#[non_exhaustive]`. Always have a `_ => default` arm.
 - `on_pty_write` runs synchronously inside `vt_write`, so it must never block. The closure does a non-blocking `try_send` of the reply bytes onto a bounded queue drained by a dedicated per-tab **writer thread** (`tab-<id>-writer`); replies are dropped if the queue is full. User input (`TabCmd::Write`) uses a reliable blocking send on the same queue. This decoupling stops a child that floods output without reading its stdin (`cat /dev/urandom`) from jamming the PTY input queue and stalling the VT thread / blocking CTRL+C.
 - The crate's `set_dirty` plumbing has a known oddity in 0.1.1 (passes `&&T` to a `*const c_void` argument). Returns `InvalidValue` sometimes — use `.ok()` and move on.
+- **Key encoding happens on the backend**, not in `input.ts`. The webview sends structured key events (`write_key` → `KeyEventWire`: DOM `code`/`key`/modifiers) and the tab thread encodes them with `libghostty_vt::key::Encoder` + `set_options_from_terminal` — that's what makes DECCKM, keypad mode and the **kitty keyboard protocol** correct without mirroring mode state to JS. `CSI ? u` query replies already flow through `on_pty_write`. Don't reintroduce frontend byte tables.
+- `on_bell` fires synchronously inside `vt_write` like `on_pty_write` — same rule: never block, never emit from inside it (the tab loop drains an `Rc<Cell<bool>>` flag instead).
+- OSC 9/777 notification *payloads* aren't exposed by the crate's Rust API; `osc_notify.rs` scans raw PTY bytes (observe-only, stateful across 8 KB chunks) before `vt_write`.
 
 ## IPC contract
 
 Events backend → frontend:
 
-- `terminal:render` → `RenderPayload { tab_id, cols, rows, default_fg, default_bg, cells: CellWire[], cursor: CursorWire?, generation, title }`. `cells.length === cols * rows`, row-major. Coalesced by an 8ms debounce in `run_tab_loop`.
+- `terminal:render` → `RenderPayload { tab_id, cols, rows, default_fg, default_bg, cells: CellWire[], cursor: CursorWire?, generation, title, viewport_top, scrollback_total, kitty_flags }`. `cells.length === cols * rows`, row-major. Coalesced by an 8ms debounce in `run_tab_loop`. `kitty_flags` is only a traffic hint (skip key-release / bare-modifier forwarding when 0).
 - `terminal:exit` → `{ tab_id, status }`. Frontend should call `forget_tab` and drop the tab.
+- `terminal:notification` → `NotifyPayload { tab_id, source: "bell"|"osc", title?, body? }`. BEL or OSC 9/777 (how Claude Code signals task completion — Prmpt sets `TERM_PROGRAM=ghostty` so its `auto` channel emits OSC 777). Throttled to 1/s per tab on the backend. Frontend routes it through `src/state/notifications.ts::notify()` — the single dispatch for terminal notifications AND file-transfer completions: chime always (Settings → Notifications), toast + tab-bar bell badge only when away (window unfocused / tab not active). New "finished in the background" signals should call `notify()`, not `showToast` directly.
 
-Commands frontend → backend: `spawn_tab`, `close_tab`, `write_input`, `resize_tab`, `list_tabs`, `get_config`, `forget_tab`. Argument naming: snake_case in Rust, camelCase in JS for top-level args; struct args keep their internal snake_case field names (e.g. `cell_width_px`).
+Commands frontend → backend: `spawn_tab`, `close_tab`, `write_input` (raw bytes — LocalBrowser command injection etc.), `write_key` (keyboard events, backend-encoded), `write_paste` (bracketed-paste aware; raw `write_input` would bypass mode 2004), `resize_tab`, `list_tabs`, `get_config`, `forget_tab`. Argument naming: snake_case in Rust, camelCase in JS for top-level args; struct args keep their internal snake_case field names (e.g. `cell_width_px`).
 
 ## Renderer notes
 
@@ -91,7 +95,7 @@ Commands frontend → backend: `spawn_tab`, `close_tab`, `write_input`, `resize_
 
 ## Out of scope for v1 (do not casually add)
 
-Splits/panes, ligatures, sixel/kitty graphics, IME, selection+copy, OSC 8, bell. Tracked in `/Users/yanick/.claude-personal/plans/nifty-crafting-pelican.md`.
+Splits/panes, ligatures, sixel/kitty graphics, IME, selection+copy, OSC 8. Tracked in `/Users/yanick/.claude-personal/plans/nifty-crafting-pelican.md`. (Bell/OSC-notification handling shipped — see IPC contract.)
 
 ## When tests aren't enough
 

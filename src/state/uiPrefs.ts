@@ -11,6 +11,10 @@ import { setUiPrefs, type UiPrefs } from "../ipc";
 /** Toast popups when a file operation finishes on a background tab. */
 export const toastsEnabled = ref(true);
 
+/** Chime when a program rings the terminal bell or sends an OSC
+ *  notification (e.g. Claude Code finishing a task). */
+export const notificationSounds = ref(true);
+
 /** Show dot-prefixed (hidden) entries in the file browsers — shared by the
  *  local and SFTP browsers (toggling in one updates the other). */
 export const showHiddenFiles = ref(false);
@@ -32,6 +36,7 @@ export function initUiPrefs(ui: UiPrefs): void {
   const lsToasts = localStorage.getItem("prmpt.toastsEnabled");
   const lsHidden = localStorage.getItem("prmpt.showHiddenFiles");
   toastsEnabled.value = lsToasts !== null ? lsToasts !== "0" : ui.toast_notifications;
+  notificationSounds.value = ui.notification_sounds;
   showHiddenFiles.value = lsHidden !== null ? lsHidden === "1" : ui.show_hidden_files;
   showSize.value = ui.show_size;
   showChangedDate.value = ui.show_changed_date;
@@ -46,6 +51,7 @@ export function initUiPrefs(ui: UiPrefs): void {
 function persist(): Promise<void> {
   return setUiPrefs({
     toast_notifications: toastsEnabled.value,
+    notification_sounds: notificationSounds.value,
     show_hidden_files: showHiddenFiles.value,
     show_size: showSize.value,
     show_changed_date: showChangedDate.value,
@@ -55,6 +61,11 @@ function persist(): Promise<void> {
 
 export function setToastsEnabled(v: boolean): void {
   toastsEnabled.value = v;
+  void persist();
+}
+
+export function setNotificationSounds(v: boolean): void {
+  notificationSounds.value = v;
   void persist();
 }
 

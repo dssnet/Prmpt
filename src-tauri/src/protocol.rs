@@ -1,4 +1,4 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::window_pool::WindowMode;
 
@@ -48,12 +48,53 @@ pub struct RenderPayload {
     /// thumb spans `rows / scrollback_total` of the track, and the visible
     /// region starts at `viewport_top / (scrollback_total - rows)` along it.
     pub scrollback_total: u64,
+    /// Current kitty keyboard protocol flags (bit 1 = disambiguate, bit 2 =
+    /// report events, …). Key encoding happens on the backend, so this is
+    /// purely a traffic hint: the frontend skips forwarding key-release and
+    /// bare-modifier events the encoder would discard anyway.
+    pub kitty_flags: u8,
 }
 
 #[derive(Serialize, Clone, Debug)]
 pub struct ExitPayload {
     pub tab_id: u64,
     pub status: i32,
+}
+
+/// A keyboard event as the webview saw it, encoded on the tab thread by
+/// libghostty-vt's key encoder against the terminal's live modes (DECCKM,
+/// keypad mode, kitty keyboard flags, …). Field names mirror the W3C
+/// `KeyboardEvent` concepts they're lifted from.
+#[derive(Deserialize, Clone, Debug)]
+pub struct KeyEventWire {
+    /// DOM `KeyboardEvent.code` (physical key, e.g. "KeyA", "ArrowUp").
+    pub code: String,
+    /// "press" | "release" | "repeat".
+    pub action: String,
+    /// Text the key produced for the current layout (DOM `key` when it's a
+    /// single printable grapheme), pre-Ctrl/Meta transformation. `None` for
+    /// named keys — the encoder derives those from `code`.
+    pub utf8: Option<String>,
+    /// Codepoint of the key without shift applied (0 when not applicable).
+    pub unshifted_codepoint: u32,
+    pub shift: bool,
+    pub ctrl: bool,
+    pub alt: bool,
+    pub super_key: bool,
+    pub caps_lock: bool,
+    pub num_lock: bool,
+}
+
+/// `terminal:notification` — a program rang the bell (BEL) or sent an OSC
+/// 9 / OSC 777 desktop notification (how Claude Code announces a finished
+/// task). Throttled to one per second per tab on the backend.
+#[derive(Serialize, Clone, Debug)]
+pub struct NotifyPayload {
+    pub tab_id: u64,
+    /// "bell" | "osc".
+    pub source: String,
+    pub title: Option<String>,
+    pub body: Option<String>,
 }
 
 #[derive(Serialize, Clone, Debug)]

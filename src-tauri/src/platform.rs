@@ -100,10 +100,12 @@ pub fn home_dir() -> Option<PathBuf> {
 /// Ghostty/iTerm, `bun tauri dev` inside VS Code, …). If they leak into
 /// the child shell, programs that sniff them — Claude Code, shell
 /// prompts, anything doing terminal feature detection — believe they're
-/// running inside that other terminal and enable protocols we don't
-/// speak (e.g. the kitty CSI-u keyboard protocol, which breaks
-/// Shift+Tab / Ctrl+V decoding in Claude Code). The child's terminal is
-/// Prmpt; scrub everyone else's calling cards.
+/// running inside that *other* terminal and target its exact feature
+/// set. The child's terminal is Prmpt; scrub everyone else's calling
+/// cards. (tab.rs then sets TERM_PROGRAM=ghostty deliberately: we run
+/// Ghostty's VT engine and key encoder, so advertising as Ghostty is
+/// accurate enough and is what makes Claude Code emit OSC 777
+/// completion notifications.)
 const FOREIGN_TERMINAL_VARS: &[&str] = &[
     // Generic (Terminal.app, Ghostty, iTerm2, VS Code all set these)
     "TERM_PROGRAM",

@@ -51,11 +51,46 @@ export interface RenderPayload {
   /** Total scrollable rows (scrollback + visible viewport). Used by the
    *  scrollbar component to size and position the thumb. */
   scrollback_total: number;
+  /** Current kitty keyboard protocol flags (bit 1 = disambiguate, bit 2 =
+   *  report events, …). Keys are encoded on the backend; this is only a
+   *  traffic hint so the frontend can skip forwarding key-release and
+   *  bare-modifier events the encoder would discard anyway. */
+  kitty_flags: number;
 }
 
 export interface ExitPayload {
   tab_id: number;
   status: number;
+}
+
+/** A keyboard event for the backend's `write_key`, which encodes it with
+ *  libghostty-vt's key encoder against the terminal's live modes. Field
+ *  names mirror the W3C KeyboardEvent concepts they're lifted from. */
+export interface KeyEventWire {
+  /** DOM `KeyboardEvent.code` (physical key, e.g. "KeyA", "ArrowUp"). */
+  code: string;
+  action: "press" | "release" | "repeat";
+  /** Layout-produced text (DOM `key` when a single printable grapheme),
+   *  pre-Ctrl transformation; null for named keys. */
+  utf8: string | null;
+  /** Codepoint of the key without shift applied; 0 when not applicable. */
+  unshifted_codepoint: number;
+  shift: boolean;
+  ctrl: boolean;
+  alt: boolean;
+  super_key: boolean;
+  caps_lock: boolean;
+  num_lock: boolean;
+}
+
+/** `terminal:notification` — a program rang the bell (BEL) or sent an OSC
+ *  9 / OSC 777 desktop notification (how Claude Code announces a finished
+ *  task). Throttled to one per second per tab on the backend. */
+export interface NotifyPayload {
+  tab_id: number;
+  source: "bell" | "osc";
+  title: string | null;
+  body: string | null;
 }
 
 export interface ThemeConfig {
@@ -79,6 +114,7 @@ export interface Config {
 /** UI behavior preferences, persisted in config.toml's `[ui]` section. */
 export interface UiPrefs {
   toast_notifications: boolean;
+  notification_sounds: boolean;
   show_hidden_files: boolean;
   show_size: boolean;
   show_changed_date: boolean;
@@ -125,6 +161,18 @@ export async function forgetTab(tabId: number): Promise<void> {
 
 export async function writeInput(tabId: number, bytes: Uint8Array): Promise<void> {
   await invoke("write_input", { tabId, bytes: Array.from(bytes) });
+}
+
+/** Forward a keyboard event for backend-side encoding (legacy sequences,
+ *  DECCKM, kitty keyboard protocol — whatever the terminal's modes say). */
+export async function writeKey(tabId: number, event: KeyEventWire): Promise<void> {
+  await invoke("write_key", { tabId, event });
+}
+
+/** Paste text; the backend wraps it in bracketed-paste markers when the
+ *  application enabled DEC mode 2004. */
+export async function writePaste(tabId: number, text: string): Promise<void> {
+  await invoke("write_paste", { tabId, bytes: Array.from(new TextEncoder().encode(text)) });
 }
 
 export async function resizeTab(args: {
@@ -240,6 +288,12 @@ export function onRender(handler: (payload: RenderPayload) => void): Promise<Unl
 
 export function onExit(handler: (payload: ExitPayload) => void): Promise<UnlistenFn> {
   return listenScoped<ExitPayload>("terminal:exit", handler);
+}
+
+export function onTerminalNotification(
+  handler: (payload: NotifyPayload) => void,
+): Promise<UnlistenFn> {
+  return listenScoped<NotifyPayload>("terminal:notification", handler);
 }
 
 export interface TabInfo {

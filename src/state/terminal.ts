@@ -9,6 +9,7 @@ import {
   resizeTab,
   scrollTab,
   writeInput,
+  writePaste,
   type Config,
   type RenderPayload,
   type ThemeConfig,
@@ -801,7 +802,7 @@ export async function pasteFromClipboard(): Promise<void> {
     // error; fall through to the image check.
   }
   if (text) {
-    void writeInput(target, new TextEncoder().encode(text));
+    void writePaste(target, text);
     return;
   }
   // Image-only clipboard: a terminal can't paste pixels, but TUI apps

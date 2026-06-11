@@ -38,6 +38,9 @@ pub struct TerminalPrefs {
 pub struct UiPrefs {
     /// Toast popups when a file operation finishes on a background tab.
     pub toast_notifications: bool,
+    /// Play a chime when a program rings the terminal bell or sends an OSC
+    /// notification (e.g. Claude Code finishing a task).
+    pub notification_sounds: bool,
     /// Show dot-prefixed entries in the file browsers.
     pub show_hidden_files: bool,
     /// Show the size column in the file browsers.
@@ -53,6 +56,7 @@ impl Default for UiPrefs {
     fn default() -> Self {
         Self {
             toast_notifications: true,
+            notification_sounds: true,
             show_hidden_files: false,
             show_size: true,
             show_changed_date: false,

@@ -16,7 +16,12 @@ import { errText, useBackupImport } from "../composables/useBackupImport";
 import { exportBackup, getConfig, setTerminalPrefs } from "../ipc";
 import { applyTheme, useTheme } from "../state/theme";
 import { findPresetMatch, PRESETS } from "../state/themes";
-import { setToastsEnabled, toastsEnabled } from "../state/uiPrefs";
+import {
+  notificationSounds,
+  setNotificationSounds,
+  setToastsEnabled,
+  toastsEnabled,
+} from "../state/uiPrefs";
 import { runUpdateCheck, useUpdate } from "../state/update";
 import FontStackInput from "./FontStackInput.vue";
 import { Button, ConfirmDialog, Input, Modal, Switch } from "./ui";
@@ -375,12 +380,28 @@ function openImport() {
               <div class="setting-title">Toast notifications</div>
               <div class="setting-hint">
                 Pop up bottom-right when a file operation finishes on a
-                background tab. Tab-bar bells and transfer rows are unaffected.
+                background tab, or when a program in an unfocused terminal
+                rings the bell / sends a notification. Tab-bar bells and
+                transfer rows are unaffected.
               </div>
             </div>
             <Switch
               :model-value="toastsEnabled"
               @update:model-value="setToastsEnabled"
+            />
+          </div>
+          <div class="setting-row">
+            <div class="setting-info">
+              <div class="setting-title">Notification sounds</div>
+              <div class="setting-hint">
+                Play a chime when a program rings the terminal bell or sends a
+                notification — e.g. Claude Code finishing a task — and when a
+                file transfer completes.
+              </div>
+            </div>
+            <Switch
+              :model-value="notificationSounds"
+              @update:model-value="setNotificationSounds"
             />
           </div>
         </template>

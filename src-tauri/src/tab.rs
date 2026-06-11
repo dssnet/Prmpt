@@ -1,6 +1,8 @@
 use std::{
+    cell::Cell,
     collections::HashMap,
     io::{Read, Write},
+    rc::Rc,
     sync::{
         atomic::{AtomicU64, Ordering},
         Arc,
@@ -11,10 +13,11 @@ use std::{
 
 use crossbeam_channel::{bounded, select, unbounded, Receiver, Sender};
 use libghostty_vt::{
+    key::{Action as KeyAction, Encoder as KeyEncoder, Event as KeyEvent, Mods as KeyMods},
     render::{CellIterator, CursorVisualStyle, Dirty, RenderState, RowIterator},
     screen::{CellWide, Screen},
     style::{RgbColor, StyleColor},
-    terminal::{Point, PointCoordinate, ScrollViewport},
+    terminal::{Mode, Point, PointCoordinate, ScrollViewport},
     Terminal, TerminalOptions,
 };
 use parking_lot::Mutex;
@@ -25,11 +28,11 @@ use tauri::{AppHandle, Emitter, EventTarget};
 use crate::{
     config::Theme,
     error::{AppError, AppResult},
-    platform,
+    keymap, osc_notify, platform,
     protocol::{
-        CellWire, CursorWire, ExitPayload, RenderPayload, TabInfo, CURSOR_STYLE_BAR,
-        CURSOR_STYLE_BLOCK, CURSOR_STYLE_BLOCK_HOLLOW, CURSOR_STYLE_UNDERLINE, FLAG_BOLD,
-        FLAG_FAINT, FLAG_INVERSE, FLAG_ITALIC, FLAG_SPACER_TAIL, FLAG_STRIKETHROUGH,
+        CellWire, CursorWire, ExitPayload, KeyEventWire, NotifyPayload, RenderPayload, TabInfo,
+        CURSOR_STYLE_BAR, CURSOR_STYLE_BLOCK, CURSOR_STYLE_BLOCK_HOLLOW, CURSOR_STYLE_UNDERLINE,
+        FLAG_BOLD, FLAG_FAINT, FLAG_INVERSE, FLAG_ITALIC, FLAG_SPACER_TAIL, FLAG_STRIKETHROUGH,
         FLAG_UNDERLINE, FLAG_WIDE,
     },
     SharedConfig,
@@ -54,6 +57,11 @@ const INTERRUPT_FLUSH_BACKLOG: usize = 64;
 /// alternate-screen app. Caps a fast flick so it can't flood the PTY.
 const WHEEL_ARROW_CAP: u32 = 50;
 
+/// Minimum gap between `terminal:notification` emits per tab. A program
+/// that spams BEL (`cat /dev/urandom` hits them constantly) costs one
+/// event per second instead of flooding the webview with chimes.
+const NOTIFY_THROTTLE: Duration = Duration::from_secs(1);
+
 #[derive(Clone, Copy, Debug)]
 pub enum ScrollKind {
     Top,
@@ -67,6 +75,15 @@ pub enum ScrollKind {
 
 pub enum TabCmd {
     Write(Vec<u8>),
+    /// A keyboard event from the webview, encoded on the tab thread by
+    /// libghostty-vt's key encoder against the terminal's live modes
+    /// (DECCKM, keypad, kitty keyboard flags). Events the encoder maps to
+    /// nothing (e.g. a bare modifier without kitty flags) are dropped.
+    Key(KeyEventWire),
+    /// Pasted text. Wrapped in `ESC [200~ … ESC [201~` when the application
+    /// enabled bracketed paste (DEC mode 2004); embedded end markers are
+    /// stripped first so a malicious paste can't break out of the bracket.
+    Paste(Vec<u8>),
     Resize {
         cols: u16,
         rows: u16,
@@ -351,8 +368,15 @@ impl TabRegistry {
         // (otherwise e.g. `flatpak` crashes on our older bundled GLib).
         platform::sanitize_child_env(&mut cmd);
         // After the scrub so the remove doesn't clobber our own identity.
-        cmd.env("TERM_PROGRAM", "Prmpt");
-        cmd.env("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION"));
+        // We advertise as Ghostty rather than Prmpt: the VT engine *is*
+        // Ghostty's, the key encoder speaks the kitty keyboard protocol it
+        // implies, and programs that pick a notification channel by terminal
+        // identity (Claude Code's `preferredNotifChannel: auto`) emit OSC 777
+        // for Ghostty but stay silent for names they don't know. The version
+        // is a plausible Ghostty release, not Prmpt's own (version parsers
+        // expect Ghostty-shaped numbers here).
+        cmd.env("TERM_PROGRAM", "ghostty");
+        cmd.env("TERM_PROGRAM_VERSION", "1.1.3");
 
         let child = pair
             .slave
@@ -497,6 +521,24 @@ impl TabRegistry {
         let h = guard.get(&id).ok_or(AppError::UnknownTab(id))?;
         h.cmd_tx
             .send(TabCmd::Write(bytes))
+            .map_err(|_| AppError::UnknownTab(id))?;
+        Ok(())
+    }
+
+    pub fn write_key(&self, id: u64, event: KeyEventWire) -> AppResult<()> {
+        let guard = self.inner.lock();
+        let h = guard.get(&id).ok_or(AppError::UnknownTab(id))?;
+        h.cmd_tx
+            .send(TabCmd::Key(event))
+            .map_err(|_| AppError::UnknownTab(id))?;
+        Ok(())
+    }
+
+    pub fn write_paste(&self, id: u64, bytes: Vec<u8>) -> AppResult<()> {
+        let guard = self.inner.lock();
+        let h = guard.get(&id).ok_or(AppError::UnknownTab(id))?;
+        h.cmd_tx
+            .send(TabCmd::Paste(bytes))
             .map_err(|_| AppError::UnknownTab(id))?;
         Ok(())
     }
@@ -704,6 +746,23 @@ fn run_tab_loop(
             let _ = tx.try_send(bytes.to_vec());
         })?;
     }
+    // BEL detection for `terminal:notification`. The callback runs
+    // synchronously inside `vt_write`, where it must not block and where
+    // `owner_window` may be stale (it mutates via TabCmd::SetWindow) — so
+    // it only flips a flag that the loop drains after `vt_write` returns.
+    let bell_pending = Rc::new(Cell::new(false));
+    {
+        let pending = bell_pending.clone();
+        terminal.on_bell(move |_t| pending.set(true))?;
+    }
+    // Key events are encoded here (not in the webview) so the encoder can
+    // read the terminal's live modes — DECCKM, keypad mode and the kitty
+    // keyboard flags an app like Claude Code pushes — without mirroring
+    // that state across the IPC boundary.
+    let mut key_encoder = KeyEncoder::new()?;
+    let mut key_event = KeyEvent::new()?;
+    let mut osc_scanner = osc_notify::OscNotifyScanner::new();
+    let mut last_notify: Option<Instant> = None;
     let mut render_state = RenderState::new()?;
     let mut row_iter = RowIterator::new()?;
     let mut cell_iter = CellIterator::new()?;
@@ -715,39 +774,75 @@ fn run_tab_loop(
 
     let timeout_tick = Duration::from_millis(5);
     loop {
+        // User input produced by this iteration's command (raw write, an
+        // encoded key, or a paste). Sent after the select! so all three
+        // paths share the scroll-to-bottom + interrupt-flush handling.
+        let mut user_input: Option<Vec<u8>> = None;
         select! {
             recv(cmd_rx) -> msg => match msg {
                 Ok(TabCmd::Write(bytes)) => {
-                    let is_interrupt = bytes.contains(&0x03);
-                    terminal.scroll_viewport(ScrollViewport::Bottom);
-                    pending_emit = true;
-                    // Reliable send: input is tiny and must not be dropped. The
-                    // queue won't back up from a flood (replies use try_send).
-                    let _ = write_tx.send(bytes);
-
-                    // CTRL+C delivers SIGINT to the foreground process group
-                    // immediately (verified: the line discipline kills e.g.
-                    // `cat /dev/urandom` on the first press). But a flood it
-                    // already produced sits buffered in pty_rx and would keep
-                    // scrolling for seconds, making the interrupt *look* dead.
-                    // Those bytes are the killed process's output — drop the
-                    // backlog so the screen stops at once. Only triggers on a
-                    // genuine flood; normal output never buffers this deep.
-                    if is_interrupt && pty_rx.len() > INTERRUPT_FLUSH_BACKLOG {
-                        let mut hit_eof = false;
-                        while let Ok(ev) = pty_rx.try_recv() {
-                            match ev {
-                                PtyEvent::Data(_) => {}
-                                PtyEvent::Eof => {
-                                    hit_eof = true;
-                                    break;
-                                }
+                    user_input = Some(bytes);
+                }
+                Ok(TabCmd::Key(ev)) => {
+                    // Sync the encoder with the terminal's current modes.
+                    // This also resets macos-option-as-alt to False, which
+                    // is the behavior we want: the webview already delivers
+                    // Option-composed characters in `utf8`.
+                    key_encoder.set_options_from_terminal(&terminal);
+                    let mut mods = KeyMods::empty();
+                    if ev.shift { mods |= KeyMods::SHIFT; }
+                    if ev.ctrl { mods |= KeyMods::CTRL; }
+                    if ev.alt { mods |= KeyMods::ALT; }
+                    if ev.super_key { mods |= KeyMods::SUPER; }
+                    if ev.caps_lock { mods |= KeyMods::CAPS_LOCK; }
+                    if ev.num_lock { mods |= KeyMods::NUM_LOCK; }
+                    let unshifted = char::from_u32(ev.unshifted_codepoint).unwrap_or('\0');
+                    // Mods the keyboard layout already spent producing the
+                    // text: Shift+a → "A" consumed shift; on macOS Option
+                    // composes (Option+o → "ø") and is consumed too. The
+                    // encoder must not ESC-prefix or CSI-modify for these.
+                    let mut consumed = KeyMods::empty();
+                    if let Some(text) = ev.utf8.as_deref() {
+                        let composed = text.chars().next() != Some(unshifted);
+                        if composed {
+                            if ev.shift { consumed |= KeyMods::SHIFT; }
+                            if cfg!(target_os = "macos") && ev.alt {
+                                consumed |= KeyMods::ALT;
                             }
                         }
-                        if hit_eof {
-                            break;
-                        }
                     }
+                    key_event
+                        .set_action(match ev.action.as_str() {
+                            "release" => KeyAction::Release,
+                            "repeat" => KeyAction::Repeat,
+                            _ => KeyAction::Press,
+                        })
+                        .set_key(keymap::key_from_code(&ev.code))
+                        .set_mods(mods)
+                        .set_consumed_mods(consumed)
+                        .set_utf8(ev.utf8.as_deref())
+                        .set_unshifted_codepoint(unshifted);
+                    let mut bytes = Vec::with_capacity(16);
+                    match key_encoder.encode_to_vec(&key_event, &mut bytes) {
+                        // Empty is normal: e.g. a bare modifier press with
+                        // the kitty protocol off encodes to nothing.
+                        Ok(()) if !bytes.is_empty() => user_input = Some(bytes),
+                        Ok(()) => {}
+                        Err(e) => eprintln!("[tab {tab_id}] key encode failed: {e:?}"),
+                    }
+                }
+                Ok(TabCmd::Paste(bytes)) => {
+                    let bytes = if terminal.mode(Mode::BRACKETED_PASTE).unwrap_or(false) {
+                        let body = strip_paste_end_marker(&bytes);
+                        let mut wrapped = Vec::with_capacity(body.len() + 12);
+                        wrapped.extend_from_slice(b"\x1b[200~");
+                        wrapped.extend_from_slice(&body);
+                        wrapped.extend_from_slice(b"\x1b[201~");
+                        wrapped
+                    } else {
+                        bytes
+                    };
+                    user_input = Some(bytes);
                 }
                 Ok(TabCmd::Resize { cols, rows, cell_width_px, cell_height_px }) => {
                     match &mut backend {
@@ -834,14 +929,78 @@ fn run_tab_loop(
             },
             recv(pty_rx) -> msg => match msg {
                 Ok(PtyEvent::Data(bytes)) => {
+                    // Observe-only: the scanner extracts OSC 9/777
+                    // notification payloads (which the engine's Rust API
+                    // doesn't expose); vt_write still gets every byte.
+                    let notes = osc_scanner.scan(&bytes);
                     terminal.vt_write(&bytes);
                     pending_emit = true;
+                    let bell = bell_pending.take();
+                    if (bell || !notes.is_empty())
+                        && last_notify.is_none_or(|t| t.elapsed() >= NOTIFY_THROTTLE)
+                    {
+                        last_notify = Some(Instant::now());
+                        // Prefer the richer OSC payload when both a bell and
+                        // a notification landed in the same chunk.
+                        let payload = match notes.into_iter().next() {
+                            Some(n) => NotifyPayload {
+                                tab_id,
+                                source: "osc".into(),
+                                title: n.title,
+                                body: n.body,
+                            },
+                            None => NotifyPayload {
+                                tab_id,
+                                source: "bell".into(),
+                                title: None,
+                                body: None,
+                            },
+                        };
+                        let _ = app.emit_to(
+                            EventTarget::webview_window(owner_window.as_str()),
+                            "terminal:notification",
+                            payload,
+                        );
+                    }
                 }
                 Ok(PtyEvent::Eof) | Err(_) => {
                     break;
                 }
             },
             default(timeout_tick) => {}
+        }
+
+        if let Some(bytes) = user_input.take() {
+            let is_interrupt = bytes.contains(&0x03);
+            terminal.scroll_viewport(ScrollViewport::Bottom);
+            pending_emit = true;
+            // Reliable send: input is tiny and must not be dropped. The
+            // queue won't back up from a flood (replies use try_send).
+            let _ = write_tx.send(bytes);
+
+            // CTRL+C delivers SIGINT to the foreground process group
+            // immediately (verified: the line discipline kills e.g.
+            // `cat /dev/urandom` on the first press). But a flood it
+            // already produced sits buffered in pty_rx and would keep
+            // scrolling for seconds, making the interrupt *look* dead.
+            // Those bytes are the killed process's output — drop the
+            // backlog so the screen stops at once. Only triggers on a
+            // genuine flood; normal output never buffers this deep.
+            if is_interrupt && pty_rx.len() > INTERRUPT_FLUSH_BACKLOG {
+                let mut hit_eof = false;
+                while let Ok(ev) = pty_rx.try_recv() {
+                    match ev {
+                        PtyEvent::Data(_) => {}
+                        PtyEvent::Eof => {
+                            hit_eof = true;
+                            break;
+                        }
+                    }
+                }
+                if hit_eof {
+                    break;
+                }
+            }
         }
 
         if pending_emit && last_emit.elapsed() >= debounce {
@@ -888,6 +1047,25 @@ fn run_tab_loop(
 
 fn rgb_to_u32(c: RgbColor) -> u32 {
     (u32::from(c.r) << 16) | (u32::from(c.g) << 8) | u32::from(c.b)
+}
+
+/// Remove any embedded bracketed-paste end marker (`ESC [201~`) from text
+/// about to be pasted. Without this, clipboard content could close the
+/// bracket early and have the rest of itself interpreted as typed input —
+/// the classic paste-injection trick against bracketed-paste shells.
+fn strip_paste_end_marker(bytes: &[u8]) -> Vec<u8> {
+    const END: &[u8] = b"\x1b[201~";
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i..].starts_with(END) {
+            i += END.len();
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    out
 }
 
 /// Extract the text of an inclusive screen-absolute range `[start, end]` from
@@ -1210,6 +1388,11 @@ fn emit_render<'a>(
     let viewport_top = sb.map(|s| s.offset).unwrap_or(0);
     let scrollback_total = sb.map(|s| s.total).unwrap_or(rows as u64);
 
+    let kitty_flags = terminal
+        .kitty_keyboard_flags()
+        .map(|f| f.bits())
+        .unwrap_or(0);
+
     let payload = RenderPayload {
         tab_id,
         cols,
@@ -1222,6 +1405,7 @@ fn emit_render<'a>(
         title,
         viewport_top,
         scrollback_total,
+        kitty_flags,
     };
     let _ = app.emit_to(
         EventTarget::webview_window(owner_window),

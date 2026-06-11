@@ -3,9 +3,11 @@ mod commands;
 mod config;
 mod data_migrations;
 mod error;
+mod keymap;
 mod localfs;
 #[cfg(target_os = "macos")]
 mod macos;
+mod osc_notify;
 mod paths;
 mod platform;
 mod protocol;
@@ -203,6 +205,8 @@ pub fn run() {
             commands::spawn_tab,
             commands::close_tab,
             commands::write_input,
+            commands::write_key,
+            commands::write_paste,
             commands::resize_tab,
             commands::scroll_tab,
             commands::wheel_scroll,

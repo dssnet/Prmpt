@@ -8,11 +8,11 @@
  * browser columns filter on, so any column currently showing that
  * connection (or the local filesystem) displays the transfer.
  */
-import { ref, watch } from "vue";
+import { ref } from "vue";
 
 import { onSftpTransferProgress } from "../ipc";
-import { listSshConnections, owningTabId, useTabs } from "./tabs";
-import { showToast } from "./toasts";
+import { isAway, notify } from "./notifications";
+import { listSshConnections } from "./tabs";
 
 export interface Transfer {
   id: number;
@@ -102,36 +102,6 @@ function toastTitle(dir: Transfer["dir"], failed: boolean): string {
   return `${verb} ${failed ? "failed" : "finished"}`;
 }
 
-// ---- tab-bar bells ----------------------------------------------------------
-// Top-level tabs with a transfer that finished while the tab wasn't active;
-// TabBar shows a bell on them until they're visited.
-export const bellTabs = ref<Set<number>>(new Set());
-
-const { tabs: allTabs, active: activeTab } = useTabs();
-
-function ringBell(tabId: number): void {
-  const top = owningTabId(tabId);
-  // No bell for the active tab (the panel row / toast already covers it) or
-  // for a tab that's gone.
-  if (top == null || activeTab.value?.id === top) return;
-  bellTabs.value = new Set([...bellTabs.value, top]);
-}
-
-// Visiting a tab acknowledges its bell; closed tabs drop theirs.
-watch(activeTab, (a) => {
-  if (a && bellTabs.value.has(a.id)) {
-    const next = new Set(bellTabs.value);
-    next.delete(a.id);
-    bellTabs.value = next;
-  }
-});
-watch(allTabs, (list) => {
-  if (bellTabs.value.size === 0) return;
-  const open = new Set(list.map((t) => t.id));
-  const next = new Set([...bellTabs.value].filter((id) => open.has(id)));
-  if (next.size !== bellTabs.value.size) bellTabs.value = next;
-});
-
 // One app-wide progress listener for the store's whole lifetime (rows are
 // matched by globally-unique transfer id, so no per-column filtering needed).
 void onSftpTransferProgress((p) => {
@@ -149,29 +119,19 @@ void onSftpTransferProgress((p) => {
       : t,
   );
   if (!p.done) return;
-  // "Away" = the transfer's tab isn't the active one at completion. Column
-  // visibility is deliberately NOT the criterion: persisted panel layouts can
-  // show a connection's column on a different tab than the one the operation
-  // belongs to, which would wrongly count the completion as "seen".
-  // A closed owning tab also counts as away (the toast is then the only
-  // signal left; the bell just no-ops).
-  const owner = owningTabId(row.tabId);
-  const away = owner == null || owner !== activeTab.value?.id;
-  if (p.error) {
-    // Failed rows always persist until dismissed; only announce if unseen.
-    if (away) {
-      showToast({
-        host: row.host,
-        title: toastTitle(row.dir, true),
-        detail: row.name,
-        kind: "error",
-      });
-      ringBell(row.tabId);
-    }
-  } else if (away) {
-    showToast({ host: row.host, title: toastTitle(row.dir, false), detail: row.name });
-    ringBell(row.tabId);
-  } else {
+  // Capture "away" before notify(): the centralized dispatch chimes either
+  // way, but only announces (toast + tab-bar bell) when unseen.
+  const away = isAway(row.tabId);
+  notify({
+    tabId: row.tabId,
+    host: row.host,
+    title: toastTitle(row.dir, !!p.error),
+    detail: row.name,
+    kind: p.error ? "error" : "info",
+  });
+  // Failed rows always persist until dismissed; seen successes tidy
+  // themselves away after a beat.
+  if (!p.error && !away) {
     const id = p.transfer_id;
     setTimeout(() => dismissTransfer(id), 2500);
   }
