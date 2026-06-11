@@ -30,7 +30,8 @@ use crate::{
     error::{AppError, AppResult},
     keymap, osc_notify, platform,
     protocol::{
-        CellWire, CursorWire, ExitPayload, KeyEventWire, NotifyPayload, RenderPayload, TabInfo,
+        CellWire, CursorWire, ExitPayload, ForegroundProcess, KeyEventWire, NotifyPayload,
+        RenderPayload, TabInfo,
         CURSOR_STYLE_BAR, CURSOR_STYLE_BLOCK, CURSOR_STYLE_BLOCK_HOLLOW, CURSOR_STYLE_UNDERLINE,
         FLAG_BOLD, FLAG_FAINT, FLAG_INVERSE, FLAG_ITALIC, FLAG_SPACER_TAIL, FLAG_STRIKETHROUGH,
         FLAG_UNDERLINE, FLAG_WIDE,
@@ -106,6 +107,13 @@ pub enum TabCmd {
         reply: Sender<String>,
     },
     SetWindow(String),
+    /// Ask which process group is in the PTY's foreground right now, for the
+    /// confirm-on-close guard. Replies `Some` only when that group differs
+    /// from the shell we spawned (i.e. a program is running); SSH backends
+    /// and non-unix targets always reply `None`.
+    QueryForeground {
+        reply: Sender<Option<ForegroundProcess>>,
+    },
     Shutdown,
 }
 
@@ -603,6 +611,21 @@ impl TabRegistry {
             .map_err(|_| AppError::Other(format!("tab {id} did not answer copy request within 5s")))
     }
 
+    /// Ask the tab thread for the foreground process of its PTY (see
+    /// `TabCmd::QueryForeground`). `None` for idle/SSH/unknown tabs — and on
+    /// timeout, so an unresponsive tab can never block a close.
+    pub fn foreground_process(&self, id: u64) -> Option<ForegroundProcess> {
+        let (reply_tx, reply_rx) = bounded::<Option<ForegroundProcess>>(1);
+        {
+            let guard = self.inner.lock();
+            let h = guard.get(&id)?;
+            h.cmd_tx
+                .send(TabCmd::QueryForeground { reply: reply_tx })
+                .ok()?;
+        }
+        reply_rx.recv_timeout(Duration::from_secs(1)).ok().flatten()
+    }
+
     /// Clone the SFTP request sender for an SSH tab. Errors when the tab is
     /// unknown, is a local tab, or its session never offered SFTP (subsystem
     /// failed / disabled for the host) — the command layer maps that to a
@@ -912,6 +935,29 @@ fn run_tab_loop(
                         terminal.scroll_viewport(ScrollViewport::Delta(rows as isize));
                         pending_emit = true;
                     }
+                }
+                Ok(TabCmd::QueryForeground { reply }) => {
+                    #[allow(unused_mut)]
+                    let mut fg: Option<ForegroundProcess> = None;
+                    // tcgetpgrp on the PTY vs the shell's own pid: an
+                    // interactive shell gives every job its own process
+                    // group, so a mismatch means a program holds the
+                    // foreground. Unix-only — portable-pty doesn't expose
+                    // the equivalent on Windows.
+                    #[cfg(all(unix, not(any(target_os = "ios", target_os = "android"))))]
+                    if let Backend::Pty { master, child } = &backend {
+                        if let (Some(leader), Some(shell_pid)) =
+                            (master.process_group_leader(), child.process_id())
+                        {
+                            if leader > 0 && leader as u32 != shell_pid {
+                                fg = Some(ForegroundProcess {
+                                    pid: leader,
+                                    name: crate::platform::foreground_process_name(leader),
+                                });
+                            }
+                        }
+                    }
+                    let _ = reply.send(fg);
                 }
                 Ok(TabCmd::CopyText { start, end, reply }) => {
                     let cols = terminal.cols().unwrap_or(0);

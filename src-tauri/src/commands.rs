@@ -78,6 +78,17 @@ pub fn close_tab(registry: State<'_, SharedRegistry>, tab_id: u64) -> AppResult<
     registry.close(tab_id)
 }
 
+/// Foreground process of a local tab's PTY, when it isn't the shell itself —
+/// the "something is still running here" probe behind the confirm-on-close
+/// guard. `None` for idle shells, SSH tabs, unknown tabs and on Windows.
+#[tauri::command]
+pub fn tab_foreground_process(
+    registry: State<'_, SharedRegistry>,
+    tab_id: u64,
+) -> Option<crate::protocol::ForegroundProcess> {
+    registry.foreground_process(tab_id)
+}
+
 #[tauri::command]
 pub fn write_input(
     registry: State<'_, SharedRegistry>,
@@ -992,6 +1003,10 @@ pub fn prepare_for_update(app: AppHandle, current_label: String) {
         if label == current_label {
             continue;
         }
-        let _ = window.close();
+        // destroy(), not close(): the frontend's onCloseRequested listener
+        // (confirm-on-close guard) intercepts close() and could park update
+        // teardown behind a confirm dialog in a background window. The user
+        // already confirmed the update; tear the window down unconditionally.
+        let _ = window.destroy();
     }
 }

@@ -17,7 +17,9 @@ import { exportBackup, getConfig, setTerminalPrefs } from "../ipc";
 import { applyTheme, useTheme } from "../state/theme";
 import { findPresetMatch, PRESETS } from "../state/themes";
 import {
+  confirmCloseRunning,
   notificationSounds,
+  setConfirmCloseRunning,
   setNotificationSounds,
   setToastsEnabled,
   toastsEnabled,
@@ -359,6 +361,20 @@ function openImport() {
                 <div class="setting-hint">History kept per tab.</div>
               </div>
               <Input v-model="term.scrollback_lines" type="number" :min="0" class="w-28 shrink-0" />
+            </div>
+            <div class="setting-row">
+              <div class="setting-info">
+                <div class="setting-title">Confirm before closing</div>
+                <div class="setting-hint">
+                  Warn when closing a tab or window would kill a running
+                  program — e.g. Claude Code mid-task — or drop an open SSH
+                  connection.
+                </div>
+              </div>
+              <Switch
+                :model-value="confirmCloseRunning"
+                @update:model-value="setConfirmCloseRunning"
+              />
             </div>
           </div>
           <span

@@ -345,3 +345,31 @@ fn find_on_path(exe: &str) -> Option<String> {
     }
     None
 }
+
+/// Short executable name behind `pid`, for the confirm-on-close dialog
+/// ("claude is still running…"). Best-effort: `None` simply degrades the
+/// dialog copy to "a program".
+#[cfg(target_os = "macos")]
+pub fn foreground_process_name(pid: i32) -> Option<String> {
+    // proc_name caps at 2*MAXCOMLEN (32 bytes + NUL headroom).
+    let mut buf = [0u8; 64];
+    let n = unsafe {
+        libc::proc_name(pid, buf.as_mut_ptr() as *mut libc::c_void, buf.len() as u32)
+    };
+    if n <= 0 {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&buf[..n as usize]).into_owned())
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+pub fn foreground_process_name(pid: i32) -> Option<String> {
+    let comm = std::fs::read_to_string(format!("/proc/{pid}/comm")).ok()?;
+    let name = comm.trim();
+    (!name.is_empty()).then(|| name.to_string())
+}
+
+#[cfg(not(unix))]
+pub fn foreground_process_name(_pid: i32) -> Option<String> {
+    None
+}

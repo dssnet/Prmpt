@@ -85,6 +85,12 @@ sqlx = { version = "0.8", default-features = false, features = ["sqlite", "runti
 # for the reconcile path.
 sha2 = "0.10"
 
+# Foreground-process detection for the confirm-on-close guard: resolve
+# the name behind the PTY's foreground pgid (`proc_name` on macOS,
+# `/proc/<pid>/comm` on Linux). Already in the tree transitively.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 # portable-pty's transitive `termios 0.2.2` has no iOS/Android support,
 # and there is no local-PTY story on those targets anyway (sandbox
 # forbids fork/exec for App-Store binaries). Pull it in only on desktop.

@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { readText as readClipboardText } from "@tauri-apps/plugin-clipboard-manager";
+import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import type { UnlistenFn } from "@tauri-apps/api/event";
 import { onMounted, onBeforeUnmount, ref } from "vue";
 
@@ -36,7 +37,6 @@ import {
 } from "./ipc";
 import {
   attachTab as attachTabLocal,
-  closeTabAndForget,
   dropTabIntoTarget,
   handleExit,
   handleRender,
@@ -63,6 +63,14 @@ import {
   reflowActive,
   selectAll,
 } from "./state/terminal";
+import {
+  cancelPendingClose,
+  confirmPendingClose,
+  pendingClose,
+  pendingCloseTitle,
+  requestCloseTab,
+  windowCloseMessage,
+} from "./state/closeGuard";
 import { toggleLocalBrowser } from "./state/localBrowser";
 import { notify } from "./state/notifications";
 import { showToast } from "./state/toasts";
@@ -75,6 +83,7 @@ import UpdateModal from "./components/UpdateModal.vue";
 import { passphrasePromptState } from "./state/passphrase-prompt";
 import { runUpdateCheck } from "./state/update";
 import { UPDATE_CHECK_INTERVAL_MS } from "./updater";
+import { ConfirmDialog } from "./components/ui";
 import TabBar from "./components/TabBar.vue";
 import TerminalView from "./components/TerminalView.vue";
 import TitleBar from "./components/TitleBar.vue";
@@ -387,7 +396,7 @@ const shortcuts: Shortcut[] = [
     match: (k) => k === "w",
     run: () => {
       const a = active.value;
-      if (a) void closeTabAndForget(a.id);
+      if (a) void requestCloseTab(a);
     },
   },
   {
@@ -653,6 +662,25 @@ onMounted(async () => {
     }
   }));
 
+  // Confirm-on-close guard for the whole window (traffic light, custom
+  // TitleBar button, OS chrome — every path lands here). Tauri awaits this
+  // async handler before deciding: unless preventDefault() was called, the
+  // window is destroyed. Confirming the dialog destroys explicitly (destroy
+  // skips CloseRequested, so no re-entry). Empty/reserve windows are never
+  // busy and close straight through.
+  unlisteners.push(await getCurrentWebviewWindow().onCloseRequested(async (ev) => {
+    try {
+      const msg = await windowCloseMessage();
+      if (msg) {
+        ev.preventDefault();
+        pendingClose.value = { kind: "window", message: msg };
+      }
+    } catch (err) {
+      // On any guard failure, let the close proceed — never wedge the window.
+      console.error("close guard failed:", err);
+    }
+  }));
+
   // Bootstrap: ask the backend whether this window is a pre-warmed
   // reserve (sit idle until activation) or a normal window (hydrate
   // tabs or spawn a fresh one). Invoking bootstrapWindow is also what
@@ -732,6 +760,15 @@ onBeforeUnmount(() => {
     v-if="connectErrorModal"
     :payload="connectErrorModal"
     @close="dismissConnectError"
+  />
+  <ConfirmDialog
+    :open="!!pendingClose"
+    :title="pendingClose ? pendingCloseTitle(pendingClose.kind) : ''"
+    :message="pendingClose?.message"
+    confirm-label="Close"
+    tone="danger"
+    @confirm="confirmPendingClose"
+    @cancel="cancelPendingClose"
   />
   <UpdateModal />
   <Toasts />

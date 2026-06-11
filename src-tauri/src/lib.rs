@@ -204,6 +204,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::spawn_tab,
             commands::close_tab,
+            commands::tab_foreground_process,
             commands::write_input,
             commands::write_key,
             commands::write_paste,

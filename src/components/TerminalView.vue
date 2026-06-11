@@ -41,12 +41,12 @@ import {
   type LocalDock,
 } from "../state/terminal";
 import {
-  closeWorkspacePane,
   detachWorkspaceLeaf,
   focusWorkspacePane,
   moveWorkspaceLeaf,
   useTabs,
 } from "../state/tabs";
+import { requestClosePane } from "../state/closeGuard";
 import { workspaceTick, type DividerRect } from "../state/workspace";
 import { useTheme } from "../state/theme";
 
@@ -449,7 +449,7 @@ function onPaneDragUp(e: MouseEvent) {
 }
 
 function onPaneClose(p: PaneOverlay) {
-  void closeWorkspacePane(p.tabId);
+  void requestClosePane(p.tabId);
 }
 
 onMounted(() => {

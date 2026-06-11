@@ -115,6 +115,7 @@ export interface Config {
 export interface UiPrefs {
   toast_notifications: boolean;
   notification_sounds: boolean;
+  confirm_close_running: boolean;
   show_hidden_files: boolean;
   show_size: boolean;
   show_changed_date: boolean;
@@ -157,6 +158,22 @@ export async function closeTab(tabId: number): Promise<void> {
 
 export async function forgetTab(tabId: number): Promise<void> {
   await invoke("forget_tab", { tabId });
+}
+
+/** The process group in the foreground of a local tab's PTY when it isn't
+ *  the shell itself — i.e. a program is running there. `null` for idle
+ *  shells, SSH tabs and on Windows. */
+export interface ForegroundProcess {
+  pid: number;
+  name: string | null;
+}
+
+export async function tabForegroundProcess(
+  tabId: number,
+): Promise<ForegroundProcess | null> {
+  return await invoke<ForegroundProcess | null>("tab_foreground_process", {
+    tabId,
+  });
 }
 
 export async function writeInput(tabId: number, bytes: Uint8Array): Promise<void> {

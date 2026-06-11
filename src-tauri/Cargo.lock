@@ -4442,6 +4442,7 @@ dependencies = [
  "dunce",
  "hex",
  "iota_stronghold",
+ "libc",
  "libghostty-vt",
  "libghostty-vt-sys",
  "objc2",

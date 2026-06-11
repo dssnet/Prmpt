@@ -41,6 +41,9 @@ pub struct UiPrefs {
     /// Play a chime when a program rings the terminal bell or sends an OSC
     /// notification (e.g. Claude Code finishing a task).
     pub notification_sounds: bool,
+    /// Ask before a close would kill a running foreground program (tab or
+    /// window) or drop an open SSH connection (window close only).
+    pub confirm_close_running: bool,
     /// Show dot-prefixed entries in the file browsers.
     pub show_hidden_files: bool,
     /// Show the size column in the file browsers.
@@ -57,6 +60,7 @@ impl Default for UiPrefs {
         Self {
             toast_notifications: true,
             notification_sounds: true,
+            confirm_close_running: true,
             show_hidden_files: false,
             show_size: true,
             show_changed_date: false,

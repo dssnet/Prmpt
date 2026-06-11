@@ -3,13 +3,13 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { Asterisk, Bell, ChevronDown, Columns2, Globe, X } from "lucide-vue-next";
 
 import {
-  closeTabAndForget,
   HOME_TAB_ID,
   moveTab,
   setActive,
   useTabs,
   type TabState,
 } from "../state/tabs";
+import { requestCloseTab } from "../state/closeGuard";
 import { bellTabs } from "../state/notifications";
 import { resetTabConsumed } from "../state/workspace";
 import NotificationCenter from "./NotificationCenter.vue";
@@ -63,13 +63,13 @@ function onTabClick(t: TabState): void {
 function onCloseClick(t: TabState, e: MouseEvent): void {
   e.stopPropagation();
   if (t.id === HOME_TAB_ID) return;
-  void closeTabAndForget(t.id);
+  void requestCloseTab(t);
 }
 
 // Middle-click anywhere on a tab closes it (matches browser convention).
 function onMiddleClose(t: TabState): void {
   if (t.id === HOME_TAB_ID) return;
-  void closeTabAndForget(t.id);
+  void requestCloseTab(t);
 }
 
 // Tabs use a custom mouse-driven drag rather than HTML5 DnD: WKWebView does
@@ -424,7 +424,7 @@ function pickOverflow(t: TabState): void {
 }
 function closeOverflow(t: TabState, e: MouseEvent): void {
   e.stopPropagation();
-  void closeTabAndForget(t.id);
+  void requestCloseTab(t);
 }
 
 function onDocMouseDown(e: MouseEvent): void {

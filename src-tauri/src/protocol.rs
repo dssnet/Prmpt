@@ -61,6 +61,18 @@ pub struct ExitPayload {
     pub status: i32,
 }
 
+/// Answer to `tab_foreground_process`: the process group currently in the
+/// foreground of a local tab's PTY, when it isn't the shell we spawned —
+/// i.e. "something is running in this tab". `None`-command result (no
+/// payload at all) means idle shell, SSH tab, or a platform where the
+/// check isn't available (Windows).
+#[derive(Serialize, Clone, Debug)]
+pub struct ForegroundProcess {
+    pub pid: i32,
+    /// Short executable name (e.g. "claude"), when the OS could resolve it.
+    pub name: Option<String>,
+}
+
 /// A keyboard event as the webview saw it, encoded on the tab thread by
 /// libghostty-vt's key encoder against the terminal's live modes (DECCKM,
 /// keypad mode, kitty keyboard flags, …). Field names mirror the W3C
