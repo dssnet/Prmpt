@@ -111,6 +111,24 @@ export function markAllNotificationsRead(): void {
   );
 }
 
+/** Visiting a tab acknowledges its entries — same gesture that clears its
+ *  tab-bar bell. Entries from closed tabs stay unread until the panel is
+ *  opened (`markAllNotificationsRead`). */
+function markTabNotificationsRead(topId: number): void {
+  if (!notificationLog.value.some((n) => !n.read && owningTabId(n.tabId) === topId))
+    return;
+  notificationLog.value = notificationLog.value.map((n) =>
+    !n.read && owningTabId(n.tabId) === topId ? { ...n, read: true } : n,
+  );
+}
+
+// A notification can land for the active tab while the window is unfocused
+// (that counts as away); coming back to the window is the equivalent visit.
+window.addEventListener("focus", () => {
+  const a = activeTab.value;
+  if (a) markTabNotificationsRead(a.id);
+});
+
 export function clearNotifications(): void {
   notificationLog.value = [];
 }
@@ -129,9 +147,12 @@ function ringBell(tabId: number): void {
   bellTabs.value = new Set([...bellTabs.value, top]);
 }
 
-// Visiting a tab acknowledges its bell; closed tabs drop theirs.
+// Visiting a tab acknowledges its bell and its log entries; closed tabs
+// drop their bells.
 watch(activeTab, (a) => {
-  if (a && bellTabs.value.has(a.id)) {
+  if (!a) return;
+  markTabNotificationsRead(a.id);
+  if (bellTabs.value.has(a.id)) {
     const next = new Set(bellTabs.value);
     next.delete(a.id);
     bellTabs.value = next;

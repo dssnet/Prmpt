@@ -142,11 +142,14 @@ onBeforeUnmount(() => {
             class="w-full flex flex-col gap-0.5 px-2 py-1.5 rounded-md text-left cursor-pointer hover:bg-surface-2"
             @click="jumpTo(n)"
           >
-            <span class="flex items-center gap-1.5 min-w-0">
+            <span class="flex items-center gap-1.5 min-w-0 w-full">
               <span
-                class="flex-none w-1.5 h-1.5 rounded-full"
-                :class="n.kind === 'error' ? 'bg-danger' : 'bg-accent'"
-              />
+                class="notif-host flex-none"
+                :class="{ 'notif-host-error': n.kind === 'error' }"
+                :title="n.host"
+              >
+                {{ n.host }}
+              </span>
               <span
                 class="flex-1 overflow-hidden text-ellipsis whitespace-nowrap font-medium"
                 :class="n.kind === 'error' ? 'text-danger' : 'text-fg'"
@@ -156,12 +159,10 @@ onBeforeUnmount(() => {
               <span class="flex-none text-fg-subtle">{{ timeAgo(n.at) }}</span>
             </span>
             <span
-              class="pl-3 flex items-baseline gap-1.5 min-w-0 text-fg-muted"
+              class="block w-full overflow-hidden text-ellipsis whitespace-nowrap text-fg-subtle"
+              :title="n.detail"
             >
-              <span class="flex-none text-fg-subtle">{{ n.host }}</span>
-              <span class="flex-1 overflow-hidden text-ellipsis whitespace-nowrap">
-                {{ n.detail }}
-              </span>
+              {{ n.detail }}
             </span>
           </button>
         </div>
@@ -173,6 +174,24 @@ onBeforeUnmount(() => {
 <style scoped>
 .notif-panel {
   transform-origin: top right;
+}
+/* Same origin pill as the toast's .toast-host — keep the two in sync. */
+.notif-host {
+  max-width: 110px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 1px 7px;
+  font-size: 10px;
+  border-radius: 9999px;
+  color: var(--accent, #89b4fa);
+  background: color-mix(in srgb, var(--accent, #89b4fa) 14%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent, #89b4fa) 35%, transparent);
+}
+.notif-host-error {
+  color: var(--danger, #f38ba8);
+  background: color-mix(in srgb, var(--danger, #f38ba8) 14%, transparent);
+  border-color: color-mix(in srgb, var(--danger, #f38ba8) 35%, transparent);
 }
 .overflow-panel-enter-active {
   transition:
