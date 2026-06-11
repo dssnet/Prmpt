@@ -1,8 +1,8 @@
 /**
  * Centralized notification dispatch. Every "something finished while you
- * weren't looking" event — a terminal bell / OSC notification (Claude Code
- * finishing a task), a file transfer completing — goes through `notify()`,
- * which fans out to the three signals:
+ * weren't looking" event — an OSC notification (Claude Code finishing a
+ * task), a file transfer completing — goes through `notify()`, which fans
+ * out to the three signals:
  *
  *  - **chime** (Web Audio): on every event, gated on the Settings →
  *    Notifications sound toggle;
@@ -14,10 +14,15 @@
  *
  * Every event also lands in `notificationLog`, the history behind the
  * tab-bar's notification-center bell (`NotificationCenter.vue`).
+ *
+ * The terminal BEL is deliberately NOT a notification: shells ring it for
+ * tab-autocomplete and line-edit errors, so it would flood the history.
+ * `notifyBell()` plays a softer one-note blip (same sound toggle) and
+ * badges the tab when away — no log entry, no toast.
  */
 import { computed, ref, watch } from "vue";
 
-import { playChime } from "../audio/chime";
+import { playBell, playChime } from "../audio/chime";
 import { owningTabId, useTabs } from "./tabs";
 import { showToast } from "./toasts";
 import { notificationSounds } from "./uiPrefs";
@@ -66,6 +71,12 @@ export function notify(n: AppNotification): void {
   if (!away) return;
   showToast({ host: n.host, title: n.title, detail: n.detail, kind: n.kind });
   ringBell(n.tabId);
+}
+
+/** Terminal BEL: blip + away-badge only, never logged or toasted. */
+export function notifyBell(tabId: number): void {
+  if (notificationSounds.value) void playBell();
+  if (isAway(tabId)) ringBell(tabId);
 }
 
 // ---- notification center (history) ------------------------------------------

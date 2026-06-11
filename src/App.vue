@@ -75,7 +75,7 @@ import {
   windowCloseMessage,
 } from "./state/closeGuard";
 import { toggleLocalBrowser } from "./state/localBrowser";
-import { notify } from "./state/notifications";
+import { notify, notifyBell } from "./state/notifications";
 import { showToast } from "./state/toasts";
 import HomeView from "./components/HomeView.vue";
 import HostKeyFirstConnectModal from "./components/HostKeyFirstConnectModal.vue";
@@ -628,15 +628,18 @@ onMounted(async () => {
       selectAll();
     }
   }));
-  // Bell / OSC notification (e.g. Claude Code finishing a task), routed
-  // through the centralized dispatch: chime always (if enabled), toast +
-  // tab-bar bell only when the user isn't looking at the originating tab.
+  // OSC notification (e.g. Claude Code finishing a task), routed through
+  // the centralized dispatch: chime always (if enabled), toast + tab-bar
+  // bell only when the user isn't looking at the originating tab. The
+  // plain terminal BEL (tab autocomplete etc.) gets the lighter path:
+  // blip + away-badge, no history entry.
   unlisteners.push(await onTerminalNotification((p) => {
+    if (p.source === "bell") return notifyBell(p.tab_id);
     const t = tabs.value.find((x) => x.id === (owningTabId(p.tab_id) ?? p.tab_id));
     notify({
       tabId: p.tab_id,
       host: t?.hostLabel ?? "Local",
-      title: p.title || (p.source === "bell" ? "Terminal bell" : "Notification"),
+      title: p.title || "Notification",
       detail: p.body || t?.title || "A program requested attention",
     });
   }));
