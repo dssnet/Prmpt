@@ -924,13 +924,6 @@ onBeforeUnmount(() => {
           />
         </div>
 
-        <p
-          v-if="!loading && visibleEntries.length === 0 && !creatingFolder"
-          class="px-3 py-6 text-center text-xs text-fg-subtle"
-        >
-          {{ filterText ? "No matches." : "Empty directory." }}
-        </p>
-
         <table class="w-full table-fixed border-separate border-spacing-0 text-xs">
           <colgroup>
             <col />
@@ -965,6 +958,14 @@ onBeforeUnmount(() => {
                 </div>
               </td>
               <td :colspan="trailingCols" />
+            </tr>
+            <tr v-if="!loading && visibleEntries.length === 0 && !creatingFolder">
+              <td
+                :colspan="1 + trailingCols"
+                class="px-2.5 py-2 text-center text-xs text-fg-subtle"
+              >
+                {{ filterText ? "No matches." : "Empty directory." }}
+              </td>
             </tr>
             <tr
               v-for="e in visibleEntries"
