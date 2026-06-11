@@ -288,6 +288,11 @@ export async function getConfig(): Promise<Config> {
   return await invoke<Config>("get_config");
 }
 
+/** Built-in defaults (Config::default()), for reset-to-defaults actions. */
+export async function defaultTerminalConfig(): Promise<Config> {
+  return await invoke<Config>("default_terminal_config");
+}
+
 /** Whether macOS Full Disk Access is granted. Always true off macOS. */
 export async function fullDiskAccessGranted(): Promise<boolean> {
   return await invoke<boolean>("full_disk_access_granted");

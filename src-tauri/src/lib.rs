@@ -229,6 +229,7 @@ pub fn run() {
             commands::copy_selection_text,
             commands::list_tabs,
             commands::get_config,
+            commands::default_terminal_config,
             commands::set_theme,
             commands::set_ui_prefs,
             commands::set_terminal_prefs,

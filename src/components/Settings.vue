@@ -14,7 +14,7 @@ import { getVersion } from "@tauri-apps/api/app";
 import { save as saveDialog } from "@tauri-apps/plugin-dialog";
 
 import { errText, useBackupImport } from "../composables/useBackupImport";
-import { exportBackup, getConfig, setTerminalPrefs } from "../ipc";
+import { defaultTerminalConfig, exportBackup, getConfig, setTerminalPrefs } from "../ipc";
 import { applyTheme, useTheme } from "../state/theme";
 import { findPresetMatch, PRESETS } from "../state/themes";
 import {
@@ -126,6 +126,26 @@ async function saveTerminal() {
     termStatus.value = { tone: "ok", text: "Saved." };
   } catch (e) {
     termStatus.value = { tone: "err", text: `Save failed: ${errText(e)}` };
+  }
+}
+
+// Resets everything shown in this tab, including the confirm-close switch
+// (a ui pref). Persistence of the terminal fields rides the autosave watcher.
+async function resetTerminal() {
+  try {
+    const d = await defaultTerminalConfig();
+    term.value = {
+      font_family: d.font_family,
+      font_size: d.font_size,
+      line_height: d.line_height,
+      shell: d.shell ?? "",
+      login_shell: d.login_shell,
+      scrollback_lines: d.scrollback_lines,
+    };
+    setConfirmCloseRunning(d.ui.confirm_close_running);
+    termStatus.value = { tone: "ok", text: "Reset to defaults." };
+  } catch (e) {
+    termStatus.value = { tone: "err", text: `Reset failed: ${errText(e)}` };
   }
 }
 
@@ -391,6 +411,11 @@ function openImport() {
                 :model-value="confirmCloseRunning"
                 @update:model-value="setConfirmCloseRunning"
               />
+            </div>
+            <div class="mt-2">
+              <Button variant="secondary" size="sm" @click="resetTerminal">
+                Reset to defaults
+              </Button>
             </div>
           </div>
           <span

@@ -213,6 +213,12 @@ pub fn get_config(config: State<'_, SharedConfig>) -> Config {
     config.lock().clone()
 }
 
+/// Built-in defaults, for the settings pane's reset-to-defaults actions.
+#[tauri::command]
+pub fn default_terminal_config() -> Config {
+    Config::default()
+}
+
 #[tauri::command]
 pub fn set_theme(config: State<'_, SharedConfig>, theme: Theme) -> AppResult<()> {
     let mut guard = config.lock();
