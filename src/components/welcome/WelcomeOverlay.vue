@@ -38,14 +38,18 @@ async function next(): Promise<void> {
           class="flex flex-col items-center gap-10"
         >
           <HelloAnimation @done="helloDone = true" />
-          <Transition name="welcome-step">
-            <Button v-if="helloDone" variant="primary" @click="next">
-              Get started
-            </Button>
-            <!-- Invisible placeholder so the layout doesn't jump when the
-                 button fades in. -->
-            <div v-else class="h-7" aria-hidden="true" />
-          </Transition>
+          <!-- Always rendered so the button's height is in the layout from
+               first paint — only opacity/translate animate, so the hello
+               can't shift when it appears. The wrapper (not the Button)
+               carries the transition to avoid clashing with Button's own
+               hover transition-opacity. -->
+          <div
+            class="transition-[opacity,translate] duration-250 ease-out"
+            :class="helloDone ? 'opacity-100 translate-y-0' : 'opacity-0 translate-y-2'"
+            :inert="!helloDone"
+          >
+            <Button variant="primary" @click="next">Get started</Button>
+          </div>
         </div>
         <StepFda v-else-if="step === 'fda'" key="fda" @done="step = 'import'" />
         <StepImport v-else key="import" @finish="emit('close')" />

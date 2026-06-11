@@ -68,38 +68,42 @@ function startImport(): void {
         {{ existing ? "Continue" : "Start fresh" }}
       </Button>
     </div>
+
+    <!-- Both dialogs Teleport to body, so nesting them keeps this component
+         single-rooted (required by the parent <Transition>) without
+         affecting layout or stacking. -->
+
+    <!-- Destructive confirmation before staging an import. -->
+    <ConfirmDialog
+      :open="showConfirm"
+      title="Import backup?"
+      message="This erases all current settings, hosts, keys and groups and replaces them with the contents of the backup. The app will restart to finish. This cannot be undone."
+      confirm-label="Erase and import"
+      cancel-label="Cancel"
+      @confirm="confirm"
+      @cancel="cancel"
+    />
+
+    <!-- Passphrase prompt for an encrypted backup. -->
+    <Modal v-if="showPassPrompt" title="Backup is encrypted">
+      <p class="m-0 text-xs text-fg-muted leading-snug">
+        Enter the passphrase this backup was encrypted with.
+      </p>
+      <form class="flex flex-col gap-2.5" @submit.prevent="submitPassphrase">
+        <Input
+          type="password"
+          autocomplete="current-password"
+          placeholder="Passphrase"
+          v-model="passphrase"
+        />
+        <p v-if="passError" class="m-0 text-xs text-danger">{{ passError }}</p>
+        <div class="flex gap-2 justify-end mt-1.5">
+          <Button variant="secondary" @click="cancel">Cancel</Button>
+          <Button type="submit" :disabled="!passphrase || busy">
+            Decrypt and import
+          </Button>
+        </div>
+      </form>
+    </Modal>
   </div>
-
-  <!-- Destructive confirmation before staging an import. -->
-  <ConfirmDialog
-    :open="showConfirm"
-    title="Import backup?"
-    message="This erases all current settings, hosts, keys and groups and replaces them with the contents of the backup. The app will restart to finish. This cannot be undone."
-    confirm-label="Erase and import"
-    cancel-label="Cancel"
-    @confirm="confirm"
-    @cancel="cancel"
-  />
-
-  <!-- Passphrase prompt for an encrypted backup. -->
-  <Modal v-if="showPassPrompt" title="Backup is encrypted">
-    <p class="m-0 text-xs text-fg-muted leading-snug">
-      Enter the passphrase this backup was encrypted with.
-    </p>
-    <form class="flex flex-col gap-2.5" @submit.prevent="submitPassphrase">
-      <Input
-        type="password"
-        autocomplete="current-password"
-        placeholder="Passphrase"
-        v-model="passphrase"
-      />
-      <p v-if="passError" class="m-0 text-xs text-danger">{{ passError }}</p>
-      <div class="flex gap-2 justify-end mt-1.5">
-        <Button variant="secondary" @click="cancel">Cancel</Button>
-        <Button type="submit" :disabled="!passphrase || busy">
-          Decrypt and import
-        </Button>
-      </div>
-    </form>
-  </Modal>
 </template>
