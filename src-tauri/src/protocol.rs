@@ -19,6 +19,18 @@ pub struct CellWire {
     pub flags: u8,
 }
 
+/// One run of cells covered by an OSC 8 hyperlink. `row` is viewport-relative,
+/// `c0..=c1` the inclusive column range, `link` an index into
+/// `RenderPayload::links`. Spans (rather than a per-cell field) keep the
+/// common no-links payload size unchanged.
+#[derive(Serialize, Clone, Debug)]
+pub struct LinkSpanWire {
+    pub row: u16,
+    pub c0: u16,
+    pub c1: u16,
+    pub link: u32,
+}
+
 #[derive(Serialize, Clone, Debug)]
 pub struct CursorWire {
     pub x: u16,
@@ -53,6 +65,10 @@ pub struct RenderPayload {
     /// purely a traffic hint: the frontend skips forwarding key-release and
     /// bare-modifier events the encoder would discard anyway.
     pub kitty_flags: u8,
+    /// Deduped OSC 8 hyperlink URIs visible this frame.
+    pub links: Vec<String>,
+    /// Cell runs covered by those hyperlinks (viewport coordinates).
+    pub link_spans: Vec<LinkSpanWire>,
 }
 
 #[derive(Serialize, Clone, Debug)]

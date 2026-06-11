@@ -9,7 +9,7 @@
  */
 import type { KeyEventWire } from "./ipc";
 
-const IS_MAC = typeof navigator !== "undefined" && /Mac/i.test(navigator.platform);
+export const IS_MAC = typeof navigator !== "undefined" && /Mac/i.test(navigator.platform);
 
 /** `e.key` values for bare modifier presses. Only worth an IPC round-trip
  *  when the kitty protocol is active (the encoder drops them otherwise). */

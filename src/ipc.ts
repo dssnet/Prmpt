@@ -35,6 +35,16 @@ export interface CursorWire {
   blinking: boolean;
 }
 
+/** One run of cells covered by an OSC 8 hyperlink. `row` is viewport-relative,
+ *  `c0..c1` the inclusive column range, `link` an index into
+ *  `RenderPayload.links`. */
+export interface LinkSpanWire {
+  row: number;
+  c0: number;
+  c1: number;
+  link: number;
+}
+
 export interface RenderPayload {
   tab_id: number;
   cols: number;
@@ -56,6 +66,10 @@ export interface RenderPayload {
    *  traffic hint so the frontend can skip forwarding key-release and
    *  bare-modifier events the encoder would discard anyway. */
   kitty_flags: number;
+  /** Deduped OSC 8 hyperlink URIs visible this frame. */
+  links: string[];
+  /** Cell runs covered by those hyperlinks (viewport coordinates). */
+  link_spans: LinkSpanWire[];
 }
 
 export interface ExitPayload {
@@ -247,12 +261,19 @@ export async function copySelectionText(
   });
 }
 
-export async function showContextMenu(): Promise<void> {
-  await invoke("show_context_menu");
+/** `withLink` adds a "Copy Link" item — set it when the right-click landed on
+ *  a hyperlink (and remember the URL via `setContextLink`; the item's click
+ *  comes back as `menu:copy_link`). */
+export async function showContextMenu(withLink = false): Promise<void> {
+  await invoke("show_context_menu", { withLink });
 }
 
 export function onMenuCopy(handler: () => void): Promise<UnlistenFn> {
   return listenScoped<void>("menu:copy", () => handler());
+}
+
+export function onMenuCopyLink(handler: () => void): Promise<UnlistenFn> {
+  return listenScoped<void>("menu:copy_link", () => handler());
 }
 
 export function onMenuPaste(handler: () => void): Promise<UnlistenFn> {

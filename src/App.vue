@@ -12,6 +12,7 @@ import {
   currentWindowLabel,
   onExit,
   onMenuCopy,
+  onMenuCopyLink,
   onMenuPaste,
   onMenuSelectAll,
   onRender,
@@ -59,10 +60,12 @@ import {
   getCellMetrics,
   hasSelection,
   inputTargetTabId,
+  linkAtEvent,
   pasteFromClipboard,
   reflowActive,
   selectAll,
 } from "./state/terminal";
+import { copyContextLink, setContextLink } from "./state/links";
 import {
   cancelPendingClose,
   confirmPendingClose,
@@ -549,7 +552,9 @@ function onContextMenu(e: MouseEvent) {
   e.preventDefault();
   const inTerm = (e.target as Element | null)?.closest?.("#terminal-host");
   if (inTerm) {
-    void showContextMenu().catch((err) =>
+    const link = linkAtEvent(e);
+    setContextLink(link?.url ?? null);
+    void showContextMenu(link !== null).catch((err) =>
       console.error("show_context_menu failed:", err),
     );
   }
@@ -605,6 +610,7 @@ onMounted(async () => {
     if (el) void copyFromInput(el);
     else copyCurrentSelection();
   }));
+  unlisteners.push(await onMenuCopyLink(() => copyContextLink()));
   unlisteners.push(await onMenuPaste(() => {
     const el = focusedEditable();
     if (el) void pasteIntoInput(el);

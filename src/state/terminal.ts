@@ -14,6 +14,7 @@ import {
   type RenderPayload,
   type ThemeConfig,
 } from "../ipc";
+import { IS_MAC } from "../input";
 import { Canvas2DRenderer } from "../renderer/canvas2d";
 import { measureCell, type Renderer, type SelectionRange } from "../renderer/index";
 import { WebGLRenderer } from "../renderer/webgl";
@@ -41,6 +42,16 @@ import {
 } from "./workspace";
 import { isSftpVisible, setSftpDockRatio, sftpDockRatio } from "./sftp";
 import { isLocalVisible } from "./localBrowser";
+import {
+  clearLinkHover,
+  decoratePayloadForHover,
+  findLinkAt,
+  hoverCursor,
+  openDetectedUrl,
+  revalidateLinkHover,
+  updateLinkHover,
+  type LinkHit,
+} from "./links";
 
 // Selection lives in screen-absolute coords (`screenRow = viewport_top +
 // viewport_row`). That way vertical resize and scrollback motion are pure
@@ -155,6 +166,8 @@ export function teardownTerminalSession(): void {
   canvasEl = null;
   hostEl = null;
   config = null;
+  lastHoverCell = null;
+  clearLinkHover();
 }
 
 export function computeDims(): { cols: number; rows: number; w: number; h: number } {
@@ -419,11 +432,15 @@ function drawActive(): void {
       for (const pane of wsPanes) {
         const snap = snapshotFor(pane.tabId);
         if (!snap) continue;
+        // No-op for panes the pointer isn't over; for the hovered one, a new
+        // generation re-runs the link hit-test so the underline follows
+        // scroll/output or clears.
+        if (revalidateLinkHover(snap)) syncHoverCursor();
         const focused = pane.tabId === a.ws.focusedTabId;
         const sel =
           focused && selection ? selectionForRender(selection, snap) : null;
         renderer.renderInto(
-          snap,
+          decoratePayloadForHover(snap),
           sel,
           { x: pane.x, y: pane.y, w: pane.w, h: pane.h },
           { cursor: focused ? "full" : "none", cornerRadius: paneCornerRadius() },
@@ -436,8 +453,9 @@ function drawActive(): void {
   }
   const snap = focusedSnapshot();
   if (!snap) return;
+  if (revalidateLinkHover(snap)) syncHoverCursor();
   const sel = selection ? selectionForRender(selection, snap) : null;
-  renderer.render(snap, sel);
+  renderer.render(decoratePayloadForHover(snap), sel);
 }
 
 /** Convert the screen-coord selection into the viewport-relative range the
@@ -658,6 +676,83 @@ function paneAt(x: number, y: number): PaneRect | null {
   return null;
 }
 
+/** Cell under the pointer, resolved against the pane UNDER the pointer —
+ *  unlike `cellFromEvent`, which maps into the *focused* pane (correct for
+ *  selection, wrong for hover). Null outside any pane or without a snapshot. */
+function cellAtPoint(
+  e: MouseEvent,
+): { snap: RenderPayload; col: number; viewportRow: number } | null {
+  const lp = localPoint(e);
+  if (!lp) return null;
+  let snap: RenderPayload | undefined;
+  let originX = 0;
+  let originY = 0;
+  if (activeWs()) {
+    const pane = paneAt(lp.x, lp.y);
+    if (!pane) return null;
+    snap = snapshotFor(pane.tabId);
+    originX = pane.x;
+    originY = pane.y;
+  } else {
+    snap = activeSnapshot();
+  }
+  if (!snap) return null;
+  const col = Math.floor((lp.x - originX) / cellWidthPx);
+  const viewportRow = Math.floor((lp.y - originY) / cellHeightPx);
+  if (col < 0 || col >= snap.cols || viewportRow < 0 || viewportRow >= snap.rows) {
+    return null;
+  }
+  return { snap, col, viewportRow };
+}
+
+/** Link under a pointer event. Null when the pointer is over an overlay
+ *  rather than the canvas itself, outside any pane, or simply not on a link. */
+export function linkAtEvent(e: MouseEvent): LinkHit | null {
+  if (e.target !== canvasEl) return null;
+  const at = cellAtPoint(e);
+  return at ? findLinkAt(at.snap, at.col, at.viewportRow) : null;
+}
+
+function syncHoverCursor(): void {
+  if (canvasEl) canvasEl.style.cursor = hoverCursor();
+}
+
+/** Last hovered cell, so pointer motion within one cell skips the hit-test. */
+let lastHoverCell: { tabId: number; col: number; viewportRow: number } | null = null;
+
+export function onHoverMove(e: MouseEvent): void {
+  if (dragging || e.target !== canvasEl) {
+    onHoverLeave();
+    return;
+  }
+  const hit = cellAtPoint(e);
+  if (!hit) {
+    onHoverLeave();
+    return;
+  }
+  if (
+    lastHoverCell &&
+    lastHoverCell.tabId === hit.snap.tab_id &&
+    lastHoverCell.col === hit.col &&
+    lastHoverCell.viewportRow === hit.viewportRow
+  ) {
+    return;
+  }
+  lastHoverCell = { tabId: hit.snap.tab_id, col: hit.col, viewportRow: hit.viewportRow };
+  if (updateLinkHover(hit.snap, hit.col, hit.viewportRow)) {
+    syncHoverCursor();
+    requestDraw();
+  }
+}
+
+export function onHoverLeave(): void {
+  lastHoverCell = null;
+  if (clearLinkHover()) {
+    syncHoverCursor();
+    requestDraw();
+  }
+}
+
 export function onMouseDown(e: MouseEvent, activeKind: string | undefined): void {
   if (e.button !== 0) return;
   if (activeKind === "home") return;
@@ -672,6 +767,15 @@ export function onMouseDown(e: MouseEvent, activeKind: string | undefined): void
       focusWorkspacePane(a.slotId, hit.tabId);
       selection = null;
       selectionTick.value++;
+    }
+  }
+  // Cmd/ctrl+click on a link opens it instead of starting a selection.
+  if (IS_MAC ? e.metaKey : e.ctrlKey) {
+    const link = linkAtEvent(e);
+    if (link) {
+      openDetectedUrl(link.url, link.source);
+      e.preventDefault();
+      return;
     }
   }
   const p = cellFromEvent(e);

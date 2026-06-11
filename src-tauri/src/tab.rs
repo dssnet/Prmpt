@@ -13,6 +13,7 @@ use std::{
 
 use crossbeam_channel::{bounded, select, unbounded, Receiver, Sender};
 use libghostty_vt::{
+    error::Error as VtError,
     key::{Action as KeyAction, Encoder as KeyEncoder, Event as KeyEvent, Mods as KeyMods},
     render::{CellIterator, CursorVisualStyle, Dirty, RenderState, RowIterator},
     screen::{CellWide, Screen},
@@ -30,8 +31,8 @@ use crate::{
     error::{AppError, AppResult},
     keymap, osc_notify, platform,
     protocol::{
-        CellWire, CursorWire, ExitPayload, ForegroundProcess, KeyEventWire, NotifyPayload,
-        RenderPayload, TabInfo,
+        CellWire, CursorWire, ExitPayload, ForegroundProcess, KeyEventWire, LinkSpanWire,
+        NotifyPayload, RenderPayload, TabInfo,
         CURSOR_STYLE_BAR, CURSOR_STYLE_BLOCK, CURSOR_STYLE_BLOCK_HOLLOW, CURSOR_STYLE_UNDERLINE,
         FLAG_BOLD, FLAG_FAINT, FLAG_INVERSE, FLAG_ITALIC, FLAG_SPACER_TAIL, FLAG_STRIKETHROUGH,
         FLAG_UNDERLINE, FLAG_WIDE,
@@ -1310,6 +1311,15 @@ fn emit_render<'a>(
 
     let mut cells: Vec<CellWire> = Vec::with_capacity(cols as usize * rows as usize);
 
+    // OSC 8 hyperlinks: URIs deduped into a table, covered cells grouped into
+    // per-row spans. All empty (and `hyperlink_uri_at` never called) when
+    // nothing on screen carries a link.
+    let mut links: Vec<String> = Vec::new();
+    let mut link_index: HashMap<String, u32> = HashMap::new();
+    let mut link_spans: Vec<LinkSpanWire> = Vec::new();
+    let mut uri_buf: Vec<u8> = Vec::new();
+    let mut row_idx: u16 = 0;
+
     let mut row_iteration = match row_iter.update(&snapshot) {
         Ok(r) => r,
         Err(e) => {
@@ -1332,14 +1342,39 @@ fn emit_render<'a>(
             }
             let codepoint;
             let wide_kind;
+            let has_link;
             match cell.raw_cell() {
                 Ok(raw) => {
                     codepoint = raw.codepoint().unwrap_or(0);
                     wide_kind = raw.wide().unwrap_or(CellWide::Narrow);
+                    has_link = raw.has_hyperlink().unwrap_or(false);
                 }
                 Err(_) => {
                     codepoint = 0;
                     wide_kind = CellWide::Narrow;
+                    has_link = false;
+                }
+            }
+
+            if has_link {
+                if let Some(uri) =
+                    hyperlink_uri_at(terminal, emitted, row_idx as u32, &mut uri_buf)
+                {
+                    let idx = *link_index.entry(uri).or_insert_with_key(|u| {
+                        links.push(u.clone());
+                        (links.len() - 1) as u32
+                    });
+                    match link_spans.last_mut() {
+                        Some(s) if s.row == row_idx && s.link == idx && s.c1 + 1 == emitted => {
+                            s.c1 = emitted;
+                        }
+                        _ => link_spans.push(LinkSpanWire {
+                            row: row_idx,
+                            c0: emitted,
+                            c1: emitted,
+                            link: idx,
+                        }),
+                    }
                 }
             }
 
@@ -1420,6 +1455,7 @@ fn emit_render<'a>(
             emitted = emitted.saturating_add(1);
         }
         row.set_dirty(false).ok();
+        row_idx = row_idx.saturating_add(1);
     }
 
     snapshot.set_dirty(Dirty::Clean).ok();
@@ -1452,6 +1488,8 @@ fn emit_render<'a>(
         viewport_top,
         scrollback_total,
         kitty_flags,
+        links,
+        link_spans,
     };
     let _ = app.emit_to(
         EventTarget::webview_window(owner_window),
@@ -1459,6 +1497,34 @@ fn emit_render<'a>(
         payload,
     );
     Ok(())
+}
+
+/// OSC 8 hyperlink URI at a viewport cell, via the GridRef slow path — so
+/// callers must pre-filter with `Cell::has_hyperlink()` from the render
+/// iteration (a frame with no links never gets here). `buf` is reused across
+/// cells; grow-and-retry handles `OutOfSpace`.
+fn hyperlink_uri_at(
+    terminal: &Terminal<'_, '_>,
+    x: u16,
+    y: u32,
+    buf: &mut Vec<u8>,
+) -> Option<String> {
+    let gr = terminal
+        .grid_ref(Point::Viewport(PointCoordinate { x, y }))
+        .ok()?;
+    loop {
+        match gr.hyperlink_uri(buf) {
+            Ok(0) => return None,
+            Ok(n) => return Some(String::from_utf8_lossy(&buf[..n]).into_owned()),
+            Err(VtError::OutOfSpace { required }) => {
+                if required <= buf.len() {
+                    return None;
+                }
+                buf.resize(required, 0);
+            }
+            Err(_) => return None,
+        }
+    }
 }
 
 pub type SharedRegistry = Arc<TabRegistry>;

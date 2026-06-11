@@ -285,6 +285,7 @@ pub fn run() {
             };
             match event.id().0.as_str() {
                 "copy" => emit("menu:copy"),
+                "copy_link" => emit("menu:copy_link"),
                 "paste" => emit("menu:paste"),
                 "selectAll" => emit("menu:selectAll"),
                 // Explicit quit via menu/⌘Q. We route this through our own

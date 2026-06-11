@@ -74,7 +74,7 @@ bun tauri dev
 
 Events backend → frontend:
 
-- `terminal:render` → `RenderPayload { tab_id, cols, rows, default_fg, default_bg, cells: CellWire[], cursor: CursorWire?, generation, title, viewport_top, scrollback_total, kitty_flags }`. `cells.length === cols * rows`, row-major. Coalesced by an 8ms debounce in `run_tab_loop`. `kitty_flags` is only a traffic hint (skip key-release / bare-modifier forwarding when 0).
+- `terminal:render` → `RenderPayload { tab_id, cols, rows, default_fg, default_bg, cells: CellWire[], cursor: CursorWire?, generation, title, viewport_top, scrollback_total, kitty_flags, links, link_spans }`. `cells.length === cols * rows`, row-major. Coalesced by an 8ms debounce in `run_tab_loop`. `kitty_flags` is only a traffic hint (skip key-release / bare-modifier forwarding when 0). `links` (deduped OSC 8 URIs) + `link_spans` (`{row, c0, c1, link}` viewport cell runs) are both empty in the common no-links frame; extraction pre-filters with `Cell::has_hyperlink()` so the slow `grid_ref().hyperlink_uri()` path only runs for cells that carry one. Plain-text URL detection is frontend-only (`src/lib/urlDetect.ts` + `src/state/links.ts`): hover underlines (FLAG_UNDERLINE ORed into a *copy* of the payload — never mutate the cached snapshot), cmd/ctrl+click opens via `local_open` behind an http/https/mailto allowlist (file:// allowed for OSC 8 only). Right-clicking a link adds "Copy Link" to the context menu: `show_context_menu(withLink)` only carries a flag — the frontend remembers the URL (`setContextLink`) and writes it to the clipboard when the click returns as `menu:copy_link`.
 - `terminal:exit` → `{ tab_id, status }`. Frontend should call `forget_tab` and drop the tab.
 - `terminal:notification` → `NotifyPayload { tab_id, source: "bell"|"osc", title?, body? }`. BEL or OSC 9/777 (how Claude Code signals task completion — Prmpt sets `TERM_PROGRAM=ghostty` so its `auto` channel emits OSC 777). Throttled to 1/s per tab on the backend. Frontend routes it through `src/state/notifications.ts::notify()` — the single dispatch for terminal notifications AND file-transfer completions: chime always (Settings → Notifications), toast + tab-bar bell badge only when away (window unfocused / tab not active). New "finished in the background" signals should call `notify()`, not `showToast` directly.
 
@@ -95,7 +95,7 @@ Commands frontend → backend: `spawn_tab`, `close_tab`, `write_input` (raw byte
 
 ## Out of scope for v1 (do not casually add)
 
-Splits/panes, ligatures, sixel/kitty graphics, IME, selection+copy, OSC 8. Tracked in `/Users/yanick/.claude-personal/plans/nifty-crafting-pelican.md`. (Bell/OSC-notification handling shipped — see IPC contract.)
+Splits/panes, ligatures, sixel/kitty graphics, IME, selection+copy. Tracked in `/Users/yanick/.claude-personal/plans/nifty-crafting-pelican.md`. (Bell/OSC-notification handling and clickable links incl. OSC 8 shipped — see IPC contract.)
 
 ## When tests aren't enough
 

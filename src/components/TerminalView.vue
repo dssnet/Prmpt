@@ -3,6 +3,7 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { PanelBottom, PanelRight, X } from "lucide-vue-next";
 
 import { wheelScroll, showContextMenu, type Config } from "../ipc";
+import { setContextLink } from "../state/links";
 import { isSftpVisible, sftpDragGhost, toggleSftpPanel } from "../state/sftp";
 import { isLocalVisible, toggleLocalBrowser } from "../state/localBrowser";
 import FilesPanel from "./FilesPanel.vue";
@@ -17,6 +18,9 @@ import {
   initTerminalSession,
   inputTargetTabId,
   layoutVersion,
+  linkAtEvent,
+  onHoverLeave,
+  onHoverMove,
   onMouseDown,
   onMouseMove,
   onMouseUp,
@@ -271,6 +275,11 @@ function onHostMouseDown(e: MouseEvent) {
   onMouseDown(e, active.value?.kind);
 }
 
+function onHostMouseMove(e: MouseEvent) {
+  if (active.value?.kind === "home") return;
+  onHoverMove(e);
+}
+
 function onHostWheel(e: WheelEvent) {
   if (active.value?.kind === "home") return;
   e.preventDefault();
@@ -293,7 +302,11 @@ function onHostContextMenu(e: MouseEvent) {
   // drive the menu ourselves.
   e.preventDefault();
   e.stopPropagation();
-  void showContextMenu().catch((err) =>
+  // On a link, the menu grows a "Copy Link" item; the URL is remembered here
+  // because the menu click only round-trips the item id.
+  const link = linkAtEvent(e);
+  setContextLink(link?.url ?? null);
+  void showContextMenu(link !== null).catch((err) =>
     console.error("show_context_menu failed:", err),
   );
 }
@@ -485,6 +498,8 @@ onBeforeUnmount(() => {
 });
 
 watch(active, () => {
+  // A stale link underline must never decorate the next tab's first frame.
+  onHoverLeave();
   if (active.value?.kind === "home") {
     // Leaving a workspace for Home: drop the pane frames / hover bars and any
     // in-flight drag affordance so they don't linger on top of the Home view.
@@ -527,6 +542,8 @@ watch(theme, (next) => {
     class="flex-1 relative overflow-hidden block select-none min-w-0"
     style="margin: var(--frame-inset)"
     @mousedown="onHostMouseDown"
+    @mousemove="onHostMouseMove"
+    @mouseleave="onHoverLeave"
     @wheel="onHostWheel"
     @contextmenu="onHostContextMenu"
   >
