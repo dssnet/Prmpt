@@ -41,8 +41,8 @@ use crate::{
     error::{AppError, AppResult},
     protocol::{
         SftpAvailability, SftpEntry, SftpTransferProgress, SshConnectError,
-        SshHostKeyFirstConnect, SshHostKeyMismatch, SshPortForwardError,
-        SshReconnecting,
+        SshConnected, SshHostKeyFirstConnect, SshHostKeyMismatch,
+        SshPortForwardError, SshReconnecting,
     },
     tab::{PtyEvent, SftpReq, SshIoCmd},
 };
@@ -446,7 +446,7 @@ async fn session_task(
         // tabs; the event covers SFTP-only tabs whose VT is never shown (the
         // frontend decides who actually toasts).
         let _ = pty_tx.send(PtyEvent::Data(
-            "\r\n\x1b[33m\u{26a0} connection lost \u{2014} reconnecting\u{2026}\x1b[0m\r\n"
+            "\r\n\x1b[33m\u{26a0} connection lost \u{2014} reconnecting\u{2026} (Ctrl+C cancels)\x1b[0m\r\n"
                 .as_bytes()
                 .to_vec(),
         ));
@@ -636,6 +636,18 @@ async fn run_session(
         "\r\n\x1b[32m\u{2713} connected.\x1b[0m\r\n"
     };
     let _ = pty_tx.send(PtyEvent::Data(connected_banner.as_bytes().to_vec()));
+    // Clears the frontend's per-tab "reconnecting" state (set by the
+    // `ssh:reconnecting` emit in `session_task`) so Ctrl+C goes back to
+    // being plain input instead of cancel-and-close.
+    let _ = app.emit_to(
+        EventTarget::webview_window(owner_window),
+        "ssh:connected",
+        SshConnected {
+            tab_id,
+            host_id,
+            host_label: config.label.clone(),
+        },
+    );
     let mut forward_tasks: Vec<JoinHandle<()>> = Vec::new();
     for fw in config.forwards.clone() {
         let handle = session.clone();

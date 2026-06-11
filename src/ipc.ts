@@ -582,6 +582,20 @@ export function onSshReconnecting(
   return listenScoped<SshReconnecting>("ssh:reconnecting", handler);
 }
 
+/** Fires on every successful (re)connect, right when the channels are up.
+ *  Clears the per-tab reconnecting state that gates Ctrl+C-cancels-reconnect. */
+export interface SshConnected {
+  tab_id: number;
+  host_id: number;
+  host_label: string;
+}
+
+export function onSshConnected(
+  handler: (payload: SshConnected) => void,
+): Promise<UnlistenFn> {
+  return listenScoped<SshConnected>("ssh:connected", handler);
+}
+
 // ---------------- SFTP file browser ----------------
 
 /** One entry in a remote directory listing. Metadata is best-effort — the

@@ -277,6 +277,17 @@ pub struct SshReconnecting {
     pub host_label: String,
 }
 
+/// Emitted on every successful (re)connect, right when the shell/SFTP
+/// channels are up. The frontend uses it to clear the per-tab
+/// "reconnecting" state set by `SshReconnecting` (which gates the
+/// Ctrl+C-cancels-reconnect shortcut).
+#[derive(Serialize, Clone, Debug)]
+pub struct SshConnected {
+    pub tab_id: u64,
+    pub host_id: i64,
+    pub host_label: String,
+}
+
 /// Emitted when the SSH session task could not establish or sustain a
 /// connection — wraps the bubbled-up error so the frontend can show a
 /// dismissable dialog (otherwise the tab just disappears and the user

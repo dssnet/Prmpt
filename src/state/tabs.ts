@@ -61,6 +61,24 @@ const activeId = ref<number>(HOME_TAB_ID);
 const snapshots = new Map<number, RenderPayload>();
 const renderSeq = ref(0);
 
+// Backend tab ids whose SSH session is currently down and auto-reconnecting
+// (set on "ssh:reconnecting", cleared on "ssh:connected" / exit). Keyed by
+// tab id rather than TabState because workspace panes have no TabState; only
+// read imperatively by the Ctrl+C-cancels-reconnect check, so not reactive.
+const sshReconnecting = new Set<number>();
+
+export function setSshReconnecting(id: number): void {
+  sshReconnecting.add(id);
+}
+
+export function clearSshReconnecting(id: number): void {
+  sshReconnecting.delete(id);
+}
+
+export function isSshReconnecting(id: number): boolean {
+  return sshReconnecting.has(id);
+}
+
 export function useTabs() {
   const list = computed(() => tabs.value);
   const terminals = computed(() =>
@@ -375,6 +393,7 @@ function applyWorkspaceRemoval(
 
 export function handleExit(p: ExitPayload): void {
   if (p.tab_id === HOME_TAB_ID) return;
+  sshReconnecting.delete(p.tab_id);
 
   const wsId = workspaceOfLeaf(p.tab_id);
   if (wsId !== undefined) {
@@ -532,6 +551,9 @@ export function removeTabLocal(id: number): void {
   if (idx < 0) return;
   tabs.value.splice(idx, 1);
   snapshots.delete(id);
+  // If it was mid-reconnect, the destination window re-acquires the flag on
+  // the next retry — "ssh:reconnecting" re-fires on every failed attempt.
+  sshReconnecting.delete(id);
   if (activeId.value === id) {
     const next = tabs.value.find((t) => t.kind !== "home");
     activeId.value = next ? next.id : HOME_TAB_ID;

@@ -17,6 +17,7 @@ import {
   onMenuSelectAll,
   onRender,
   onSshConnectError,
+  onSshConnected,
   onSshHostKeyFirstConnect,
   onSshHostKeyMismatch,
   onSshPortForwardError,
@@ -38,13 +39,17 @@ import {
 } from "./ipc";
 import {
   attachTab as attachTabLocal,
+  clearSshReconnecting,
+  closeTabAndForget,
   dropTabIntoTarget,
   handleExit,
   handleRender,
   hydrateTabs,
+  isSshReconnecting,
   owningTabId,
   removeTabLocal,
   setActive,
+  setSshReconnecting,
   snapshotFor,
   spawnTerminal,
   useTabs,
@@ -487,6 +492,21 @@ function onKeyDown(e: KeyboardEvent) {
       return;
     }
   }
+  // Bare Ctrl+C on a tab whose SSH session is mid-reconnect cancels the
+  // reconnect by closing the tab (input is discarded during the backoff
+  // anyway, so nothing else this key could mean). Sits after the Windows
+  // copy-with-selection case so that still wins. A press that races a
+  // just-succeeded reconnect (before "ssh:connected" reaches us) still
+  // closes — millisecond window, accepted.
+  if (!editable && e.ctrlKey && !e.shiftKey && !e.altKey && !e.metaKey
+      && (key === "c" || key === "C")) {
+    const target = inputTargetTabId();
+    if (target != null && isSshReconnecting(target)) {
+      e.preventDefault();
+      void closeTabAndForget(target);
+      return;
+    }
+  }
   for (const s of shortcuts) {
     if (s.mod === "meta" && !primary) continue;
     if (s.mod === "shift" && !(e.shiftKey && !primary)) continue;
@@ -655,7 +675,10 @@ onMounted(async () => {
     connectErrorModal.value = p;
   }));
   // Shell tabs surface "connection lost — reconnecting…" as a banner in the
-  // terminal; SFTP-only tabs have no visible VT, so toast instead.
+  // terminal; SFTP-only tabs have no visible VT, so toast instead. Shell tabs
+  // (incl. workspace panes, where the find() misses) also arm the
+  // Ctrl+C-cancels-reconnect shortcut — not SFTP-only tabs, where keyboard
+  // focus lives in the file browser and Ctrl+C plausibly means "copy".
   unlisteners.push(await onSshReconnecting((p) => {
     const t = tabs.value.find((t) => t.id === p.tab_id);
     if (t?.kind === "ssh" && t.disableSsh) {
@@ -668,8 +691,11 @@ onMounted(async () => {
         },
         8000,
       );
+    } else {
+      setSshReconnecting(p.tab_id);
     }
   }));
+  unlisteners.push(await onSshConnected((p) => clearSshReconnecting(p.tab_id)));
 
   // Confirm-on-close guard for the whole window (traffic light, custom
   // TitleBar button, OS chrome — every path lands here). Tauri awaits this
