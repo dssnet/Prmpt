@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onBeforeUnmount } from "vue";
+import { computed, ref, watch, onBeforeUnmount } from "vue";
 import { ChevronUp, ChevronDown } from "lucide-vue-next";
 
 type InputType =
@@ -36,9 +36,58 @@ const emit = defineEmits<{
 
 const pulseKey = ref(0);
 
-function onInput(e: Event, asNumber: boolean) {
+// Number fields render as type="text" (inputmode="decimal") backed by a
+// string draft: a real number input silently drops "," keystrokes in WebKit,
+// which makes comma-decimal entry ("1,5") impossible.
+const isNumber = computed(() => props.type === "number");
+const focused = ref(false);
+
+function fmt(v: string | number | undefined): string {
+  return v == null ? "" : String(v);
+}
+
+function parseNum(raw: string): number | null {
+  const t = raw.trim().replace(",", ".");
+  if (t === "") return null;
+  const n = Number(t);
+  return Number.isFinite(n) ? n : null;
+}
+
+const draft = ref(fmt(props.modelValue));
+
+watch(
+  () => props.modelValue,
+  (mv) => {
+    if (!isNumber.value) return;
+    // While typing, leave the draft alone as long as it parses to the new
+    // value ("1," round-trips as 1) — otherwise the keystroke gets clobbered.
+    // External changes (chevron step, async form load) still update it.
+    if (!focused.value || parseNum(draft.value) !== Number(mv)) {
+      draft.value = fmt(mv);
+    }
+  },
+);
+
+function onInput(e: Event) {
   const v = (e.target as HTMLInputElement).value;
-  emit("update:modelValue", asNumber ? Number(v) || 0 : v);
+  if (!isNumber.value) {
+    emit("update:modelValue", v);
+    return;
+  }
+  draft.value = v;
+  const n = parseNum(v);
+  // Invalid/empty drafts emit nothing: the autosave in Settings would
+  // otherwise persist a clamped junk value for transient states like "".
+  if (n !== null) emit("update:modelValue", n);
+}
+
+function onFocus() {
+  focused.value = true;
+}
+
+function onBlur() {
+  focused.value = false;
+  if (isNumber.value) draft.value = fmt(props.modelValue);
 }
 
 let holdTimer: number | undefined;
@@ -101,17 +150,18 @@ onBeforeUnmount(stopHold);
   >
     <input
       :id="id"
-      :type="type"
-      :value="modelValue"
+      :type="type === 'number' ? 'text' : type"
+      :inputmode="type === 'number' ? 'decimal' : undefined"
+      :value="type === 'number' ? draft : modelValue"
       :placeholder="placeholder"
-      :min="min"
-      :max="max"
       :disabled="disabled"
       :autocomplete="autocomplete"
       :spellcheck="spellcheck"
       class="num-input flex-1 w-full bg-surface-1 border border-border text-fg rounded-md focus:outline-none focus:border-border-strong disabled:opacity-50"
       :class="size === 'sm' ? 'px-1.5 py-0.5 text-xs' : 'px-2 py-1.5 text-sm'"
-      @input="onInput($event, type === 'number')"
+      @input="onInput"
+      @focus="onFocus"
+      @blur="onBlur"
       @wheel="onWheel"
     />
     <div v-if="type === 'number'" class="chevrons" aria-hidden="true">
@@ -144,17 +194,9 @@ onBeforeUnmount(stopHold);
   flex: 1;
 }
 
-/* Hide native spinner for number type. */
+/* Room for the custom chevrons on number-type inputs. */
 .num-wrap.is-number .num-input {
   padding-right: 22px;
-  appearance: textfield;
-  -moz-appearance: textfield;
-}
-.num-wrap.is-number .num-input::-webkit-inner-spin-button,
-.num-wrap.is-number .num-input::-webkit-outer-spin-button {
-  appearance: none;
-  -webkit-appearance: none;
-  margin: 0;
 }
 
 .chevrons {
