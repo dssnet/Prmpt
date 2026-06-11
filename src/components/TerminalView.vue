@@ -809,8 +809,10 @@ watch(theme, (next) => {
   border-radius: var(--pane-radius);
 }
 /* Hover header: a centered grip hint + pill at the top of a terminal. Only
-   this small centered strip captures the pointer; the rest of the top row
-   stays interactive for the terminal beneath. */
+   the small grip captures the pointer; the rest of the top row stays
+   interactive for the terminal beneath. The pill itself is hit-testable only
+   once revealed (visibility gates pointer events), so it never steals clicks
+   from the first terminal row. */
 .pane-hover {
   position: absolute;
   top: 0;
@@ -820,14 +822,15 @@ watch(theme, (next) => {
   display: flex;
   justify-content: center;
   padding: 4px 8px 6px;
-  pointer-events: auto;
+  pointer-events: none;
 }
 .pane-grip {
   position: absolute;
-  top: 2px;
+  top: 0;
   left: 50%;
   transform: translateX(-50%);
-  pointer-events: none;
+  padding: 2px 12px 4px;
+  pointer-events: auto;
   user-select: none;
   font-size: 11px;
   line-height: 1;
@@ -839,6 +842,7 @@ watch(theme, (next) => {
 .pane-hover:hover .pane-grip,
 .pane-hover:active .pane-grip {
   opacity: 0;
+  transition-delay: 300ms;
 }
 .pane-pill {
   display: flex;
@@ -861,11 +865,19 @@ watch(theme, (next) => {
     );
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
   opacity: 0;
-  transition: opacity 120ms ease;
+  visibility: hidden; /* hidden also disables hit-testing, unlike opacity */
+  transition:
+    opacity 120ms ease,
+    visibility 0s linear 120ms;
 }
 .pane-hover:hover .pane-pill,
 .pane-hover:active .pane-pill {
   opacity: 1;
+  visibility: visible;
+  /* deliberate-hover delay: brushing past the grip never flashes the pill */
+  transition:
+    opacity 120ms ease 300ms,
+    visibility 0s linear 300ms;
 }
 .pane-pill-drag {
   cursor: grab;
