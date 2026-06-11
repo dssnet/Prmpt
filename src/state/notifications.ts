@@ -12,8 +12,9 @@
  *  - **tab-bar bell badge** on the owning top-level tab: only when away,
  *    cleared when the tab is next visited.
  *
- * Every event also lands in `notificationLog`, the history behind the
- * tab-bar's notification-center bell (`NotificationCenter.vue`).
+ * Missed events (away) also land in `notificationLog`, the history behind
+ * the tab-bar's notification-center bell (`NotificationCenter.vue`); events
+ * the user watched happen get the chime only.
  *
  * The terminal BEL is deliberately NOT a notification: shells ring it for
  * tab-autocomplete and line-edit errors, so it would flood the history.
@@ -51,10 +52,10 @@ export function isAway(tabId: number): boolean {
 
 export function notify(n: AppNotification): void {
   if (notificationSounds.value) void playChime();
-  const away = isAway(n.tabId);
-  // Everything goes in the history; entries the user plausibly saw happen
-  // (active tab, focused window) arrive pre-read so the bell badge only
-  // counts genuinely missed events.
+  // Watching the originating tab in a focused window: the chime is the
+  // whole signal. Only genuinely missed events earn a history entry,
+  // toast and badge.
+  if (!isAway(n.tabId)) return;
   notificationLog.value = [
     {
       id: nextNotificationId++,
@@ -64,11 +65,10 @@ export function notify(n: AppNotification): void {
       detail: n.detail,
       kind: n.kind ?? "info",
       at: Date.now(),
-      read: !away,
+      read: false,
     },
     ...notificationLog.value,
   ].slice(0, MAX_LOG);
-  if (!away) return;
   showToast({ host: n.host, title: n.title, detail: n.detail, kind: n.kind });
   ringBell(n.tabId);
 }
