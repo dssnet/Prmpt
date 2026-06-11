@@ -22,11 +22,15 @@ pub fn ensure_app_data_dir() -> AppResult<PathBuf> {
     Ok(dir)
 }
 
+pub fn db_path() -> AppResult<PathBuf> {
+    Ok(app_data_dir()?.join("prmpt.db"))
+}
+
 /// Connection URL handed to `tauri-plugin-sql`. Windows paths contain
 /// backslashes that break the URL parser, so normalize to forward
 /// slashes — SQLx accepts `sqlite:<abs-path-with-forward-slashes>` on
 /// every OS.
 pub fn db_url() -> AppResult<String> {
-    let p = app_data_dir()?.join("prmpt.db");
+    let p = db_path()?;
     Ok(format!("sqlite:{}", p.to_string_lossy().replace('\\', "/")))
 }

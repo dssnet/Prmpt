@@ -74,15 +74,15 @@ zeroize = { version = "1.8", features = ["zeroize_derive", "alloc"] }
 zip = "2"
 age = "0.10"
 tauri-plugin-dialog = "2"
-# Direct sqlite access used once at startup by `backup::apply_pending_import`
-# to re-stamp an imported DB's `_sqlx_migrations` checksums against this
-# binary's migration SQL (otherwise sqlx aborts DB init when a backup made
-# by a different build is restored). Pinned to the same 0.8 line
-# `tauri-plugin-sql` pulls so cargo dedupes sqlx-sqlite / libsqlite3-sys.
+# Direct sqlite access used once at startup by `db_compat::prepare_db` to
+# reconcile `_sqlx_migrations` with this binary's migration set (otherwise
+# sqlx aborts DB init when the DB was migrated by a different — older or
+# newer — build). Pinned to the same 0.8 line `tauri-plugin-sql` pulls so
+# cargo dedupes sqlx-sqlite / libsqlite3-sys.
 sqlx = { version = "0.8", default-features = false, features = ["sqlite", "runtime-tokio"] }
 # SHA-384 of each migration's SQL — the exact checksum formula sqlx records
 # in `_sqlx_migrations`. Already in the tree transitively; declared direct
-# for the reconcile path.
+# for the `db_compat` reconcile path.
 sha2 = "0.10"
 
 # Foreground-process detection for the confirm-on-close guard: resolve

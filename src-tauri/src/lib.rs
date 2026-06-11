@@ -2,6 +2,7 @@ mod backup;
 mod commands;
 mod config;
 mod data_migrations;
+mod db_compat;
 mod error;
 mod keymap;
 mod localfs;
@@ -82,9 +83,12 @@ const PRESPAWN_ROWS: u16 = 30;
 
 /// The full migration set as `(version, description, sql)`, one source of
 /// truth shared by [`ssh_migrations`] (what `tauri-plugin-sql` runs) and
-/// `backup::reconcile_migration_checksums` (which re-stamps an imported
-/// DB's recorded checksums against these exact SQL bodies). The SQL lives
-/// in `src-tauri/migrations/` and is inlined at compile time.
+/// `db_compat::prepare_db` (which re-stamps the DB's recorded checksums
+/// against these exact SQL bodies at every launch). The SQL lives in
+/// `src-tauri/migrations/` and is inlined at compile time.
+///
+/// Append-only and additive — never edit, renumber, or remove a shipped
+/// entry; `db_compat` and the import path in `backup.rs` both rely on it.
 pub const MIGRATIONS: &[(i64, &str, &str)] = &[
     (1, "init", include_str!("../migrations/0001_init.sql")),
     (2, "stronghold", include_str!("../migrations/0002_stronghold.sql")),
@@ -158,6 +162,17 @@ pub fn run() {
     let window_pool: SharedWindowPool = Arc::new(window_pool::WindowPool::new());
     let db_url = paths::db_url().expect("resolve db url");
 
+    // Reconcile the DB's migration bookkeeping with this binary before the
+    // SQL plugin opens it: re-stamp checksums and pick up no-op placeholders
+    // for migrations applied by a newer build (see `db_compat.rs`). Without
+    // this, an older installed build refuses to start after `bun tauri dev`
+    // ran an unreleased migration against the shared `prmpt.db`.
+    let mut sql_migrations = ssh_migrations();
+    match paths::db_path() {
+        Ok(db_path) => sql_migrations.extend(db_compat::prepare_db(&db_path)),
+        Err(e) => eprintln!("[db-compat] resolve db path failed: {e}"),
+    }
+
     let runtime: SharedRuntime = Arc::new(
         tokio::runtime::Builder::new_multi_thread()
             .enable_all()
@@ -184,7 +199,7 @@ pub fn run() {
     let builder = tauri::Builder::default()
         .plugin(
             tauri_plugin_sql::Builder::new()
-                .add_migrations(&db_url, ssh_migrations())
+                .add_migrations(&db_url, sql_migrations)
                 .build(),
         )
         .plugin(tauri_plugin_process::init())

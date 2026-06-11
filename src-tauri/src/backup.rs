@@ -335,13 +335,10 @@ pub fn apply_pending_import() -> AppResult<()> {
     let _ = std::fs::remove_file(dir.join("prmpt.db-wal"));
     let _ = std::fs::remove_file(dir.join("prmpt.db-shm"));
 
-    // Re-stamp the imported DB's recorded migration checksums so the SQL
-    // plugin doesn't abort init with "migration N has been modified" when
-    // the backup was made by a build whose migration SQL differed.
-    let db = dir.join("prmpt.db");
-    if db.exists() {
-        reconcile_migration_checksums(&db);
-    }
+    // The imported DB's recorded migration checksums may belong to a
+    // different build; `db_compat::prepare_db` reconciles them right after
+    // this returns (it runs every launch, before the SQL plugin opens the
+    // DB), so no import-specific re-stamping is needed here.
 
     // Restore the boot key so the imported stronghold snapshot is
     // decryptable on this machine.
@@ -399,92 +396,6 @@ fn checkpoint_wal(db_path: &Path) {
     }
 }
 
-/// Overwrite the imported DB's recorded migration checksums with the ones
-/// this binary expects, so `tauri-plugin-sql`/sqlx doesn't refuse to open a
-/// `prmpt.db` that was migrated by a *different build* of Prmpt.
-///
-/// sqlx records a SHA-384 of each migration's SQL text in `_sqlx_migrations`
-/// and, on init, aborts if a stored checksum no longer matches the SQL it
-/// compiled in ("migration N was previously applied but has been modified").
-/// A restored backup carries the exporting build's checksums, which drift the
-/// moment any migration body was edited — bricking DB init even though the
-/// schema and data are intact.
-///
-/// We re-stamp each already-recorded version to `Sha384(current SQL)`. Only
-/// rows that exist are touched; migrations present in this binary but not yet
-/// in the DB are left for sqlx to run normally. This assumes the imported
-/// schema matches what these migrations would have produced (true here —
-/// migrations are append-only), trading a strict checksum guard for the
-/// ability to restore older/cross-platform backups.
-///
-/// Best-effort: any failure is logged and swallowed so a quirky backup can't
-/// brick startup (the surrounding `apply_pending_import` takes the same line).
-fn reconcile_migration_checksums(db_path: &Path) {
-    use sha2::{Digest, Sha384};
-    use sqlx::ConnectOptions;
-
-    let rt = match tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-    {
-        Ok(rt) => rt,
-        Err(e) => {
-            eprintln!("[backup] checksum reconcile: runtime build failed: {e}");
-            return;
-        }
-    };
-
-    let result: Result<(), sqlx::Error> = rt.block_on(async {
-        let mut conn = sqlx::sqlite::SqliteConnectOptions::new()
-            .filename(db_path)
-            .create_if_missing(false)
-            .connect()
-            .await?;
-
-        // No migration table yet → fresh/old backup; the plugin will create
-        // it and run everything. Nothing to reconcile.
-        let exists: Option<String> = sqlx::query_scalar(
-            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = '_sqlx_migrations'",
-        )
-        .fetch_optional(&mut conn)
-        .await?;
-        if exists.is_none() {
-            return Ok(());
-        }
-
-        // Largest version this binary knows; anything beyond it in the DB
-        // means the backup is newer than us — we can't downgrade, so leave it
-        // (sqlx will surface a clear "missing migration" error).
-        let max_known = crate::MIGRATIONS.iter().map(|&(v, ..)| v).max().unwrap_or(0);
-        let db_max: Option<i64> = sqlx::query_scalar("SELECT MAX(version) FROM _sqlx_migrations")
-            .fetch_one(&mut conn)
-            .await?;
-        if let Some(db_max) = db_max {
-            if db_max > max_known {
-                eprintln!(
-                    "[backup] imported DB is at migration {db_max} but this build only knows \
-                     up to {max_known}; leaving checksums untouched"
-                );
-            }
-        }
-
-        for &(version, _desc, sql) in crate::MIGRATIONS {
-            let checksum = Sha384::digest(sql.as_bytes()).to_vec();
-            sqlx::query("UPDATE _sqlx_migrations SET checksum = ?1 WHERE version = ?2")
-                .bind(checksum)
-                .bind(version)
-                .execute(&mut conn)
-                .await?;
-        }
-        Ok(())
-    });
-
-    match result {
-        Ok(()) => eprintln!("[backup] reconciled imported DB migration checksums"),
-        Err(e) => eprintln!("[backup] checksum reconcile failed: {e}"),
-    }
-}
-
 /// Move within the data dir, falling back to copy+delete if `rename`
 /// fails (shouldn't, since src/dst share a filesystem, but be defensive).
 fn move_file(src: &Path, dst: &PathBuf) {
@@ -501,7 +412,6 @@ fn move_file(src: &Path, dst: &PathBuf) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sha2::{Digest, Sha384};
     use sqlx::ConnectOptions;
 
     fn tmp_db(name: &str) -> PathBuf {
@@ -514,63 +424,6 @@ mod tests {
         p.push(format!("prmpt-test-{pid}-{ts}-{name}.db"));
         let _ = std::fs::remove_file(&p);
         p
-    }
-
-    #[test]
-    fn reconcile_rewrites_stale_checksum() {
-        let path = tmp_db("reconcile");
-
-        // Seed a DB whose recorded checksum for migration 1 is bogus — the
-        // state a backup from a different build leaves behind.
-        let setup = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        setup.block_on(async {
-            let mut conn = sqlx::sqlite::SqliteConnectOptions::new()
-                .filename(&path)
-                .create_if_missing(true)
-                .connect()
-                .await
-                .unwrap();
-            sqlx::query(
-                "CREATE TABLE _sqlx_migrations (version BIGINT PRIMARY KEY, checksum BLOB NOT NULL)",
-            )
-            .execute(&mut conn)
-            .await
-            .unwrap();
-            sqlx::query("INSERT INTO _sqlx_migrations (version, checksum) VALUES (1, ?1)")
-                .bind(b"stale".to_vec())
-                .execute(&mut conn)
-                .await
-                .unwrap();
-        });
-        drop(setup);
-
-        // Builds its own runtime internally — must not be called from within
-        // a block_on, hence the drop above.
-        reconcile_migration_checksums(&path);
-
-        let verify = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        let stored: Vec<u8> = verify.block_on(async {
-            let mut conn = sqlx::sqlite::SqliteConnectOptions::new()
-                .filename(&path)
-                .connect()
-                .await
-                .unwrap();
-            sqlx::query_scalar("SELECT checksum FROM _sqlx_migrations WHERE version = 1")
-                .fetch_one(&mut conn)
-                .await
-                .unwrap()
-        });
-
-        let expected = Sha384::digest(crate::MIGRATIONS[0].2.as_bytes()).to_vec();
-        assert_eq!(stored, expected, "v1 checksum should be re-stamped to current SQL");
-
-        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
