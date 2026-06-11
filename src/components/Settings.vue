@@ -3,6 +3,7 @@ import {
   Archive,
   ArrowLeft,
   Bell,
+  FolderOpen,
   Palette,
   RefreshCw,
   SquareTerminal,
@@ -21,7 +22,15 @@ import {
   notificationSounds,
   setConfirmCloseRunning,
   setNotificationSounds,
+  setShowChangedDate,
+  setShowCreatedDate,
+  setShowHiddenFiles,
+  setShowSize,
   setToastsEnabled,
+  showChangedDate,
+  showCreatedDate,
+  showHiddenFiles,
+  showSize,
   toastsEnabled,
 } from "../state/uiPrefs";
 import { runUpdateCheck, useUpdate } from "../state/update";
@@ -33,11 +42,18 @@ const { theme } = useTheme();
 const { status: updateStatus } = useUpdate();
 
 // ---- Section navigation (left sidebar) ----
-type Section = "appearance" | "terminal" | "notifications" | "updates" | "backup";
+type Section =
+  | "appearance"
+  | "terminal"
+  | "filebrowser"
+  | "notifications"
+  | "updates"
+  | "backup";
 const section = ref<Section>("appearance");
 const SECTIONS = [
   { id: "appearance", label: "Appearance", icon: Palette },
   { id: "terminal", label: "Terminal", icon: SquareTerminal },
+  { id: "filebrowser", label: "File Browser", icon: FolderOpen },
   { id: "notifications", label: "Notifications", icon: Bell },
   { id: "updates", label: "Updates", icon: RefreshCw },
   { id: "backup", label: "Backup", icon: Archive },
@@ -384,6 +400,62 @@ function openImport() {
           >
             {{ termStatus.text }}
           </span>
+        </template>
+
+        <!-- File Browser -->
+        <template v-else-if="section === 'filebrowser'">
+          <header>
+            <h2 class="m-0 text-base font-medium tracking-wide">File Browser</h2>
+            <p class="m-0 mt-1 text-xs text-fg-muted">
+              What the local and SFTP file browsers show. Also available from
+              the browsers' ⋯ menu.
+            </p>
+          </header>
+          <div class="flex flex-col">
+            <div class="setting-row">
+              <div class="setting-info">
+                <div class="setting-title">Show hidden files</div>
+                <div class="setting-hint">
+                  Show dot-prefixed entries. Shared by the local and SFTP
+                  browsers.
+                </div>
+              </div>
+              <Switch
+                :model-value="showHiddenFiles"
+                @update:model-value="setShowHiddenFiles"
+              />
+            </div>
+            <div class="setting-row">
+              <div class="setting-info">
+                <div class="setting-title">Size column</div>
+                <div class="setting-hint">Show the file size column.</div>
+              </div>
+              <Switch :model-value="showSize" @update:model-value="setShowSize" />
+            </div>
+            <div class="setting-row">
+              <div class="setting-info">
+                <div class="setting-title">Changed date column</div>
+                <div class="setting-hint">Show the last-modified date column.</div>
+              </div>
+              <Switch
+                :model-value="showChangedDate"
+                @update:model-value="setShowChangedDate"
+              />
+            </div>
+            <div class="setting-row">
+              <div class="setting-info">
+                <div class="setting-title">Created date column</div>
+                <div class="setting-hint">
+                  Show the created date column. Local browser only — the SFTP
+                  protocol doesn't report creation time.
+                </div>
+              </div>
+              <Switch
+                :model-value="showCreatedDate"
+                @update:model-value="setShowCreatedDate"
+              />
+            </div>
+          </div>
         </template>
 
         <!-- Notifications -->

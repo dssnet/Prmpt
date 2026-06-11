@@ -80,22 +80,38 @@ export function setConfirmCloseRunning(v: boolean): void {
   void persist();
 }
 
-export function toggleHiddenFiles(): void {
-  showHiddenFiles.value = !showHiddenFiles.value;
+export function setShowHiddenFiles(v: boolean): void {
+  showHiddenFiles.value = v;
   void persist();
+}
+
+export function setShowSize(v: boolean): void {
+  showSize.value = v;
+  void persist();
+}
+
+export function setShowChangedDate(v: boolean): void {
+  showChangedDate.value = v;
+  void persist();
+}
+
+export function setShowCreatedDate(v: boolean): void {
+  showCreatedDate.value = v;
+  void persist();
+}
+
+export function toggleHiddenFiles(): void {
+  setShowHiddenFiles(!showHiddenFiles.value);
 }
 
 export function toggleSize(): void {
-  showSize.value = !showSize.value;
-  void persist();
+  setShowSize(!showSize.value);
 }
 
 export function toggleChangedDate(): void {
-  showChangedDate.value = !showChangedDate.value;
-  void persist();
+  setShowChangedDate(!showChangedDate.value);
 }
 
 export function toggleCreatedDate(): void {
-  showCreatedDate.value = !showCreatedDate.value;
-  void persist();
+  setShowCreatedDate(!showCreatedDate.value);
 }
