@@ -72,15 +72,22 @@ export class GlyphAtlas {
     return this.canvas as unknown as TexImageSource;
   }
 
-  get(codepoint: number, styleVariant: number): GlyphSlot {
-    const key = `${codepoint}|${styleVariant}`;
+  /** `cells` is the glyph's terminal width: wide (CJK, many symbols) glyphs
+   *  get a double-width slot so their ink isn't flat-clipped at one cell. */
+  get(codepoint: number, styleVariant: number, cells = 1): GlyphSlot {
+    const key = `${codepoint}|${styleVariant}|${cells}`;
     const cached = this.slots.get(key);
     if (cached) return cached;
-    return this.bake(codepoint, styleVariant, key);
+    return this.bake(codepoint, styleVariant, cells, key);
   }
 
-  private bake(codepoint: number, styleVariant: number, key: string): GlyphSlot {
-    const w = this.cellWidth;
+  private bake(
+    codepoint: number,
+    styleVariant: number,
+    cells: number,
+    key: string,
+  ): GlyphSlot {
+    const w = this.cellWidth * cells;
     const h = this.cellHeight;
     const stride = w + SLOT_PAD;
     const rowStride = h + SLOT_PAD;

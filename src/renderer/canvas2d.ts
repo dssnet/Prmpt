@@ -72,7 +72,7 @@ export class Canvas2DRenderer implements Renderer {
     payload: RenderPayload,
     selection: SelectionRange | null,
     rect: PaneViewport,
-    opts: { cursor: CursorMode; cornerRadius?: number },
+    opts: { cursor: CursorMode; cornerRadius?: number; padding?: number },
   ): void {
     const dpr = this.m.dpr;
     const dw = Math.max(1, Math.round(rect.w * dpr));
@@ -89,7 +89,10 @@ export class Canvas2DRenderer implements Renderer {
     ctx.roundRect(dx, dy, dw, dh, r);
     ctx.clip();
     ctx.translate(dx, dy);
-    this.paint(payload, selection, opts.cursor, dw, dh);
+    // The grid is inset by the padding; the clip and pane background stay at
+    // the full rect, so the corner rounding clips padding, not glyphs.
+    const padPx = Math.max(0, Math.round((opts.padding ?? 0) * dpr));
+    this.paint(payload, selection, opts.cursor, dw, dh, padPx);
     ctx.restore();
   }
 
@@ -108,6 +111,7 @@ export class Canvas2DRenderer implements Renderer {
     cursorMode: CursorMode,
     vpW: number,
     vpH: number,
+    padPx = 0,
   ): void {
     const { cells, cols, rows, default_bg, cursor } = payload;
     const cw = this.m.cellWidth;
@@ -116,6 +120,9 @@ export class Canvas2DRenderer implements Renderer {
 
     ctx.fillStyle = rgbToCss(default_bg);
     ctx.fillRect(0, 0, vpW, vpH);
+    // Inset everything after the background fill so the grid sits clear of
+    // the rounded-corner clip.
+    ctx.translate(padPx, padPx);
 
     for (let row = 0; row < rows; row++) {
       let col = 0;
@@ -204,6 +211,7 @@ export class Canvas2DRenderer implements Renderer {
           break;
       }
     }
+    ctx.translate(-padPx, -padPx);
   }
 
   updateTheme(theme: ThemeConfig): void {

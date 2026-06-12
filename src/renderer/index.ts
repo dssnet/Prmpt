@@ -26,12 +26,15 @@ export interface Renderer {
   resize(pxWidth: number, pxHeight: number, cols: number, rows: number): void;
   render(payload: RenderPayload, selection?: SelectionRange | null): void;
   /** Draw one pane into a sub-rectangle of the canvas. The caller must wrap a
-   *  set of these in beginFrame()/endFrame(). */
+   *  set of these in beginFrame()/endFrame(). `padding` (CSS px) insets the
+   *  cell grid within the rect; the rounded-corner mask and pane background
+   *  stay at the full rect, so edge glyphs clear the corner rounding. The
+   *  caller is responsible for sizing the pane's cols/rows to the inset area. */
   renderInto(
     payload: RenderPayload,
     selection: SelectionRange | null,
     rect: PaneViewport,
-    opts: { cursor: CursorMode; cornerRadius?: number },
+    opts: { cursor: CursorMode; cornerRadius?: number; padding?: number },
   ): void;
   /** Prepare the canvas for a multi-pane frame (clears gutters). */
   beginFrame(): void;

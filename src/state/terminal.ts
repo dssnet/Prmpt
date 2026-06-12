@@ -117,6 +117,10 @@ let wsLocalDocks: LocalDock[] = [];
 // Below these the pane is too small to usefully split, so it stays all-terminal.
 const MIN_DOCK_H = 80;
 const MIN_TERM_H = 60;
+// Inner padding (CSS px) between a workspace pane's edge and its cell grid,
+// so the rounded-corner mask (--pane-radius) never clips edge glyphs. Must
+// stay ≥ radius·(1 − 1/√2) ≈ 3.6px for the default 12px radius.
+const PANE_PAD = 6;
 
 // Bumped whenever the cached workspace layout changes (reflow, resize,
 // structural mutation) so views can refresh divider overlays.
@@ -239,8 +243,9 @@ function reflowWorkspaceLayout(ws: Workspace, w: number, h: number): void {
   wsLocalDocks = localDocks;
   layoutVersion.value++;
   for (const pane of wsPanes) {
-    const cols = Math.max(1, Math.floor(pane.w / cellWidthPx));
-    const rows = Math.max(1, Math.floor(pane.h / cellHeightPx));
+    // The grid only gets the pane minus its inner padding (see PANE_PAD).
+    const cols = Math.max(1, Math.floor((pane.w - 2 * PANE_PAD) / cellWidthPx));
+    const rows = Math.max(1, Math.floor((pane.h - 2 * PANE_PAD) / cellHeightPx));
     void resizeTab({
       tabId: pane.tabId,
       cols,
@@ -443,7 +448,11 @@ function drawActive(): void {
           decoratePayloadForHover(snap),
           sel,
           { x: pane.x, y: pane.y, w: pane.w, h: pane.h },
-          { cursor: focused ? "full" : "none", cornerRadius: paneCornerRadius() },
+          {
+            cursor: focused ? "full" : "none",
+            cornerRadius: paneCornerRadius(),
+            padding: PANE_PAD,
+          },
         );
       }
     } finally {
@@ -537,7 +546,7 @@ function pointerOrigin(): { x: number; y: number } {
   const a = activeWs();
   if (a) {
     const pane = wsPanes.find((p) => p.tabId === a.ws.focusedTabId);
-    if (pane) return { x: pane.x, y: pane.y };
+    if (pane) return { x: pane.x + PANE_PAD, y: pane.y + PANE_PAD };
   }
   return { x: 0, y: 0 };
 }
@@ -548,7 +557,7 @@ function pointerAreaHeight(): number {
   const a = activeWs();
   if (a) {
     const pane = wsPanes.find((p) => p.tabId === a.ws.focusedTabId);
-    if (pane) return pane.h;
+    if (pane) return pane.h - 2 * PANE_PAD;
   }
   return canvasEl ? canvasEl.getBoundingClientRect().height : 0;
 }
@@ -691,8 +700,8 @@ function cellAtPoint(
     const pane = paneAt(lp.x, lp.y);
     if (!pane) return null;
     snap = snapshotFor(pane.tabId);
-    originX = pane.x;
-    originY = pane.y;
+    originX = pane.x + PANE_PAD;
+    originY = pane.y + PANE_PAD;
   } else {
     snap = activeSnapshot();
   }

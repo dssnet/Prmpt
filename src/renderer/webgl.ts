@@ -6,6 +6,7 @@ import {
   FLAG_BOLD,
   FLAG_ITALIC,
   FLAG_SPACER_TAIL,
+  FLAG_WIDE,
   type Config,
   type RenderPayload,
   type ThemeConfig,
@@ -88,6 +89,7 @@ export class WebGLRenderer implements Renderer {
   private uniforms: {
     viewportPx: WebGLUniformLocation;
     cellPx: WebGLUniformLocation;
+    gridOriginPx: WebGLUniformLocation;
     underlineY: WebGLUniformLocation;
     underlineH: WebGLUniformLocation;
     strikeY: WebGLUniformLocation;
@@ -218,6 +220,7 @@ export class WebGLRenderer implements Renderer {
     this.uniforms = {
       viewportPx: gl.getUniformLocation(this.program, "uViewportPx")!,
       cellPx: gl.getUniformLocation(this.program, "uCellPx")!,
+      gridOriginPx: gl.getUniformLocation(this.program, "uGridOriginPx")!,
       underlineY: gl.getUniformLocation(this.program, "uUnderlineY")!,
       underlineH: gl.getUniformLocation(this.program, "uUnderlineH")!,
       strikeY: gl.getUniformLocation(this.program, "uStrikethroughY")!,
@@ -283,7 +286,7 @@ export class WebGLRenderer implements Renderer {
     payload: RenderPayload,
     selection: SelectionRange | null,
     rect: PaneViewport,
-    opts: { cursor: CursorMode; cornerRadius?: number },
+    opts: { cursor: CursorMode; cornerRadius?: number; padding?: number },
   ): void {
     const gl = this.gl;
     const dpr = this.m.dpr;
@@ -299,7 +302,10 @@ export class WebGLRenderer implements Renderer {
     this.maskRect = [dx, dy, dw, dh];
     const r = Math.round((opts.cornerRadius ?? 0) * dpr);
     this.maskRadiusPx = Math.max(0, Math.min(r, Math.floor(Math.min(dw, dh) / 2)));
-    this.paintGrid(payload, selection, opts.cursor, dw, dh);
+    // The grid is inset by the padding; mask and pane background stay at the
+    // full rect, so the corner rounding clips padding, not glyphs.
+    const padPx = Math.max(0, Math.round((opts.padding ?? 0) * dpr));
+    this.paintGrid(payload, selection, opts.cursor, dw, dh, padPx);
   }
 
   private pushMask(u: {
@@ -333,6 +339,7 @@ export class WebGLRenderer implements Renderer {
     cursorMode: CursorMode,
     vpW: number,
     vpH: number,
+    padPx = 0,
   ): void {
     const { cells, cols, rows, default_fg, default_bg, cursor } = payload;
     const total = cols * rows;
@@ -356,17 +363,48 @@ export class WebGLRenderer implements Renderer {
           fg = u32ToRgba(cell.fg);
           bg = u32ToRgba(cell.bg);
         }
-        const slot =
-          flags & FLAG_SPACER_TAIL
-            ? this.atlas.get(0, STYLE_REG)
-            : this.atlas.get(ch === 0 ? 32 : ch, styleVariant(flags));
-        if (slot.isColor) flags |= 256;
+        // Wide glyphs are baked into a double-width slot and split across
+        // their two cells: the head draws the left half, the spacer tail the
+        // right half (tinted with the head's fg). A tail with no wide head
+        // (defensive) falls back to the old paint-bg-only behavior.
+        let u0: number, v0: number, u1: number, v1: number;
+        let isColor = false;
+        const head =
+          flags & FLAG_SPACER_TAIL && col > 0 ? cells[row * cols + col - 1] : undefined;
+        if (flags & FLAG_WIDE && ch !== 0) {
+          const slot = this.atlas.get(ch, styleVariant(flags), 2);
+          u0 = slot.u0;
+          v0 = slot.v0;
+          u1 = (slot.u0 + slot.u1) / 2;
+          v1 = slot.v1;
+          isColor = slot.isColor;
+        } else if (head && head.flags & FLAG_WIDE && head.ch !== 0) {
+          const slot = this.atlas.get(head.ch, styleVariant(head.flags), 2);
+          u0 = (slot.u0 + slot.u1) / 2;
+          v0 = slot.v0;
+          u1 = slot.u1;
+          v1 = slot.v1;
+          isColor = slot.isColor;
+          fg = u32ToRgba(head.fg);
+          flags &= ~FLAG_SPACER_TAIL;
+        } else {
+          const slot =
+            flags & FLAG_SPACER_TAIL
+              ? this.atlas.get(0, STYLE_REG)
+              : this.atlas.get(ch === 0 ? 32 : ch, styleVariant(flags));
+          u0 = slot.u0;
+          v0 = slot.v0;
+          u1 = slot.u1;
+          v1 = slot.v1;
+          isColor = slot.isColor;
+        }
+        if (isColor) flags |= 256;
         buf[p++] = col;
         buf[p++] = row;
-        buf[p++] = slot.u0;
-        buf[p++] = slot.v0;
-        buf[p++] = slot.u1;
-        buf[p++] = slot.v1;
+        buf[p++] = u0;
+        buf[p++] = v0;
+        buf[p++] = u1;
+        buf[p++] = v1;
         buf[p++] = fg[0];
         buf[p++] = fg[1];
         buf[p++] = fg[2];
@@ -418,6 +456,7 @@ export class WebGLRenderer implements Renderer {
     gl.bindTexture(gl.TEXTURE_2D, this.atlasTex);
     gl.uniform2f(this.uniforms.viewportPx, vpW, vpH);
     gl.uniform2f(this.uniforms.cellPx, this.m.cellWidth, this.m.cellHeight);
+    gl.uniform2f(this.uniforms.gridOriginPx, padPx, padPx);
     gl.uniform1f(this.uniforms.underlineY, 1 - 2 / this.m.cellHeight);
     gl.uniform1f(this.uniforms.underlineH, 1 / this.m.cellHeight);
     gl.uniform1f(this.uniforms.strikeY, 0.5 - 0.5 / this.m.cellHeight);
@@ -427,7 +466,7 @@ export class WebGLRenderer implements Renderer {
     gl.bindVertexArray(null);
 
     if (selection) {
-      this.drawSelection(selection, cols, rows, vpW, vpH);
+      this.drawSelection(selection, cols, rows, vpW, vpH, padPx);
     }
 
     if (cursor && cursor.visible && cursorMode !== "none") {
@@ -437,8 +476,8 @@ export class WebGLRenderer implements Renderer {
       this.pushMask(this.cursorUniforms);
       const cw = this.m.cellWidth;
       const ch = this.m.cellHeight;
-      const ox = cursor.x * cw;
-      const oy = cursor.y * ch;
+      const ox = padPx + cursor.x * cw;
+      const oy = padPx + cursor.y * ch;
       let sx = cw;
       let sy = ch;
       let style = 0;
@@ -491,6 +530,7 @@ export class WebGLRenderer implements Renderer {
     rows: number,
     vpW: number,
     vpH: number,
+    padPx = 0,
   ): void {
     const gl = this.gl;
     const cw = this.m.cellWidth;
@@ -510,7 +550,7 @@ export class WebGLRenderer implements Renderer {
     gl.blendFuncSeparate(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA, gl.ONE, gl.ONE);
 
     const drawRect = (x: number, y: number, w: number, h: number) => {
-      gl.uniform2f(this.cursorUniforms.originPx, x, y);
+      gl.uniform2f(this.cursorUniforms.originPx, padPx + x, padPx + y);
       gl.uniform2f(this.cursorUniforms.sizePx, w, h);
       gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
     };

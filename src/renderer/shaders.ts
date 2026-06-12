@@ -15,6 +15,10 @@ layout(location = 5) in float aFlags;      // bit-packed flags
 
 uniform vec2 uViewportPx;
 uniform vec2 uCellPx;
+// Top-left of the cell grid within the viewport, in px. Non-zero for
+// workspace panes, where the grid is inset so the rounded-corner pane mask
+// doesn't clip edge glyphs.
+uniform vec2 uGridOriginPx;
 
 out vec2 vUV;
 out vec4 vFg;
@@ -23,7 +27,7 @@ out float vFlags;
 out vec2 vLocal;
 
 void main() {
-    vec2 cellOriginPx = aCellPos * uCellPx;
+    vec2 cellOriginPx = uGridOriginPx + aCellPos * uCellPx;
     vec2 posPx = cellOriginPx + aQuad * uCellPx;
     vec2 clip = (posPx / uViewportPx) * 2.0 - 1.0;
     clip.y = -clip.y;
