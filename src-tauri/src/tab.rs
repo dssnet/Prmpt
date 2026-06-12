@@ -250,6 +250,10 @@ pub struct TabHandle {
     /// the right tab chrome in whichever window ends up owning the tab.
     pub disable_sftp: bool,
     pub disable_ssh: bool,
+    /// PID of the local tab's shell child, so the git panel can query its
+    /// working directory from the OS (follows `cd` without shell
+    /// integration). `None` for SSH tabs.
+    pub shell_pid: Option<u32>,
 }
 
 pub struct TabRegistry {
@@ -322,6 +326,7 @@ impl TabRegistry {
                 sftp_tx: Some(sftp_tx),
                 disable_sftp,
                 disable_ssh,
+                shell_pid: None,
             },
         );
         self.windows.lock().insert(id, owner_window);
@@ -391,6 +396,7 @@ impl TabRegistry {
             .slave
             .spawn_command(cmd)
             .map_err(|e| AppError::Pty(e.to_string()))?;
+        let shell_pid = child.process_id();
         drop(pair.slave);
 
         let mut reader = pair
@@ -460,6 +466,7 @@ impl TabRegistry {
                 sftp_tx: None,
                 disable_sftp: false,
                 disable_ssh: false,
+                shell_pid,
             },
         );
         self.windows.lock().insert(id, owner_window);
@@ -625,6 +632,13 @@ impl TabRegistry {
                 .ok()?;
         }
         reply_rx.recv_timeout(Duration::from_secs(1)).ok().flatten()
+    }
+
+    /// PID of a local tab's shell child (`None` for SSH/unknown tabs). The
+    /// git panel resolves it to the shell's working directory via
+    /// `platform::process_cwd`.
+    pub fn shell_pid(&self, id: u64) -> Option<u32> {
+        self.inner.lock().get(&id).and_then(|h| h.shell_pid)
     }
 
     /// Clone the SFTP request sender for an SSH tab. Errors when the tab is

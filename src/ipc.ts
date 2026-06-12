@@ -774,6 +774,117 @@ export async function localOpen(path: string): Promise<void> {
   await invoke("local_open", { path });
 }
 
+// ---------------- Git panel ----------------
+
+/** One changed file in the status snapshot. `status` is a stable word, not
+ *  git's letter codes ("modified"|"added"|"deleted"|"renamed"|"copied"|
+ *  "typechange"|"untracked"|"conflicted"). */
+export interface GitFileEntry {
+  /** Repo-relative path. */
+  path: string;
+  /** Rename/copy source, when status is "renamed"/"copied". */
+  orig_path: string | null;
+  status: string;
+}
+
+/** Distilled `git status`: branch info + changes split into the index
+ *  (`staged`) and worktree (`unstaged`, includes untracked). A file modified
+ *  in both places appears in both lists. */
+export interface GitStatusSnapshot {
+  /** Canonical repo toplevel — pass this as `repo` to the other git calls. */
+  root: string;
+  /** Null when HEAD is detached (see detached_at) or the repo is empty. */
+  branch: string | null;
+  /** Short hash shown instead of a branch name while detached. */
+  detached_at: string | null;
+  upstream: string | null;
+  ahead: number;
+  behind: number;
+  staged: GitFileEntry[];
+  unstaged: GitFileEntry[];
+}
+
+/** "git_missing" and "not_a_repo" are normal panel empty states, not errors. */
+export type GitRepoStatus =
+  | { kind: "git_missing" }
+  | { kind: "not_a_repo" }
+  | ({ kind: "repo" } & GitStatusSnapshot);
+
+export interface GitBranch {
+  name: string;
+  current: boolean;
+}
+
+export interface GitCommit {
+  hash: string;
+  author: string;
+  /** Author time in epoch seconds. */
+  time: number;
+  subject: string;
+}
+
+/** Working directory of a local tab's shell process, queried from the OS
+ *  (follows `cd`, no shell integration needed). Null for SSH tabs, dead
+ *  shells, and Windows (no public cwd API) — fall back to the file browser. */
+export async function terminalCwd(tabId: number): Promise<string | null> {
+  return await invoke<string | null>("terminal_cwd", { tabId });
+}
+
+/** Resolve `dir` to its enclosing repo (backend walks up) and snapshot it. */
+export async function gitStatus(dir: string): Promise<GitRepoStatus> {
+  return await invoke<GitRepoStatus>("git_status", { dir });
+}
+
+export async function gitStage(repo: string, paths: string[]): Promise<void> {
+  await invoke("git_stage", { repo, paths });
+}
+
+export async function gitUnstage(repo: string, paths: string[]): Promise<void> {
+  await invoke("git_unstage", { repo, paths });
+}
+
+/** Commit the index. Resolves to git's summary output; rejects with stderr
+ *  (hook failure, no user.name, …) for the panel's error slot. */
+export async function gitCommitChanges(
+  repo: string,
+  message: string,
+): Promise<string> {
+  return await invoke<string>("git_commit_changes", { repo, message });
+}
+
+/** Unified diff for one file: index→HEAD when `staged`, worktree→index
+ *  otherwise; untracked files diff against /dev/null. */
+export async function gitDiffFile(
+  repo: string,
+  path: string,
+  staged: boolean,
+  untracked: boolean,
+): Promise<string> {
+  return await invoke<string>("git_diff_file", { repo, path, staged, untracked });
+}
+
+export async function gitBranches(repo: string): Promise<GitBranch[]> {
+  return await invoke<GitBranch[]>("git_branches", { repo });
+}
+
+export async function gitSwitchBranch(
+  repo: string,
+  name: string,
+): Promise<void> {
+  await invoke("git_switch_branch", { repo, name });
+}
+
+export async function gitCreateBranch(
+  repo: string,
+  name: string,
+): Promise<void> {
+  await invoke("git_create_branch", { repo, name });
+}
+
+export async function gitLog(repo: string, limit: number): Promise<GitCommit[]> {
+  return await invoke<GitCommit[]>("git_log", { repo, limit });
+}
+
 // ---- Backup (import / export) ----
 
 export interface BackupSummary {

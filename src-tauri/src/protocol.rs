@@ -205,6 +205,65 @@ pub struct LocalListing {
     pub entries: Vec<LocalEntry>,
 }
 
+/// Result of resolving a directory for the git panel: distinguishes "this
+/// machine has no git" and "this directory isn't inside a repo" (both normal
+/// empty states the panel renders) from an actual repo snapshot.
+#[derive(Serialize, Clone, Debug)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum GitRepoStatus {
+    GitMissing,
+    NotARepo,
+    Repo(GitStatusSnapshot),
+}
+
+/// `git status --porcelain=v2 --branch` distilled for the panel: branch info
+/// plus the working-tree changes split into the index (`staged`) and the
+/// worktree (`unstaged`, which includes untracked files). A file modified in
+/// both places appears in both lists.
+#[derive(Serialize, Clone, Debug, PartialEq)]
+pub struct GitStatusSnapshot {
+    /// Canonical repo toplevel — every other git command takes this, and the
+    /// file paths below are relative to it.
+    pub root: String,
+    /// `None` when HEAD is detached (see `detached_at`) or the repo is empty.
+    pub branch: Option<String>,
+    /// Short hash shown instead of a branch name while detached.
+    pub detached_at: Option<String>,
+    pub upstream: Option<String>,
+    pub ahead: i64,
+    pub behind: i64,
+    pub staged: Vec<GitFileEntry>,
+    pub unstaged: Vec<GitFileEntry>,
+}
+
+/// One changed file. `status` is a stable lowercase word
+/// ("modified"|"added"|"deleted"|"renamed"|"copied"|"typechange"|"untracked"|
+/// "conflicted") rather than git's letter codes, so the frontend never parses
+/// porcelain output.
+#[derive(Serialize, Clone, Debug, PartialEq)]
+pub struct GitFileEntry {
+    /// Repo-relative path.
+    pub path: String,
+    /// Rename/copy source, when `status` is "renamed"/"copied".
+    pub orig_path: Option<String>,
+    pub status: String,
+}
+
+#[derive(Serialize, Clone, Debug, PartialEq)]
+pub struct GitBranch {
+    pub name: String,
+    pub current: bool,
+}
+
+#[derive(Serialize, Clone, Debug, PartialEq)]
+pub struct GitCommit {
+    pub hash: String,
+    pub author: String,
+    /// Author time in epoch seconds.
+    pub time: i64,
+    pub subject: String,
+}
+
 /// Emitted on a TOFU first connect — the host had no stored fingerprint,
 /// the handler accepted whatever the server sent, and now the frontend
 /// should persist `fingerprint` against `host_id` via the SQL plugin.

@@ -4,6 +4,7 @@ mod config;
 mod data_migrations;
 mod db_compat;
 mod error;
+mod git;
 mod keymap;
 mod localfs;
 #[cfg(target_os = "macos")]
@@ -264,6 +265,16 @@ pub fn run() {
             commands::local_remove,
             commands::local_reveal,
             commands::local_open,
+            commands::terminal_cwd,
+            commands::git_status,
+            commands::git_stage,
+            commands::git_unstage,
+            commands::git_commit_changes,
+            commands::git_diff_file,
+            commands::git_branches,
+            commands::git_switch_branch,
+            commands::git_create_branch,
+            commands::git_log,
             commands::full_disk_access_granted,
             commands::open_full_disk_access_settings,
             commands::secret_get,

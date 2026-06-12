@@ -80,6 +80,7 @@ import {
   windowCloseMessage,
 } from "./state/closeGuard";
 import { toggleLocalBrowser } from "./state/localBrowser";
+import { toggleGitPanel } from "./state/gitPanel";
 import { notify, notifyBell } from "./state/notifications";
 import { showToast } from "./state/toasts";
 import HomeView from "./components/HomeView.vue";
@@ -440,6 +441,15 @@ const shortcuts: Shortcut[] = [
     run: () => {
       const a = active.value;
       if (a) toggleLocalBrowser(a.id);
+    },
+  },
+  {
+    mod: "meta",
+    match: (k) => k === "g" || k === "G",
+    when: () => active.value?.kind === "terminal",
+    run: () => {
+      const a = active.value;
+      if (a) toggleGitPanel(a.id);
     },
   },
   {

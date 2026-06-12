@@ -1,12 +1,14 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
-import { PanelBottom, PanelRight, X } from "lucide-vue-next";
+import { GitBranch, PanelBottom, PanelRight, X } from "lucide-vue-next";
 
 import { wheelScroll, showContextMenu, type Config } from "../ipc";
 import { setContextLink } from "../state/links";
 import { isSftpVisible, sftpDragGhost, toggleSftpPanel } from "../state/sftp";
 import { isLocalVisible, toggleLocalBrowser } from "../state/localBrowser";
+import { isGitVisible, toggleGitPanel } from "../state/gitPanel";
 import FilesPanel from "./FilesPanel.vue";
+import GitPanel from "./GitPanel.vue";
 import LocalBrowser from "./LocalBrowser.vue";
 import SftpBrowser from "./SftpBrowser.vue";
 import TerminalScrollbar from "./TerminalScrollbar.vue";
@@ -98,6 +100,13 @@ const showLocal = computed(
   () => localTarget.value != null && isLocalVisible(localTarget.value),
 );
 const localDocks = ref<LocalDock[]>([]);
+
+// ---- Git panel (opt-in, terminal tabs only) --------------------------------
+// Follows the local browser's cwd to the enclosing repo; Cmd/Ctrl+G. Can be
+// open alongside the file browser — it's the rightmost panel.
+const showGit = computed(
+  () => localTarget.value != null && isGitVisible(localTarget.value),
+);
 
 // Toggle a pane's dock on/off, then re-tile so the terminal reclaims/yields
 // the strip.
@@ -217,7 +226,10 @@ function onLocalDividerMove(e: MouseEvent) {
     localDragRaf = 0;
     const wrap = wrapRef.value?.getBoundingClientRect();
     if (localPendingX == null || !wrap) return;
-    localWidth.value = clampSftpWidth(wrap.right - localPendingX);
+    // The git panel (plus its 6px divider) sits between this panel's right
+    // edge and the wrap edge when open.
+    const gitInset = showGit.value ? gitWidth.value + 6 : 0;
+    localWidth.value = clampSftpWidth(wrap.right - gitInset - localPendingX);
   });
 }
 function onLocalDividerUp() {
@@ -240,6 +252,43 @@ function onLocalDividerDown(e: MouseEvent) {
 function onLocalExpand() {
   localWidth.value = clampSftpWidth(Math.max(localWidth.value, 680));
   localStorage.setItem(LOCAL_W_KEY, String(Math.round(localWidth.value)));
+}
+
+// ---- Git panel width + divider (mirrors the local one; always rightmost) ---
+const GIT_W_KEY = "prmpt.gitPanelWidthPx";
+const gitWidth = ref<number>(340);
+{
+  const saved = parseInt(localStorage.getItem(GIT_W_KEY) ?? "", 10);
+  if (Number.isFinite(saved)) gitWidth.value = saved;
+}
+let gitDragRaf = 0;
+let gitPendingX: number | null = null;
+function onGitDividerMove(e: MouseEvent) {
+  gitPendingX = e.clientX;
+  if (gitDragRaf) return;
+  gitDragRaf = requestAnimationFrame(() => {
+    gitDragRaf = 0;
+    const wrap = wrapRef.value?.getBoundingClientRect();
+    if (gitPendingX == null || !wrap) return;
+    gitWidth.value = clampSftpWidth(wrap.right - gitPendingX);
+  });
+}
+function onGitDividerUp() {
+  window.removeEventListener("mousemove", onGitDividerMove);
+  window.removeEventListener("mouseup", onGitDividerUp);
+  if (gitDragRaf) {
+    cancelAnimationFrame(gitDragRaf);
+    gitDragRaf = 0;
+  }
+  gitPendingX = null;
+  document.body.style.userSelect = "";
+  localStorage.setItem(GIT_W_KEY, String(Math.round(gitWidth.value)));
+}
+function onGitDividerDown(e: MouseEvent) {
+  e.preventDefault();
+  document.body.style.userSelect = "none";
+  window.addEventListener("mousemove", onGitDividerMove);
+  window.addEventListener("mouseup", onGitDividerUp);
 }
 const { selectionTick } = useTerminalSelection();
 const { theme } = useTheme();
@@ -493,6 +542,8 @@ onBeforeUnmount(() => {
   window.removeEventListener("mouseup", onPaneDragUp);
   onDividerUp();
   onSftpDividerUp();
+  onLocalDividerUp();
+  onGitDividerUp();
   onDockResizeUp();
   teardownTerminalSession();
 });
@@ -732,7 +783,17 @@ watch(theme, (next) => {
           <PanelRight :size="12" :stroke-width="2.25" />
         </button>
         <button
-          v-else-if="sftpTarget"
+          v-if="localTarget != null"
+          type="button"
+          class="pane-close"
+          :class="{ 'pane-tool-on': showGit }"
+          :title="showGit ? 'Hide git panel' : 'Show git panel'"
+          @click="toggleGitPanel(localTarget)"
+        >
+          <GitBranch :size="12" :stroke-width="2.25" />
+        </button>
+        <button
+          v-if="localTarget == null && sftpTarget"
           type="button"
           class="pane-close"
           :class="{ 'pane-tool-on': showSftp }"
@@ -788,6 +849,28 @@ watch(theme, (next) => {
       }"
       @close="toggleLocalBrowser(localTarget)"
       @expand="onLocalExpand"
+    />
+  </template>
+  <!-- Git panel: resizable divider + panel, plain terminal tabs only. Sits
+       right of the file browser when both are open. -->
+  <template v-if="showGit && localTarget != null">
+    <div
+      class="sftp-divider"
+      role="separator"
+      aria-orientation="vertical"
+      aria-label="Resize git panel"
+      @mousedown="onGitDividerDown"
+    />
+    <GitPanel
+      :tab-id="localTarget"
+      class="flex-none"
+      :style="{
+        width: `${gitWidth}px`,
+        margin: 'var(--frame-inset) var(--frame-inset) var(--frame-inset) 0',
+        borderRadius: 'var(--pane-radius)',
+        overflow: 'hidden',
+      }"
+      @close="toggleGitPanel(localTarget)"
     />
   </template>
   </div>
@@ -881,6 +964,10 @@ watch(theme, (next) => {
       transparent
     );
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
+  /* Hit-testable once revealed, so hovering onto it keeps .pane-hover:hover
+     alive and its buttons are clickable; while hidden, `visibility` (not
+     this) disables hit-testing. */
+  pointer-events: auto;
   opacity: 0;
   visibility: hidden; /* hidden also disables hit-testing, unlike opacity */
   transition:

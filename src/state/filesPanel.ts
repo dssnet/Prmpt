@@ -50,3 +50,10 @@ export interface BrowserLocation {
 }
 
 export const browserLocations = new Map<string, BrowserLocation>();
+
+/** Live cwd of the local browser — the reactive twin of
+ *  `browserLocations.get("local").cwd`, updated on every navigation while the
+ *  browser is mounted (the map itself is only written on unmount). The git
+ *  panel follows this to find the repo to show. Null until the local browser
+ *  first loads a directory this session. */
+export const localBrowserCwd = ref<string | null>(null);

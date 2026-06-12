@@ -21,8 +21,12 @@ const props = withDefaults(
 const emit = defineEmits<{ "update:modelValue": [value: OptionValue] }>();
 
 const root = ref<HTMLElement | null>(null);
+const listEl = ref<HTMLElement | null>(null);
 const open = ref(false);
 const activeIndex = ref(-1);
+// Viewport rect for the teleported list, measured from the button on open
+// (see the Teleport comment in the template).
+const panelRect = ref({ left: 0, top: 0, width: 0 });
 
 const selected = computed(() =>
   props.options.find((o) => String(o.value) === String(props.modelValue)),
@@ -33,6 +37,8 @@ function toggle() {
   if (props.disabled) return;
   open.value = !open.value;
   if (open.value) {
+    const r = root.value?.getBoundingClientRect();
+    if (r) panelRect.value = { left: r.left, top: r.bottom + 4, width: r.width };
     activeIndex.value = props.options.findIndex(
       (o) => String(o.value) === String(props.modelValue),
     );
@@ -47,7 +53,25 @@ function pick(opt: Option) {
 
 function onDocPointer(e: PointerEvent) {
   if (!open.value) return;
-  if (root.value && !root.value.contains(e.target as Node)) open.value = false;
+  const t = e.target as Node;
+  // The list lives under <body> (Teleport), not under `root` — check both.
+  if (root.value?.contains(t) || listEl.value?.contains(t)) return;
+  open.value = false;
+}
+
+// The list is anchored to a one-shot measurement of the button; if anything
+// outside it scrolls (the panel, a settings page, …) or the window resizes,
+// the anchor moves — close rather than drift. Scrolling *inside* the list
+// (it has its own max-height) is fine.
+function onAnyScroll(e: Event) {
+  if (
+    listEl.value &&
+    e.target instanceof Node &&
+    listEl.value.contains(e.target)
+  ) {
+    return;
+  }
+  open.value = false;
 }
 
 function onKey(e: KeyboardEvent) {
@@ -87,12 +111,21 @@ function nextEnabled(from: number, dir: 1 | -1): number {
 }
 
 watch(open, (v) => {
-  if (v) document.addEventListener("pointerdown", onDocPointer, true);
-  else document.removeEventListener("pointerdown", onDocPointer, true);
+  if (v) {
+    document.addEventListener("pointerdown", onDocPointer, true);
+    window.addEventListener("scroll", onAnyScroll, true);
+    window.addEventListener("resize", onAnyScroll);
+  } else {
+    document.removeEventListener("pointerdown", onDocPointer, true);
+    window.removeEventListener("scroll", onAnyScroll, true);
+    window.removeEventListener("resize", onAnyScroll);
+  }
 });
 
 onBeforeUnmount(() => {
   document.removeEventListener("pointerdown", onDocPointer, true);
+  window.removeEventListener("scroll", onAnyScroll, true);
+  window.removeEventListener("resize", onAnyScroll);
 });
 </script>
 
@@ -120,12 +153,25 @@ onBeforeUnmount(() => {
         :class="{ 'is-open': open }"
       />
     </button>
-    <Transition name="dropdown-panel">
-      <ul
-        v-if="open"
-        role="listbox"
-        class="dropdown-panel absolute left-0 right-0 top-[calc(100%+4px)] z-50 max-h-60 overflow-y-auto bg-surface-1 border border-border-strong rounded-lg p-1 shadow-[0_8px_24px_rgba(0,0,0,0.35)]"
-      >
+    <!-- Teleported + position:fixed: the list can't be clipped by ancestor
+         `overflow` and can't be out-stacked by sticky headers inside scroll
+         containers (WKWebView composites those above sibling content
+         regardless of z-index). Anchored to the button rect measured on
+         open; outside scroll / resize closes it instead of letting it
+         drift (see onAnyScroll). -->
+    <Teleport to="body">
+      <Transition name="dropdown-panel">
+        <ul
+          v-if="open"
+          ref="listEl"
+          role="listbox"
+          :style="{
+            left: `${panelRect.left}px`,
+            top: `${panelRect.top}px`,
+            width: `${panelRect.width}px`,
+          }"
+          class="dropdown-panel fixed z-50 max-h-60 overflow-y-auto bg-surface-1 border border-border-strong rounded-lg p-1 shadow-[0_8px_24px_rgba(0,0,0,0.35)]"
+        >
         <li
           v-for="(opt, i) in options"
           :key="String(opt.value)"
@@ -157,8 +203,9 @@ onBeforeUnmount(() => {
           </span>
           <span class="truncate">{{ opt.label }}</span>
         </li>
-      </ul>
-    </Transition>
+        </ul>
+      </Transition>
+    </Teleport>
   </div>
 </template>
 

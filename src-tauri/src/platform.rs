@@ -330,6 +330,18 @@ mod tests {
         assert_eq!(resolved, default_shell());
         assert_ne!(resolved, r"C:\Windows\System32\cmd.exe");
     }
+
+    /// Validates the hand-declared `proc_vnodepathinfo` layout on macOS (and
+    /// the procfs path on Linux) against ground truth: our own process.
+    #[cfg(unix)]
+    #[test]
+    fn process_cwd_resolves_own_process() {
+        let cwd = process_cwd(std::process::id()).expect("own cwd should resolve");
+        assert_eq!(
+            cwd.canonicalize().unwrap(),
+            std::env::current_dir().unwrap().canonicalize().unwrap()
+        );
+    }
 }
 
 /// First `PATH` entry that contains an executable named `exe`, or `None`.
@@ -373,3 +385,60 @@ pub fn foreground_process_name(pid: i32) -> Option<String> {
 pub fn foreground_process_name(_pid: i32) -> Option<String> {
     None
 }
+
+/// Current working directory of a process, queried from the OS. The git
+/// panel uses this to follow `cd` in a tab's shell without any shell
+/// integration (no OSC 7 hooks required).
+#[cfg(target_os = "macos")]
+pub fn process_cwd(pid: u32) -> Option<PathBuf> {
+    // Layout-compatible subset of `struct proc_vnodepathinfo` from
+    // <sys/proc_info.h>: two `vnode_info_path`s (cwd, then chroot), each a
+    // 152-byte `vnode_info` followed by a MAXPATHLEN path buffer. Total size
+    // must match the real struct (2352 bytes) or proc_pidinfo rejects it.
+    #[repr(C)]
+    struct VnodeInfoPath {
+        _vnode_info: [u8; 152],
+        path: [u8; 1024],
+    }
+    #[repr(C)]
+    struct ProcVnodePathInfo {
+        cdir: VnodeInfoPath,
+        _rdir: VnodeInfoPath,
+    }
+    const PROC_PIDVNODEPATHINFO: libc::c_int = 9;
+
+    let mut info: ProcVnodePathInfo = unsafe { std::mem::zeroed() };
+    let size = std::mem::size_of::<ProcVnodePathInfo>() as libc::c_int;
+    let n = unsafe {
+        libc::proc_pidinfo(
+            pid as libc::c_int,
+            PROC_PIDVNODEPATHINFO,
+            0,
+            &mut info as *mut _ as *mut libc::c_void,
+            size,
+        )
+    };
+    if n < size {
+        return None;
+    }
+    let path = &info.cdir.path;
+    let len = path.iter().position(|&b| b == 0).unwrap_or(path.len());
+    if len == 0 {
+        return None;
+    }
+    use std::os::unix::ffi::OsStrExt;
+    Some(PathBuf::from(std::ffi::OsStr::from_bytes(&path[..len])))
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+pub fn process_cwd(pid: u32) -> Option<PathBuf> {
+    std::fs::read_link(format!("/proc/{pid}/cwd")).ok()
+}
+
+/// Windows has no stable public API for another process's cwd (it lives in
+/// the PEB) — callers fall back to the file browser's directory.
+#[cfg(not(unix))]
+pub fn process_cwd(_pid: u32) -> Option<PathBuf> {
+    None
+}
+

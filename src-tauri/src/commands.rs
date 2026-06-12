@@ -11,7 +11,7 @@ use crate::{
     activate_blank_window, configure_new_window,
     config::{Config, TerminalPrefs, Theme, UiPrefs},
     error::{AppError, AppResult},
-    localfs,
+    git, localfs,
     protocol::{KeyEventWire, LocalDrive, LocalListing, SftpEntry, TabInfo, WindowBootstrap},
     schedule_refill,
     ssh::{self, SftpSlots, SshConnectConfig},
@@ -843,6 +843,72 @@ pub fn local_reveal(path: String) -> AppResult<()> {
 #[tauri::command]
 pub fn local_open(path: String) -> AppResult<()> {
     localfs::open(&path)
+}
+
+// ---------- Git panel ----------
+//
+// Thin wrappers over `crate::git`. Synchronous on purpose, same as the local
+// file browser above: shelling out to git blocks, and non-`async` handlers
+// run on a worker thread instead of stalling the async runtime.
+
+/// Working directory of a local tab's shell process, queried from the OS so
+/// the git panel follows `cd` without shell integration. `None` for SSH
+/// tabs, dead shells, and platforms without a cwd query (Windows) — callers
+/// fall back to the file browser's directory.
+#[tauri::command]
+pub fn terminal_cwd(registry: State<'_, SharedRegistry>, tab_id: u64) -> Option<String> {
+    let pid = registry.shell_pid(tab_id)?;
+    crate::platform::process_cwd(pid).map(|p| p.to_string_lossy().into_owned())
+}
+
+#[tauri::command]
+pub fn git_status(dir: String) -> AppResult<crate::protocol::GitRepoStatus> {
+    git::status(&dir)
+}
+
+#[tauri::command]
+pub fn git_stage(repo: String, paths: Vec<String>) -> AppResult<()> {
+    git::stage(&repo, &paths)
+}
+
+#[tauri::command]
+pub fn git_unstage(repo: String, paths: Vec<String>) -> AppResult<()> {
+    git::unstage(&repo, &paths)
+}
+
+#[tauri::command]
+pub fn git_commit_changes(repo: String, message: String) -> AppResult<String> {
+    git::commit(&repo, &message)
+}
+
+#[tauri::command]
+pub fn git_diff_file(
+    repo: String,
+    path: String,
+    staged: bool,
+    untracked: bool,
+) -> AppResult<String> {
+    git::diff_file(&repo, &path, staged, untracked)
+}
+
+#[tauri::command]
+pub fn git_branches(repo: String) -> AppResult<Vec<crate::protocol::GitBranch>> {
+    git::branches(&repo)
+}
+
+#[tauri::command]
+pub fn git_switch_branch(repo: String, name: String) -> AppResult<()> {
+    git::switch_branch(&repo, &name)
+}
+
+#[tauri::command]
+pub fn git_create_branch(repo: String, name: String) -> AppResult<()> {
+    git::create_branch(&repo, &name)
+}
+
+#[tauri::command]
+pub fn git_log(repo: String, limit: u32) -> AppResult<Vec<crate::protocol::GitCommit>> {
+    git::log(&repo, limit)
 }
 
 #[derive(serde::Serialize)]

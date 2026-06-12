@@ -59,7 +59,7 @@ import {
   toggleSize,
 } from "../state/uiPrefs";
 import { columnWidth, startColumnResize } from "../state/fileColumns";
-import { browserLocations } from "../state/filesPanel";
+import { browserLocations, localBrowserCwd } from "../state/filesPanel";
 import { fitCrumbs } from "../lib/crumbs";
 import { ConfirmDialog, DropdownMenu, Input } from "./ui";
 
@@ -117,6 +117,10 @@ function closeFilter(): void {
   filterOpen.value = false;
 }
 watch(cwd, closeFilter);
+// Feed the git panel's repo-follow: see `localBrowserCwd` in state/filesPanel.
+watch(cwd, (v) => {
+  if (v) localBrowserCwd.value = v;
+});
 
 // Hide dot-prefixed (hidden) entries unless the shared toggle is on; then
 // apply the name filter.
