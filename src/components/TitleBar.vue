@@ -1,8 +1,15 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from "vue";
+import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { Lock, Minus, Square, Copy, X } from "lucide-vue-next";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { type as osType } from "@tauri-apps/plugin-os";
+import "slot-text/style.css";
+import {
+  animateSlotText,
+  buildSlotText,
+  clearSlotText,
+  type SlotOptions,
+} from "slot-text";
 import { Tooltip } from "./ui";
 import { isStrongholdLocked } from "../state/secrets";
 import { useTabs } from "../state/tabs";
@@ -10,22 +17,65 @@ import { useTabs } from "../state/tabs";
 const { activeTitle } = useTabs();
 
 const displayTitle = computed(() => activeTitle.value?.trim() || "Prmpt");
-// Array.from splits on Unicode code points so surrogate-pair emoji survive intact.
-const titleChars = computed(() => Array.from(displayTitle.value));
 
-const STAGGER_MS = 22;
-// Beyond this index, chars share the last delay slot so a long title doesn't
-// take well over a second to finish landing.
-const STAGGER_CAP = 16;
-const ENTER_BASE_MS = 320;
-const LEAVE_MS = 180;
+const REDUCED_MOTION =
+  typeof matchMedia !== "undefined" &&
+  matchMedia("(prefers-reduced-motion: reduce)").matches;
 
-const transitionDuration = computed(() => {
-  const lastIdx = Math.min(Math.max(0, titleChars.value.length - 1), STAGGER_CAP);
-  return {
-    enter: ENTER_BASE_MS + lastIdx * STAGGER_MS,
-    leave: LEAVE_MS,
-  };
+// Terminal titles update in rapid bursts (shell preexec/precmd, programs
+// animating their title), so `interrupt: false` lets each roll land and then
+// rolls once more to the latest title instead of restarting mid-flight.
+const titleRollOptions: SlotOptions = REDUCED_MOTION
+  ? { duration: 0, stagger: 0, bounce: 0 }
+  : { direction: "up", stagger: 15, skipUnchanged: true, interrupt: false };
+
+// Zero durations = instant swap, but still routed through animateSlotText so
+// it respects the interrupt:false queue (a tick arriving mid-roll plays after
+// the roll lands instead of clobbering its DOM).
+const instantSwapOptions: SlotOptions = {
+  duration: 0,
+  stagger: 0,
+  bounce: 0,
+  interrupt: false,
+};
+
+// True when the titles differ by at most one character (substitution,
+// insertion, or deletion) — spinner frames, counter ticks, progress percent.
+// Rolling a single glyph every tick is just noise, so those swap silently.
+function isMinorEdit(a: string, b: string): boolean {
+  if (Math.abs(a.length - b.length) > 1) return false;
+  let p = 0;
+  while (p < a.length && p < b.length && a[p] === b[p]) p++;
+  let s = 0;
+  while (
+    s < a.length - p &&
+    s < b.length - p &&
+    a[a.length - 1 - s] === b[b.length - 1 - s]
+  )
+    s++;
+  return a.length - p - s <= 1 && b.length - p - s <= 1;
+}
+
+// Driven imperatively instead of via the SlotText component so we can pick
+// the animation per change: full roll for real title changes, instant swap
+// for one-character ticks.
+const titleEl = ref<HTMLElement | null>(null);
+
+onMounted(() => {
+  if (titleEl.value) buildSlotText(titleEl.value, displayTitle.value);
+});
+
+watch(displayTitle, (next, prev) => {
+  if (!titleEl.value) return;
+  animateSlotText(
+    titleEl.value,
+    next,
+    isMinorEdit(prev, next) ? instantSwapOptions : titleRollOptions,
+  );
+});
+
+onUnmounted(() => {
+  if (titleEl.value) clearSlotText(titleEl.value);
 });
 
 // macOS keeps its native traffic lights via the overlay titlebar; Linux
@@ -34,7 +84,8 @@ const transitionDuration = computed(() => {
 // Windows hides native chrome via `decorations(false)` and gets our
 // custom buttons.
 const IS_MAC =
-  typeof navigator !== "undefined" && /Mac|iPhone|iPod|iPad/.test(navigator.platform);
+  typeof navigator !== "undefined" &&
+  /Mac|iPhone|iPod|iPad/.test(navigator.platform);
 let IS_LINUX = false;
 try {
   IS_LINUX = osType() === "linux";
@@ -78,20 +129,10 @@ const onClose = () => {
     data-tauri-drag-region
     class="flex-none h-titlebar relative bg-transparent select-none text-[11px] text-fg-subtle"
   >
-    <div class="absolute inset-0 overflow-hidden pointer-events-none">
-      <Transition name="title-wave" :duration="transitionDuration">
-        <span
-          :key="displayTitle"
-          class="absolute inset-0 flex items-center justify-center px-2 whitespace-nowrap"
-        >
-          <span
-            v-for="(ch, i) in titleChars"
-            :key="i"
-            class="title-char inline-block"
-            :style="{ '--i': Math.min(i, STAGGER_CAP) }"
-          >{{ ch === " " ? " " : ch }}</span>
-        </span>
-      </Transition>
+    <div
+      class="absolute inset-0 overflow-hidden pointer-events-none flex items-center justify-center px-2"
+    >
+      <span ref="titleEl" :aria-label="displayTitle"></span>
     </div>
     <!-- Guard over the traffic-lights area. Sits in front of the title so a
          long title slides behind this div instead of behind the native window
@@ -108,7 +149,7 @@ const onClose = () => {
     <span
       v-if="isStrongholdLocked"
       class="absolute top-1/2 -translate-y-1/2 text-fg-muted"
-      :class="showWindowControls ? 'right-[128px]' : 'right-2'"
+      :class="showWindowControls ? 'right-32' : 'right-2'"
     >
       <Tooltip
         placement="bottom-end"
@@ -154,57 +195,3 @@ const onClose = () => {
     </div>
   </div>
 </template>
-
-<style scoped>
-.title-char {
-  animation-fill-mode: both;
-  transform-origin: 50% 60%;
-}
-
-.title-wave-enter-active .title-char {
-  animation-name: title-wave-in;
-  animation-duration: 320ms;
-  /* gentle spring — peaks ~1.04 around t=0.6 then settles */
-  animation-timing-function: cubic-bezier(0.34, 1.55, 0.5, 1);
-  animation-delay: calc(var(--i, 0) * 22ms);
-}
-
-.title-wave-leave-active .title-char {
-  animation-name: title-wave-out;
-  animation-duration: 180ms;
-  animation-timing-function: cubic-bezier(0.4, 0, 1, 1);
-}
-
-@keyframes title-wave-in {
-  from {
-    opacity: 0;
-    transform: translateY(8px) scale(0.85);
-    filter: blur(2px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0) scale(1);
-    filter: blur(0);
-  }
-}
-
-@keyframes title-wave-out {
-  from {
-    opacity: 1;
-    transform: translateY(0) scale(1);
-    filter: blur(0);
-  }
-  to {
-    opacity: 0;
-    transform: translateY(-6px) scale(0.95);
-    filter: blur(2px);
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .title-wave-enter-active .title-char,
-  .title-wave-leave-active .title-char {
-    animation: none;
-  }
-}
-</style>
