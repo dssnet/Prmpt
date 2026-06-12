@@ -436,7 +436,7 @@ async function confirmDeleteGroup() {
           type="button"
           :title="locked ? 'Locked — click to reveal hidden groups' : 'Unlocked — click to hide again'"
           :aria-label="locked ? 'Unlock hidden groups' : 'Lock hidden groups'"
-          class="shrink-0 grid place-items-center w-6 h-6 rounded-md cursor-pointer transition-colors duration-150"
+          class="shrink-0 grid place-items-center w-7 h-7 rounded-md cursor-pointer transition-colors duration-150"
           :class="
             locked
               ? 'text-fg-muted hover:text-fg hover:bg-surface-2'
@@ -444,14 +444,16 @@ async function confirmDeleteGroup() {
           "
           @click="onLockClick"
         >
-          <Lock v-if="locked" :size="15" />
-          <LockOpen v-else :size="15" />
+          <!-- Lucide's lock ink is bottom-heavy in its viewBox (shackle gap at
+               the top); nudge up 1px so it optically centers like FolderPlus. -->
+          <Lock v-if="locked" :size="15" class="relative -top-px" />
+          <LockOpen v-else :size="15" class="relative -top-px" />
         </button>
         <button
           type="button"
           title="Add group"
           aria-label="Add group"
-          class="shrink-0 grid place-items-center w-6 h-6 rounded-md text-fg-muted hover:text-fg hover:bg-surface-2 cursor-pointer transition-colors duration-150"
+          class="shrink-0 grid place-items-center w-7 h-7 rounded-md text-fg-muted hover:text-fg hover:bg-surface-2 cursor-pointer transition-colors duration-150"
           @click="openCreateTop"
         >
           <FolderPlus :size="15" />

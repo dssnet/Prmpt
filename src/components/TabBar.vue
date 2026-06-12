@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
-import { Asterisk, Bell, ChevronDown, Columns2, Globe, X } from "lucide-vue-next";
+import { Asterisk, ChevronDown, Columns2, Globe, X } from "lucide-vue-next";
 
 import {
   HOME_TAB_ID,
@@ -531,10 +531,9 @@ watch(overflowTabs, (n) => {
             <span class="flex-1 overflow-hidden text-ellipsis whitespace-nowrap">
               {{ labelFor(t) }}
             </span>
-            <Bell
+            <span
               v-if="bellTabs.has(t.id)"
-              :size="10"
-              class="flex-none text-accent"
+              class="flex-none w-1.5 h-1.5 rounded-full bg-accent"
               title="A task finished on this tab"
             />
             <span
@@ -579,10 +578,9 @@ watch(overflowTabs, (n) => {
           <span class="flex-1 overflow-hidden text-ellipsis whitespace-nowrap">
             {{ labelFor(t) }}
           </span>
-          <Bell
+          <span
             v-if="bellTabs.has(t.id)"
-            :size="11"
-            class="flex-none text-accent"
+            class="flex-none w-1.5 h-1.5 rounded-full bg-accent dot-pop"
             title="A task finished on this tab"
           />
           <span

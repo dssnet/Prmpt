@@ -626,6 +626,7 @@ watch(theme, (next) => {
       v-for="p in panes"
       :key="p.tabId"
       class="pane-overlay"
+      :class="{ 'pane-overlay-focused': p.focused }"
       :style="{
         left: `${p.x}px`,
         top: `${p.y}px`,
@@ -907,6 +908,12 @@ watch(theme, (next) => {
       transparent
     );
   border-radius: var(--pane-radius);
+  transition: border-color 150ms ease;
+}
+/* The focused pane carries an accent-tinted border so it reads as "active"
+   alongside the full-vs-hollow cursor distinction. */
+.pane-overlay-focused {
+  border-color: color-mix(in srgb, var(--accent, #89b4fa) 55%, transparent);
 }
 /* Hover header: a centered grip hint + pill at the top of a terminal. Only
    the small grip captures the pointer; the rest of the top row stays
@@ -937,11 +944,15 @@ watch(theme, (next) => {
   letter-spacing: 1px;
   color: var(--fg-subtle, #9399b2);
   opacity: 0.6;
-  transition: opacity 120ms ease;
+  transition:
+    opacity 140ms ease,
+    transform 140ms ease;
 }
 .pane-hover:hover .pane-grip,
 .pane-hover:active .pane-grip {
+  /* Fade out in step with the pill dropping in, nudging down with it. */
   opacity: 0;
+  transform: translateX(-50%) translateY(3px);
   transition-delay: 300ms;
 }
 .pane-pill {
@@ -970,17 +981,24 @@ watch(theme, (next) => {
   pointer-events: auto;
   opacity: 0;
   visibility: hidden; /* hidden also disables hit-testing, unlike opacity */
+  /* Rest state sits slightly up and shrunk so revealing reads as a gentle
+     drop-in; the leave transition slides it back without the hover delay. */
+  transform: translateY(-5px) scale(0.96);
   transition:
     opacity 120ms ease,
-    visibility 0s linear 120ms;
+    transform 140ms ease,
+    visibility 0s linear 140ms;
 }
 .pane-hover:hover .pane-pill,
 .pane-hover:active .pane-pill {
   opacity: 1;
   visibility: visible;
-  /* deliberate-hover delay: brushing past the grip never flashes the pill */
+  transform: translateY(0) scale(1);
+  /* deliberate-hover delay: brushing past the grip never flashes the pill;
+     the slightly overshooting ease gives the drop-in a soft settle. */
   transition:
-    opacity 120ms ease 300ms,
+    opacity 160ms ease 300ms,
+    transform 220ms cubic-bezier(0.34, 1.4, 0.64, 1) 300ms,
     visibility 0s linear 300ms;
 }
 .pane-pill-drag {

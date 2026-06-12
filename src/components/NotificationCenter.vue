@@ -32,6 +32,14 @@ watch(open, (o) => {
   if (o) markAllNotificationsRead();
 });
 
+// Swing the bell when a new unread notification lands. The tick re-keys the
+// icon wrapper so a notification arriving mid-swing restarts the animation.
+// No ring while the panel is open — the list updating is feedback enough.
+const ringTick = ref(0);
+watch(unreadCount, (n, old) => {
+  if (n > old && !open.value) ringTick.value++;
+});
+
 function jumpTo(n: NotificationEntry): void {
   const top = owningTabId(n.tabId);
   if (top != null) setActive(top);
@@ -99,7 +107,13 @@ onBeforeUnmount(() => {
       "
       @click="toggle"
     >
-      <Bell :size="13" />
+      <span
+        :key="ringTick"
+        class="inline-flex"
+        :class="{ 'bell-ring': ringTick > 0 }"
+      >
+        <Bell :size="13" />
+      </span>
       <span
         v-if="unreadCount > 0"
         class="absolute -top-1 -right-1 min-w-3.5 h-3.5 px-0.5 inline-flex items-center justify-center rounded-full bg-accent text-[9px] font-medium leading-none text-bg tabular-nums"
