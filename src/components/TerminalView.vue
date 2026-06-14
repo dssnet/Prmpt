@@ -2,8 +2,8 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch, type Component } from "vue";
 import { GitBranch, PanelRight, X } from "lucide-vue-next";
 
-import { wheelScroll, showContextMenu, type Config } from "../ipc";
-import { setContextLink } from "../state/links";
+import { wheelScroll, type Config } from "../ipc";
+import { openTerminalContextMenu } from "../state/terminalContextMenu";
 import { sftpDragGhost } from "../state/sftp";
 import { highlightedPaneId } from "../state/paneHighlight";
 import { isPanelLeafId, type PanelKind } from "../state/panels";
@@ -18,7 +18,6 @@ import {
   initTerminalSession,
   inputTargetTabId,
   layoutVersion,
-  linkAtEvent,
   onHoverLeave,
   onHoverMove,
   onMouseDown,
@@ -164,13 +163,7 @@ function onHostContextMenu(e: MouseEvent) {
   // drive the menu ourselves.
   e.preventDefault();
   e.stopPropagation();
-  // On a link, the menu grows a "Copy Link" item; the URL is remembered here
-  // because the menu click only round-trips the item id.
-  const link = linkAtEvent(e);
-  setContextLink(link?.url ?? null);
-  void showContextMenu(link !== null).catch((err) =>
-    console.error("show_context_menu failed:", err),
-  );
+  openTerminalContextMenu(e);
 }
 
 // ---- Tab → terminal-area drop (create / extend a workspace) ---------------

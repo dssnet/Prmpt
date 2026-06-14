@@ -12,7 +12,6 @@ import {
   currentWindowLabel,
   onExit,
   onMenuCopy,
-  onMenuCopyLink,
   onMenuPaste,
   onMenuSelectAll,
   onRender,
@@ -27,7 +26,6 @@ import {
   onWindowActivateBlank,
   openNewWindow,
   scrollTab,
-  showContextMenu,
   tearOffTab,
   windowAtScreenPoint,
   writeKey,
@@ -67,12 +65,11 @@ import {
   getCellMetrics,
   hasSelection,
   inputTargetTabId,
-  linkAtEvent,
   pasteFromClipboard,
   reflowActive,
   selectAll,
 } from "./state/terminal";
-import { copyContextLink, setContextLink } from "./state/links";
+import { openTerminalContextMenu } from "./state/terminalContextMenu";
 import {
   cancelPendingClose,
   confirmPendingClose,
@@ -580,18 +577,12 @@ function onPaste(e: ClipboardEvent) {
 
 function onContextMenu(e: MouseEvent) {
   // Belt-and-suspenders: cancel WKWebView's default context menu app-wide.
-  // Inside #terminal-host we also call showContextMenu(); outside it (e.g.
+  // Inside #terminal-host we open our own FloatingMenu; outside it (e.g.
   // tab bar), a do-nothing preventDefault stops the system menu's Writing
   // Tools / Look Up / Autofill items from leaking through.
   e.preventDefault();
   const inTerm = (e.target as Element | null)?.closest?.("#terminal-host");
-  if (inTerm) {
-    const link = linkAtEvent(e);
-    setContextLink(link?.url ?? null);
-    void showContextMenu(link !== null).catch((err) =>
-      console.error("show_context_menu failed:", err),
-    );
-  }
+  if (inTerm) openTerminalContextMenu(e);
 }
 
 onMounted(async () => {
@@ -645,7 +636,6 @@ onMounted(async () => {
     if (el) void copyFromInput(el);
     else copyCurrentSelection();
   }));
-  unlisteners.push(await onMenuCopyLink(() => copyContextLink()));
   unlisteners.push(await onMenuPaste(() => {
     const el = focusedEditable();
     if (el) void pasteIntoInput(el);

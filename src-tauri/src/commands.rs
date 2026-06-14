@@ -1,5 +1,3 @@
-#[cfg(not(any(target_os = "ios", target_os = "android")))]
-use tauri::menu::{IconMenuItemBuilder, MenuBuilder};
 use tauri::{
     AppHandle, Emitter, EventTarget, LogicalPosition, LogicalSize, Manager, State, WebviewUrl,
     WebviewWindow, WebviewWindowBuilder,
@@ -943,69 +941,6 @@ pub fn inspect_ssh_key(private_key: String) -> SshKeyInfo {
             error: Some(e.to_string()),
         },
     }
-}
-
-/// `with_link` is set when the right-click landed on a hyperlink in the
-/// terminal grid: it adds a "Copy Link" item. The URL itself stays on the
-/// frontend (which did the hit-test) — the click round-trips as a
-/// `menu:copy_link` event and the frontend writes its remembered URL to the
-/// clipboard.
-#[cfg(not(any(target_os = "ios", target_os = "android")))]
-#[tauri::command]
-#[allow(unused_mut)] // `mut` is needed on macOS where the icon path reassigns the builders
-pub fn show_context_menu(
-    app: AppHandle,
-    window: WebviewWindow,
-    with_link: Option<bool>,
-) -> AppResult<()> {
-    let mut copy_builder = IconMenuItemBuilder::with_id("copy", "Copy");
-    let mut paste_builder = IconMenuItemBuilder::with_id("paste", "Paste");
-    let mut copy_link_builder = IconMenuItemBuilder::with_id("copy_link", "Copy Link");
-    #[cfg(target_os = "macos")]
-    {
-        if let Some(img) = crate::macos::sf_symbol_image("doc.on.doc") {
-            copy_builder = copy_builder.icon(img);
-        }
-        if let Some(img) = crate::macos::sf_symbol_image("doc.on.clipboard") {
-            paste_builder = paste_builder.icon(img);
-        }
-        if let Some(img) = crate::macos::sf_symbol_image("link") {
-            copy_link_builder = copy_link_builder.icon(img);
-        }
-    }
-    let copy = copy_builder
-        .build(&app)
-        .map_err(|e| AppError::Other(e.to_string()))?;
-    let paste = paste_builder
-        .build(&app)
-        .map_err(|e| AppError::Other(e.to_string()))?;
-    let mut menu_builder = MenuBuilder::new(&app);
-    if with_link.unwrap_or(false) {
-        let copy_link = copy_link_builder
-            .build(&app)
-            .map_err(|e| AppError::Other(e.to_string()))?;
-        menu_builder = menu_builder.item(&copy_link).separator();
-    }
-    let menu = menu_builder
-        .items(&[&copy, &paste])
-        .build()
-        .map_err(|e| AppError::Other(e.to_string()))?;
-    window
-        .popup_menu(&menu)
-        .map_err(|e| AppError::Other(e.to_string()))?;
-    Ok(())
-}
-
-// Mobile has no popup menu; surface the same command name so the
-// frontend can call it unconditionally and get a clean no-op.
-#[cfg(any(target_os = "ios", target_os = "android"))]
-#[tauri::command]
-pub fn show_context_menu(
-    _app: AppHandle,
-    _window: WebviewWindow,
-    _with_link: Option<bool>,
-) -> AppResult<()> {
-    Ok(())
 }
 
 // --- Full Disk Access (macOS) -------------------------------------------

@@ -248,10 +248,9 @@ export function decoratePayloadForHover(snap: RenderPayload): RenderPayload {
   return { ...snap, cells };
 }
 
-/** URL under the most recent right-click, remembered across the context
- *  menu's backend round-trip: the menu only reports "copy_link was clicked"
- *  (`menu:copy_link`), so the frontend keeps the URL it hit-tested when it
- *  opened the menu. */
+/** URL under the most recent right-click, hit-tested when the FloatingMenu is
+ *  opened and remembered so the "Copy Link" item can write it to the clipboard
+ *  (see state/terminalContextMenu.ts). */
 let contextLink: string | null = null;
 
 export function setContextLink(url: string | null): void {

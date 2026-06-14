@@ -261,19 +261,12 @@ export async function copySelectionText(
   });
 }
 
-/** `withLink` adds a "Copy Link" item — set it when the right-click landed on
- *  a hyperlink (and remember the URL via `setContextLink`; the item's click
- *  comes back as `menu:copy_link`). */
-export async function showContextMenu(withLink = false): Promise<void> {
-  await invoke("show_context_menu", { withLink });
-}
-
+// The Copy / Paste / Select All menu events below are emitted by the macOS app
+// menu bar's keyboard accelerators (see `install_app_menu` in lib.rs). The
+// right-click context menu is now an in-webview FloatingMenu, so there is no
+// `show_context_menu` command or `menu:copy_link` event any more.
 export function onMenuCopy(handler: () => void): Promise<UnlistenFn> {
   return listenScoped<void>("menu:copy", () => handler());
-}
-
-export function onMenuCopyLink(handler: () => void): Promise<UnlistenFn> {
-  return listenScoped<void>("menu:copy_link", () => handler());
 }
 
 export function onMenuPaste(handler: () => void): Promise<UnlistenFn> {

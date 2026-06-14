@@ -236,7 +236,6 @@ pub fn run() {
             commands::set_terminal_prefs,
             commands::forget_tab,
             commands::frontend_log,
-            commands::show_context_menu,
             commands::tear_off_tab,
             commands::attach_tab,
             commands::list_tabs_for_window,
@@ -312,7 +311,6 @@ pub fn run() {
             };
             match event.id().0.as_str() {
                 "copy" => emit("menu:copy"),
-                "copy_link" => emit("menu:copy_link"),
                 "paste" => emit("menu:paste"),
                 "selectAll" => emit("menu:selectAll"),
                 // Explicit quit via menu/⌘Q. We route this through our own
