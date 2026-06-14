@@ -405,11 +405,28 @@ export async function openNewWindow(): Promise<void> {
   await invoke("open_new_window");
 }
 
+/** Like `openNewWindow`, but the surfaced window opens a frontend panel
+ *  (file browser / git) instead of a terminal — for dragging a + menu
+ *  option out into its own window. */
+export async function openPanelWindow(kind: "files" | "git"): Promise<void> {
+  await invoke("open_panel_window", { kind });
+}
+
+/** Payload for `window:activate-blank`. `panel` (when set) asks the surfaced
+ *  window to open that panel kind instead of spawning a terminal. */
+export interface ActivateBlankPayload {
+  panel?: "files" | "git" | null;
+}
+
 /** Fires on a reserve when it's been popped for a blank activation
- *  (dock-click / openNewWindow). The frontend reacts by spawning its
- *  first tab. */
-export function onWindowActivateBlank(handler: () => void): Promise<UnlistenFn> {
-  return listenScoped<void>("window:activate-blank", () => handler());
+ *  (dock-click / openNewWindow / openPanelWindow). The frontend reacts by
+ *  spawning its first tab, or opening the requested panel. */
+export function onWindowActivateBlank(
+  handler: (payload: ActivateBlankPayload) => void,
+): Promise<UnlistenFn> {
+  return listenScoped<ActivateBlankPayload>("window:activate-blank", (p) =>
+    handler(p ?? {}),
+  );
 }
 
 export async function windowAtScreenPoint(

@@ -14,7 +14,7 @@
 import { ref } from "vue";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 
-import { tabForegroundProcess } from "../ipc";
+import { closeCurrentWindow, tabForegroundProcess } from "../ipc";
 import { confirmCloseRunning } from "./uiPrefs";
 import {
   closePanelLeaf,
@@ -43,6 +43,21 @@ export interface PendingClose {
 export const pendingClose = ref<PendingClose | null>(null);
 
 const { tabs } = useTabs();
+
+/** Closing the last tab closes the window. A window always keeps the Home
+ *  launcher tab, so "no tabs left" means no non-home tab remains. Called after
+ *  a user-initiated close has removed its tab synchronously (whole tab, or the
+ *  last pane of a panel-only workspace). This mirrors the natural-shell-exit
+ *  path in App.vue's onExit handler so every way of closing the last tab —
+ *  PTY exit, terminal tab, or panel-only tab — converges on the same result.
+ *  Harmless if onExit also fires later: the webview is already gone. */
+function closeWindowIfNoTabs(): void {
+  if (!tabs.value.some((t) => t.kind !== "home")) {
+    void closeCurrentWindow().catch((e) =>
+      console.error("close window failed:", e),
+    );
+  }
+}
 
 /** Local-PTY leaf tab ids under a top-level tab (itself, or its workspace
  *  panes). SSH leaves are excluded — the tab-level guard can't see into
@@ -91,6 +106,7 @@ export async function requestCloseTab(t: TabState): Promise<void> {
     }
   }
   void closeTabAndForget(t.id);
+  closeWindowIfNoTabs();
 }
 
 /** Workspace pane X. Looks up the pane's origin itself; SSH panes close
@@ -102,6 +118,8 @@ export async function requestClosePane(tabId: number): Promise<void> {
   const leaf = ws ? findLeafByTabId(ws.root, tabId) : null;
   if (leaf?.origin.kind === "panel") {
     if (wsId !== undefined) closePanelLeaf(wsId, tabId);
+    // Closing the last pane of a panel-only workspace removes the tab outright.
+    closeWindowIfNoTabs();
     return;
   }
   if (confirmCloseRunning.value) {
@@ -157,6 +175,7 @@ export function confirmPendingClose(): void {
   if (!p) return;
   if (p.kind === "tab" && p.id !== undefined) {
     void closeTabAndForget(p.id);
+    closeWindowIfNoTabs();
   } else if (p.kind === "pane" && p.id !== undefined) {
     void closeWorkspacePane(p.id);
   } else if (p.kind === "window") {

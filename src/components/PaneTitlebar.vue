@@ -53,12 +53,12 @@ function onBarDown(e: MouseEvent): void {
   top: 0;
   left: 50%;
   transform: translateX(-50%);
-  padding: 2px 12px 4px;
+  padding: 2px 14px 4px;
   pointer-events: auto;
   user-select: none;
-  font-size: 11px;
+  font-size: 16px;
   line-height: 1;
-  letter-spacing: 1px;
+  letter-spacing: 2px;
   color: var(--fg-subtle, #9399b2);
   opacity: 0.6;
   transition:

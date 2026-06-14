@@ -20,6 +20,7 @@ import { measureCell, type Renderer, type SelectionRange } from "../renderer/ind
 import { WebGLRenderer } from "../renderer/webgl";
 import {
   activeSnapshot,
+  dropPanelIntoTarget,
   dropTabIntoTarget,
   focusWorkspacePane,
   isInteractiveTab,
@@ -1003,6 +1004,29 @@ export function commitWorkspaceDrop(
   if (!res) return false;
   const slot = dropTabIntoTarget(
     draggedId,
+    res.slotId,
+    res.targetPaneTabId,
+    res.dir,
+    res.placeDraggedFirst,
+  );
+  if (slot == null) return false;
+  markTabConsumed();
+  return true;
+}
+
+/** Like `commitWorkspaceDrop`, but drops a *new* panel (file browser / git)
+ *  at this client point instead of an existing tab — for a + menu option
+ *  dragged onto the terminal area. Returns true if it landed in a workspace. */
+export function commitPanelWorkspaceDrop(
+  kind: PanelKind,
+  clientX: number,
+  clientY: number,
+): boolean {
+  const res = resolveDropAt(clientX, clientY);
+  wsDragPreview.value = null;
+  if (!res) return false;
+  const slot = dropPanelIntoTarget(
+    kind,
     res.slotId,
     res.targetPaneTabId,
     res.dir,

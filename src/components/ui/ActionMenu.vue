@@ -50,17 +50,19 @@ onBeforeUnmount(() => {
 
 <template>
   <div ref="root" class="relative">
-    <button
-      type="button"
-      :title="title"
-      :aria-haspopup="'menu'"
-      :aria-expanded="open"
-      class="inline-flex items-center justify-center px-2.5 py-1 rounded-md border bg-transparent text-fg-muted cursor-pointer transition-colors duration-150 hover:bg-surface-2 hover:text-fg"
-      :class="open ? 'border-border-strong text-fg' : 'border-border'"
-      @click="toggle"
-    >
-      <MoreHorizontal :size="14" />
-    </button>
+    <slot name="trigger" :open="open" :toggle="toggle">
+      <button
+        type="button"
+        :title="title"
+        :aria-haspopup="'menu'"
+        :aria-expanded="open"
+        class="inline-flex items-center justify-center px-2.5 py-1 rounded-md border bg-transparent text-fg-muted cursor-pointer transition-colors duration-150 hover:bg-surface-2 hover:text-fg"
+        :class="open ? 'border-border-strong text-fg' : 'border-border'"
+        @click="toggle"
+      >
+        <MoreHorizontal :size="14" />
+      </button>
+    </slot>
     <Transition name="dropdown-panel">
       <div
         v-if="open"

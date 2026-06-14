@@ -242,6 +242,7 @@ pub fn run() {
             commands::list_tabs_for_window,
             commands::bootstrap_window,
             commands::open_new_window,
+            commands::open_panel_window,
             commands::window_at_screen_point,
             commands::get_stronghold_unlock,
             commands::get_db_url,
@@ -391,20 +392,36 @@ pub fn run() {
                 has_visible_windows: false,
                 ..
             } => {
-                activate_blank_window(_app);
+                activate_blank_window(_app, None);
             }
             _ => {}
         });
 }
 
+/// Payload for `window:activate-blank`. `panel` names a frontend panel kind
+/// ("files" / "git") the freshly-surfaced window should open instead of a
+/// terminal — set when the window was born from a dragged-out + menu option.
+/// `None` (the common dock-click / Cmd+N path) means "spawn a terminal".
+#[derive(Clone, serde::Serialize)]
+struct ActivateBlankPayload {
+    panel: Option<String>,
+}
+
 /// Pop a Ready reserve and surface it as a blank new window, or fall back
 /// to building a fresh window if the pool isn't ready. Used by the macOS
-/// dock-click handler and the `open_new_window` command (Cmd+N).
-pub(crate) fn activate_blank_window(app: &AppHandle) {
+/// dock-click handler and the `open_new_window` command (Cmd+N). `panel`
+/// asks the surfaced window to open a panel (file browser / git) rather than
+/// a terminal; it only flows through the reserve path (the fresh-build
+/// fallback prespawns a terminal and ignores it — a rare cold-pool case).
+pub(crate) fn activate_blank_window(app: &AppHandle, panel: Option<String>) {
     let pool = app.state::<SharedWindowPool>();
     if let Some(label) = pool.pop_for_blank() {
         if let Some(window) = app.get_webview_window(&label) {
-            let _ = app.emit_to(EventTarget::webview_window(&label), "window:activate-blank", ());
+            let _ = app.emit_to(
+                EventTarget::webview_window(&label),
+                "window:activate-blank",
+                ActivateBlankPayload { panel },
+            );
             let _ = window.show();
             let _ = window.set_focus();
             schedule_refill(app);

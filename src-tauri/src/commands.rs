@@ -389,7 +389,16 @@ pub fn tear_off_tab(
 /// fresh blank window — same shape as the macOS dock-click handler.
 #[tauri::command]
 pub fn open_new_window(app: AppHandle) -> AppResult<()> {
-    activate_blank_window(&app);
+    activate_blank_window(&app, None);
+    Ok(())
+}
+
+/// Like `open_new_window`, but the surfaced window opens a frontend panel
+/// (file browser / git) instead of a terminal. Entry point for dragging a
+/// + menu option out of the window. `kind` is a `PanelKind` ("files"/"git").
+#[tauri::command]
+pub fn open_panel_window(app: AppHandle, kind: String) -> AppResult<()> {
+    activate_blank_window(&app, Some(kind));
     Ok(())
 }
 

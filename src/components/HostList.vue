@@ -1,7 +1,10 @@
 <script setup lang="ts">
 import {
   AlertTriangle,
+  ChevronDown,
+  Combine,
   Copy,
+  FolderOpen,
   FolderPlus,
   Info,
   KeyRound,
@@ -11,6 +14,7 @@ import {
   Plus,
   Server,
   Settings,
+  Terminal,
   Trash2,
 } from "lucide-vue-next";
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
@@ -36,7 +40,7 @@ import {
   loadSecret,
   saveSecret,
 } from "../secrets";
-import { connectHost } from "../state/connect";
+import { connectHost, defaultConnectMode, type ConnectMode } from "../state/connect";
 import GroupTree from "./GroupTree.vue";
 import HidePinDialogs from "./HidePinDialogs.vue";
 import {
@@ -180,10 +184,10 @@ onMounted(async () => {
 });
 defineExpose({ refresh });
 
-async function onConnect(h: SshHostRow) {
+async function onConnect(h: SshHostRow, mode?: ConnectMode) {
   connecting.value = h.id;
   try {
-    await connectHost(h);
+    await connectHost(h, mode);
   } catch (err) {
     console.error("connect failed:", err);
     errorText.value = `Connect failed: ${err}`;
@@ -537,13 +541,60 @@ async function confirmDeleteGroup() {
               <div class="text-xs text-fg-muted font-mono">{{ h.username }}@{{ h.hostname }}:{{ h.port }}</div>
             </div>
             <div class="flex gap-1.5">
-              <Button
-                size="sm"
+              <div class="inline-flex items-stretch">
+              <button
+                type="button"
                 :disabled="h.broken || connecting === h.id"
+                class="inline-flex items-center justify-center px-2.5 py-1 text-xs border border-accent border-r-0 bg-accent text-bg rounded-l-md hover:opacity-90 disabled:opacity-50 disabled:cursor-default cursor-pointer transition-opacity duration-150"
                 @click="onConnect(h)"
               >
                 Connect
-              </Button>
+              </button>
+              <ActionMenu title="Connection options" class="flex">
+                <template #trigger="{ open, toggle }">
+                  <button
+                    type="button"
+                    title="Choose how to connect"
+                    :aria-haspopup="'menu'"
+                    :aria-expanded="open"
+                    :disabled="h.broken || connecting === h.id"
+                    class="inline-flex items-center justify-center px-1.5 py-1 border border-accent border-l-[color-mix(in_srgb,var(--color-bg)_22%,transparent)] bg-accent text-bg rounded-r-md hover:opacity-90 disabled:opacity-50 disabled:cursor-default cursor-pointer transition-opacity duration-150"
+                    @click="toggle"
+                  >
+                    <ChevronDown :size="14" />
+                  </button>
+                </template>
+                <template #default="{ close }">
+                  <button
+                    type="button"
+                    role="menuitem"
+                    class="w-full flex items-center gap-2 px-2 py-1.5 text-sm rounded-md whitespace-nowrap text-fg hover:bg-surface-2 cursor-pointer transition-colors duration-150"
+                    @click="onConnect(h, 'shell'); close()"
+                  >
+                    <Terminal :size="14" class="shrink-0 text-fg-muted" /> Shell
+                    <span v-if="defaultConnectMode(h) === 'shell'" class="ml-auto text-[10px] text-fg-muted">default</span>
+                  </button>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    class="w-full flex items-center gap-2 px-2 py-1.5 text-sm rounded-md whitespace-nowrap text-fg hover:bg-surface-2 cursor-pointer transition-colors duration-150"
+                    @click="onConnect(h, 'sftp'); close()"
+                  >
+                    <FolderOpen :size="14" class="shrink-0 text-fg-muted" /> SFTP
+                    <span v-if="defaultConnectMode(h) === 'sftp'" class="ml-auto text-[10px] text-fg-muted">default</span>
+                  </button>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    class="w-full flex items-center gap-2 px-2 py-1.5 text-sm rounded-md whitespace-nowrap text-fg hover:bg-surface-2 cursor-pointer transition-colors duration-150"
+                    @click="onConnect(h, 'both'); close()"
+                  >
+                    <Combine :size="14" class="shrink-0 text-fg-muted" /> Both
+                    <span v-if="defaultConnectMode(h) === 'both'" class="ml-auto text-[10px] text-fg-muted">default</span>
+                  </button>
+                </template>
+              </ActionMenu>
+              </div>
               <ActionMenu title="Host actions">
                 <template #default="{ close }">
                   <button

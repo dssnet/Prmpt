@@ -106,20 +106,37 @@ export async function buildSshConnectConfig(host: SshHostRow): Promise<SshConnec
   };
 }
 
-export async function connectHost(host: SshHostRow): Promise<void> {
+/** How to connect to a host. `"both"` = shell terminal + SFTP file browser,
+ *  `"shell"` = terminal only, `"sftp"` = files-only workspace (no shell). */
+export type ConnectMode = "both" | "shell" | "sftp";
+
+/** The host's stored default connect mode, derived from its disable flags. */
+export function defaultConnectMode(host: SshHostRow): ConnectMode {
+  if (host.disable_ssh) return "sftp";
+  if (host.disable_sftp) return "shell";
+  return "both";
+}
+
+export async function connectHost(host: SshHostRow, mode?: ConnectMode): Promise<void> {
   const { active } = useTabs();
   reflowActive(active.value);
-  // SFTP-only hosts have no shell: open a files-only workspace whose browser
-  // owns its SFTP consumer (no backend terminal tab). The file browser
-  // resolves auth + acquires the consumer itself, so nothing to do here but
-  // open the workspace.
-  if (host.disable_ssh) {
+  // An explicit mode (from the connect dropdown) overrides the host's stored
+  // default; otherwise fall back to whatever the host config implies.
+  const effective = mode ?? defaultConnectMode(host);
+  // SFTP-only: open a files-only workspace whose browser owns its SFTP consumer
+  // (no backend terminal tab). The file browser resolves auth + acquires the
+  // consumer itself, so nothing to do here but open the workspace.
+  if (effective === "sftp") {
     openSftpOnlyHost(host.id, host.label);
     return;
   }
   const { cellWidthPx, cellHeightPx, dpr } = getCellMetrics();
   const dims = computeDims();
   const config = await buildSshConnectConfig(host);
+  // Force the file-panel availability to match the chosen mode, independent of
+  // the host's stored default (shell → no SFTP panel, both → SFTP panel).
+  config.disable_sftp = effective === "shell";
+  config.disable_ssh = false;
   await spawnSsh({
     hostId: host.id,
     hostLabel: host.label,

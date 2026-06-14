@@ -54,6 +54,7 @@ import {
   snapshotFor,
   spawnTerminal,
   openPanelOnActive,
+  openPanelTab,
   useTabs,
   type TabHydrateInfo,
 } from "./state/tabs";
@@ -632,7 +633,14 @@ onMounted(async () => {
   // that the user has actually claimed this webview. Must be installed
   // before bootstrapWindow returns so a pop_for_blank firing immediately
   // after bootstrap can't race past the listener registration.
-  unlisteners.push(await onWindowActivateBlank(() => {
+  unlisteners.push(await onWindowActivateBlank((p) => {
+    // A window dragged out from a + menu option opens that panel as its sole
+    // tab; the ordinary blank activation (dock-click / Cmd+N) spawns a shell.
+    if (p.panel) {
+      hasAdoptedTab = true; // don't let a later activate-blank pile a shell on top
+      openPanelTab(p.panel);
+      return;
+    }
     void autoSpawnInitialTab();
   }));
   unlisteners.push(await onMenuCopy(() => {

@@ -1,14 +1,26 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
-import { Asterisk, Bell, ChevronDown, Columns2, Globe, X } from "lucide-vue-next";
+import {
+  Asterisk,
+  Bell,
+  ChevronDown,
+  Columns2,
+  GitBranch,
+  Globe,
+  PanelRight,
+  X,
+} from "lucide-vue-next";
 
 import {
   HOME_TAB_ID,
   moveTab,
+  openPanelTab,
   setActive,
   useTabs,
   type TabState,
 } from "../state/tabs";
+import type { PanelKind } from "../state/panels";
+import { openPanelWindow } from "../ipc";
 import { requestCloseTab } from "../state/closeGuard";
 import { bellTabs } from "../state/notifications";
 import {
@@ -20,6 +32,7 @@ import {
 import NotificationCenter from "./NotificationCenter.vue";
 import {
   clearWorkspaceDragPreview,
+  commitPanelWorkspaceDrop,
   commitWorkspaceDrop,
   pointOverTerminal,
   updateWorkspaceDragPreview,
@@ -310,35 +323,48 @@ function onDragUp(e: MouseEvent): void {
   props.onDragOut?.(d.tabId, e.screenX, e.screenY);
 }
 
-// The + button shares the tabs' mouse-driven drag (HTML5 DnD is unreliable in
-// WKWebView). It has no DOM node to carry and no slot to reorder, so it's a
-// trimmed version: just the ghost + workspace preview, resolving on release to
-// a click, a workspace split, or a tear-off — App spawns the actual terminal.
-interface PlusDrag {
+// The + button (and the panel options in its right-click menu) share the tabs'
+// mouse-driven drag (HTML5 DnD is unreliable in WKWebView). There's no DOM node
+// to carry and no slot to reorder, so it's a trimmed version: just the ghost +
+// workspace preview, resolving on release to a new tab, a workspace split, or a
+// new window. `kind` decides what gets created at each landing:
+//   - "terminal" → App spawns the backend shell (it owns the cell metrics);
+//   - "files"/"git" → a frontend panel, opened here directly.
+type SpawnKind = "terminal" | PanelKind;
+interface SpawnDrag {
+  kind: SpawnKind;
   startScreenX: number;
   startScreenY: number;
   active: boolean;
 }
-let plusDrag: PlusDrag | null = null;
+let spawnDrag: SpawnDrag | null = null;
 
-function onPlusMouseDown(e: MouseEvent): void {
+const SPAWN_LABEL: Record<SpawnKind, string> = {
+  terminal: "New terminal",
+  files: "File Browser",
+  git: "Git",
+};
+
+function onSpawnMouseDown(kind: SpawnKind, e: MouseEvent): void {
   if (e.button !== 0) return; // left button only
-  plusDrag = {
+  plusMenuOpen.value = false; // a menu option being dragged closes the menu
+  spawnDrag = {
+    kind,
     startScreenX: e.screenX,
     startScreenY: e.screenY,
     active: false,
   };
-  window.addEventListener("mousemove", onPlusMove);
-  window.addEventListener("mouseup", onPlusUp);
+  window.addEventListener("mousemove", onSpawnMove);
+  window.addEventListener("mouseup", onSpawnUp);
 }
 
-function onPlusMove(e: MouseEvent): void {
-  if (!plusDrag) return;
-  if (!plusDrag.active) {
-    const dx = e.screenX - plusDrag.startScreenX;
-    const dy = e.screenY - plusDrag.startScreenY;
+function onSpawnMove(e: MouseEvent): void {
+  if (!spawnDrag) return;
+  if (!spawnDrag.active) {
+    const dx = e.screenX - spawnDrag.startScreenX;
+    const dy = e.screenY - spawnDrag.startScreenY;
     if (dx * dx + dy * dy < DRAG_START_PX * DRAG_START_PX) return;
-    plusDrag.active = true;
+    spawnDrag.active = true;
     resetTabConsumed();
   }
   // Inside the bar: no affordance — releasing here is just "new tab".
@@ -348,37 +374,69 @@ function onPlusMove(e: MouseEvent): void {
     return;
   }
   // Outside the bar: ghost + the same workspace drop highlight tabs show.
-  ghost.value = { x: e.clientX, y: e.clientY, label: "New terminal" };
+  ghost.value = { x: e.clientX, y: e.clientY, label: SPAWN_LABEL[spawnDrag.kind] };
   updateWorkspaceDragPreview(e.clientX, e.clientY);
 }
 
-function onPlusUp(e: MouseEvent): void {
-  window.removeEventListener("mousemove", onPlusMove);
-  window.removeEventListener("mouseup", onPlusUp);
-  const d = plusDrag;
-  plusDrag = null;
+function onSpawnUp(e: MouseEvent): void {
+  window.removeEventListener("mousemove", onSpawnMove);
+  window.removeEventListener("mouseup", onSpawnUp);
+  const d = spawnDrag;
+  spawnDrag = null;
   ghost.value = null;
   clearWorkspaceDragPreview();
-  // Never moved (or dropped back in the bar) → a plain new tab.
-  if (!d || !d.active || pointInTabBar(e.clientX, e.clientY)) {
-    emit("requestNewTab");
+  if (!d) return;
+  const kind = d.kind;
+  // Never moved (or dropped back in the bar) → a plain new tab of this kind.
+  if (!d.active || pointInTabBar(e.clientX, e.clientY)) {
+    spawnNewTabHere(kind);
     return;
   }
-  // Over this window's terminal → spawn + split into the workspace there.
+  // Over this window's terminal → split into the workspace there. Terminals go
+  // through App (it spawns the backend shell); panels open directly.
   if (pointOverTerminal(e.clientX, e.clientY)) {
-    emit("newTabWorkspace", e.clientX, e.clientY);
+    if (kind === "terminal") emit("newTabWorkspace", e.clientX, e.clientY);
+    else commitPanelWorkspaceDrop(kind, e.clientX, e.clientY);
     return;
   }
-  // Far enough out → spawn into a new / other window.
+  // Far enough out → open in a new / other window.
   const dx = e.screenX - d.startScreenX;
   const dy = e.screenY - d.startScreenY;
   if (dx * dx + dy * dy >= DRAG_OUT_THRESHOLD * DRAG_OUT_THRESHOLD) {
-    emit("newTabWindow", e.screenX, e.screenY);
+    if (kind === "terminal") emit("newTabWindow", e.screenX, e.screenY);
+    else void openPanelWindow(kind);
     return;
   }
   // Small drag that left the bar but landed nowhere meaningful → new tab.
-  emit("requestNewTab");
+  spawnNewTabHere(kind);
 }
+
+function spawnNewTabHere(kind: SpawnKind): void {
+  if (kind === "terminal") emit("requestNewTab");
+  else openPanelTab(kind);
+}
+
+// Right-clicking the + opens a small inline menu of the *other* new-pane kinds
+// (left-click / left-drag default to a terminal). Its rows are draggable just
+// like the + itself — drop onto the terminal to split a panel in, or out for a
+// panel window.
+const plusMenuOpen = ref(false);
+const plusWrapEl = ref<HTMLDivElement | null>(null);
+const plusMenuEl = ref<HTMLDivElement | null>(null);
+
+function onPlusContextMenu(e: MouseEvent): void {
+  e.preventDefault();
+  plusMenuOpen.value = !plusMenuOpen.value;
+}
+
+interface PlusMenuRow {
+  kind: PanelKind;
+  text: string;
+}
+const plusMenuRows: PlusMenuRow[] = [
+  { kind: "files", text: "File Browser" },
+  { kind: "git", text: "Git" },
+];
 
 // Overflow handling: older tabs (those opened first) collapse into a dropdown
 // on the left, between home and the visible strip. The most recent tabs stay
@@ -449,15 +507,23 @@ function closeOverflow(t: TabState, e: MouseEvent): void {
 }
 
 function onDocMouseDown(e: MouseEvent): void {
-  if (!menuOpen.value) return;
   const target = e.target as Node | null;
   if (!target) return;
-  if (menuEl.value?.contains(target)) return;
-  if (triggerEl.value?.contains(target)) return;
-  menuOpen.value = false;
+  if (
+    menuOpen.value &&
+    !menuEl.value?.contains(target) &&
+    !triggerEl.value?.contains(target)
+  ) {
+    menuOpen.value = false;
+  }
+  if (plusMenuOpen.value && !plusWrapEl.value?.contains(target)) {
+    plusMenuOpen.value = false;
+  }
 }
 function onKeyDown(e: KeyboardEvent): void {
-  if (e.key === "Escape" && menuOpen.value) menuOpen.value = false;
+  if (e.key !== "Escape") return;
+  if (menuOpen.value) menuOpen.value = false;
+  if (plusMenuOpen.value) plusMenuOpen.value = false;
 }
 
 let resizeObs: ResizeObserver | null = null;
@@ -613,12 +679,38 @@ watch(overflowTabs, (n) => {
         </div>
       </TransitionGroup>
     </div>
-    <div
-      title="New tab (⌘T) — drag onto the terminal to split, or out for a new window"
-      class="flex-none flex items-center justify-center w-6 h-6 rounded-full text-fg-subtle cursor-pointer text-sm leading-none bg-surface-1 hover:bg-surface-2 hover:text-fg transition-colors duration-100"
-      @mousedown="onPlusMouseDown"
-    >
-      +
+    <div ref="plusWrapEl" class="relative flex-none">
+      <div
+        title="New tab (⌘T) — drag onto the terminal to split, out for a new window, or right-click for a panel"
+        class="flex items-center justify-center w-6 h-6 rounded-full text-fg-subtle cursor-pointer text-sm leading-none bg-surface-1 hover:bg-surface-2 hover:text-fg transition-colors duration-100"
+        @mousedown="onSpawnMouseDown('terminal', $event)"
+        @contextmenu="onPlusContextMenu"
+      >
+        +
+      </div>
+      <Transition name="overflow-panel">
+        <div
+          v-if="plusMenuOpen"
+          ref="plusMenuEl"
+          class="overflow-panel absolute left-0 top-full mt-1 min-w-44 z-50 rounded-lg bg-surface-1 ring-1 ring-border-strong shadow-[0_8px_24px_rgba(0,0,0,0.35)] p-1 text-xs"
+        >
+          <button
+            v-for="row in plusMenuRows"
+            :key="row.kind"
+            type="button"
+            :title="`Open ${row.text} — drag onto the terminal to split, or out for a new window`"
+            class="w-full flex items-center gap-2 px-2 py-1 rounded-md text-left cursor-pointer text-fg-muted hover:bg-surface-2 hover:text-fg"
+            @mousedown="onSpawnMouseDown(row.kind, $event)"
+          >
+            <component
+              :is="row.kind === 'git' ? GitBranch : PanelRight"
+              :size="13"
+              class="flex-none text-fg-subtle"
+            />
+            <span class="flex-1">{{ row.text }}</span>
+          </button>
+        </div>
+      </Transition>
     </div>
     <NotificationCenter class="ml-auto" />
   </div>

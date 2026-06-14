@@ -321,6 +321,23 @@ export function openSftpOnlyHost(hostId: number, label: string): void {
   activeId.value = slotId;
 }
 
+/** Open a panel (file browser / git) as its own tab in the tab bar — a
+ *  panel-only workspace with no terminal pane, like `openSftpOnlyHost` but for
+ *  local-seeded panels. The single panel pane is self-contained (it picks its
+ *  own source/folder); closing it collapses the whole tab. */
+export function openPanelTab(kind: PanelKind): void {
+  const slotId = allocPanelLeafId();
+  const leaf = makePanelLeaf({ kind });
+  const t: TabState = {
+    id: slotId,
+    kind: "workspace",
+    title: leaf.origin.title,
+  };
+  tabs.value.push(t);
+  setWorkspace(slotId, { root: leaf, focusedTabId: leaf.tabId });
+  activeId.value = slotId;
+}
+
 export async function closeTabAndForget(id: number): Promise<void> {
   if (id === HOME_TAB_ID) return;
   const t = findTab(id);
@@ -394,11 +411,41 @@ export function dropTabIntoTarget(
   return targetSlotId;
 }
 
+/** Drop a *new* panel (file browser / git) onto a pane in the target
+ *  workspace, splitting the hit pane — the panel-spawning counterpart of
+ *  `dropTabIntoTarget` (used when a + menu option is dragged onto a terminal).
+ *  The panel is self-contained, so it opens unseeded. Returns the target slot
+ *  id, or null if the drop wasn't a usable workspace target. */
+export function dropPanelIntoTarget(
+  kind: PanelKind,
+  targetSlotId: number,
+  targetPaneTabId: number,
+  dir: SplitDir,
+  placeDraggedFirst: boolean,
+): number | null {
+  const target = findTab(targetSlotId);
+  if (!target || target.kind !== "workspace") return null;
+  const tws = getWorkspace(targetSlotId);
+  if (!tws) return null;
+  const leaf = makePanelLeaf({ kind });
+  const root = splitLeaf(
+    tws.root,
+    targetPaneTabId,
+    leaf,
+    dir,
+    placeDraggedFirst,
+  );
+  setWorkspace(targetSlotId, { root, focusedTabId: leaf.tabId });
+  activeId.value = targetSlotId;
+  return targetSlotId;
+}
+
 /** Set the focused pane within a workspace (drives input/selection routing). */
 export function focusWorkspacePane(slotId: number, tabId: number): void {
   const ws = getWorkspace(slotId);
   if (!ws || ws.focusedTabId === tabId) return;
   setWorkspace(slotId, { root: ws.root, focusedTabId: tabId });
+  syncWorkspaceTabTitle(slotId);
 }
 
 export function setActive(id: number): void {
@@ -569,18 +616,10 @@ export function handleRender(payload: RenderPayload): void {
   if (!t && wsId === undefined) return;
   snapshots.set(payload.tab_id, payload);
 
-  if (payload.title && payload.title.length > 0) {
-    if (t && t.kind !== "workspace" && payload.title !== t.title) {
-      t.title = payload.title;
-    }
-    if (wsId !== undefined) {
-      const ws = getWorkspace(wsId);
-      const slot = findTab(wsId);
-      if (ws && slot && ws.focusedTabId === payload.tab_id) {
-        slot.title = payload.title;
-      }
-    }
-  }
+  // The tab label tracks its focused pane; derive it from the one helper
+  // (terminal snapshot title or panel leaf title) so there's a single source
+  // of truth rather than this path and the panel/focus paths each copying.
+  if (wsId !== undefined) syncWorkspaceTabTitle(wsId);
 
   if (payload.tab_id === activeId.value || wsId === activeId.value) {
     renderSeq.value++;
@@ -653,6 +692,57 @@ export function closePanelLeaf(slotId: number, leafId: number): void {
   if (leaf?.origin.panel?.kind === "files") releaseSftpForPane(leafId);
 }
 
+/** Mirror the focused pane's title onto the workspace's tab-bar label, so the
+ *  tab tracks whichever pane has focus. Terminals normally do this via their
+ *  render payloads (`handleRender`), but panels emit no renders and the tab
+ *  label otherwise never learns their title — this covers both. No-op outside
+ *  a workspace. */
+function syncWorkspaceTabTitle(slotId: number): void {
+  const ws = getWorkspace(slotId);
+  const slot = findTab(slotId);
+  if (!ws || !slot || slot.kind !== "workspace") return;
+  const leaf = findLeafByTabId(ws.root, ws.focusedTabId);
+  if (!leaf) return;
+  const title = isPanelLeaf(leaf)
+    ? leaf.origin.title
+    : snapshots.get(leaf.tabId)?.title || leaf.origin.title;
+  if (title && slot.title !== title) slot.title = title;
+}
+
+/** Update a panel pane's title (its hover-pill label). Panels are
+ *  self-contained, so they report their own live title — the current source /
+ *  repo — via `@update:title`; this writes it onto the leaf and bumps the
+ *  workspace so the layout re-reads it. When the panel is the focused pane its
+ *  title also drives the tab-bar label. No-op if unchanged or not a panel. */
+export function setPanelLeafTitle(leafId: number, title: string): void {
+  const slotId = workspaceOfLeaf(leafId);
+  if (slotId == null) return;
+  const ws = getWorkspace(slotId);
+  if (!ws) return;
+  const leaf = findLeafByTabId(ws.root, leafId);
+  if (!leaf || !leaf.origin.panel || leaf.origin.title === title) return;
+  leaf.origin.title = title;
+  setWorkspace(slotId, ws);
+  if (ws.focusedTabId === leafId) syncWorkspaceTabTitle(slotId);
+}
+
+/** Persist a panel pane's current folder back onto its leaf seed. Panels keep
+ *  their working folder in component state; without this the picked folder is
+ *  lost when the leaf is detached/re-tiled and the panel re-mounts from its
+ *  (stale) original seed. Writes straight onto the leaf's `PanelDesc` — no
+ *  reflow, since panels read `seedPath` only on mount. No-op if unchanged or
+ *  not a panel. */
+export function setPanelLeafSeedPath(leafId: number, seedPath: string): void {
+  const slotId = workspaceOfLeaf(leafId);
+  if (slotId == null) return;
+  const ws = getWorkspace(slotId);
+  if (!ws) return;
+  const leaf = findLeafByTabId(ws.root, leafId);
+  if (!leaf || !leaf.origin.panel || leaf.origin.panel.seedPath === seedPath)
+    return;
+  leaf.origin.panel.seedPath = seedPath;
+}
+
 /** Terminal leaves of a workspace (`{ id, title, focused }`), for the files
  *  panel's cd / insert-path target submenu. Read inside a computed that also
  *  touches `workspaceTick` for reactivity to pane add/remove. */
@@ -710,15 +800,33 @@ export function openPanelPane(
 }
 
 /** Open a panel seeded from a terminal pane (pill buttons, Cmd/Ctrl+B / +G).
- *  The panel is independent: a files panel always opens on **local** files
- *  (the user picks a host inside it), seeded to the terminal's cwd when that
- *  terminal is local; a git panel seeds its folder from the cwd too. SSH cwd
- *  isn't known here, so SSH panes just open local/home. */
+ *  The panel is independent (the user can switch source/folder inside it), but
+ *  it opens seeded to its originating terminal: a files panel on an SSH pane
+ *  seeds straight to that host's SFTP; otherwise it opens on **local** files
+ *  seeded to the terminal's cwd. A git panel seeds its folder from a local
+ *  cwd; SSH cwd isn't known here, so SSH git panes just open local/home. */
 export async function openPanelFromTerminal(
   kind: PanelKind,
   terminalTabId: number,
 ): Promise<void> {
   const desc: PanelDesc = { kind, seedTargetTabId: terminalTabId };
+  // If the originating pane is an SSH session, open the files browser straight
+  // on that server's SFTP rather than local files. Every host is SFTP-capable —
+  // `disableSftp` ("Shell only") only defers the subsystem to first browse and
+  // suppresses *auto*-opening a panel; an explicit button press still wants the
+  // remote browser, so it isn't gated here.
+  const slotId = workspaceOfLeaf(terminalTabId);
+  const ws = slotId != null ? getWorkspace(slotId) : null;
+  const leaf = ws ? findLeafByTabId(ws.root, terminalTabId) : null;
+  if (
+    kind === "files" &&
+    leaf?.origin.kind === "ssh" &&
+    leaf.origin.hostId != null
+  ) {
+    desc.seedHostId = leaf.origin.hostId;
+    openPanelPane(kind, terminalTabId, desc);
+    return;
+  }
   // Local terminal cwd (pid→cwd lookup; null for SSH — the panel then falls
   // back to its remembered dir / home).
   const cwd = await terminalCwd(terminalTabId).catch(() => null);

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import {
   ChevronLeft,
@@ -44,7 +44,11 @@ const props = withDefaults(
   }>(),
   { canClose: true, paneId: null, seedPath: null },
 );
-const emit = defineEmits<{ close: [] }>();
+const emit = defineEmits<{
+  close: [];
+  "update:title": [string];
+  "update:seedPath": [string];
+}>();
 
 // Focus a freshly-mounted inline input (same directive as the browsers).
 const vFocus = {
@@ -72,6 +76,13 @@ const logExpanded = computed({
 // is chosen explicitly: seeded once on mount (from the terminal pill, else
 // the home directory) and changed only via the in-panel folder picker.
 const dir = ref<string | null>(null);
+
+// Persist the chosen folder back onto the panel leaf so a detach / re-tile
+// (which re-mounts this component) re-seeds from it rather than the stale
+// original seed.
+watch(dir, (d) => {
+  if (d) emit("update:seedPath", d);
+});
 
 async function initDir(): Promise<void> {
   dir.value = props.seedPath || (await localHomeDir().catch(() => null));
@@ -209,6 +220,20 @@ function onPickBranch(name: string): void {
   if (name === currentBranch.value) return;
   void mutate(() => gitSwitchBranch(root.value, name));
 }
+
+// Report the pane title: "<repo folder> · <branch>" once a repo resolves,
+// "Git" otherwise. The panel walks up to the repo root, so this tracks the
+// actual repository even when the picked folder is a subdirectory.
+const repoName = computed(() => {
+  const parts = root.value.split(/[/\\]/).filter(Boolean);
+  return parts[parts.length - 1] ?? "";
+});
+const paneTitle = computed(() => {
+  if (state.value !== "repo") return "Git";
+  const name = repoName.value || "Git";
+  return repo.value?.branch ? `${name} · ${repo.value.branch}` : name;
+});
+watch(paneTitle, (t) => emit("update:title", t), { immediate: true });
 
 const newBranchOpen = ref(false);
 const newBranchName = ref("");

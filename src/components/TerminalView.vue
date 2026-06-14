@@ -45,6 +45,8 @@ import {
   focusWorkspacePane,
   moveWorkspaceLeaf,
   openPanelFromTerminal,
+  setPanelLeafTitle,
+  setPanelLeafSeedPath,
   useTabs,
 } from "../state/tabs";
 import { requestClosePane } from "../state/closeGuard";
@@ -494,6 +496,8 @@ watch(theme, (next) => {
         class="panel-pane-body"
         v-bind="PANEL_VIEWS[p.kind].props(p)"
         @close="onPaneClose(p)"
+        @update:title="setPanelLeafTitle(p.tabId, $event)"
+        @update:seedPath="setPanelLeafSeedPath(p.tabId, $event)"
       />
       <PaneTitlebar :title="p.title" draggable @bardown="onPaneBarDown(p, $event)">
         <template #actions>

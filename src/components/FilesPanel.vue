@@ -44,7 +44,7 @@ const props = defineProps<{
    *  left border, the panel isn't docked to anything. */
   hideClose?: boolean;
 }>();
-const emit = defineEmits<{ close: [] }>();
+const emit = defineEmits<{ close: []; "update:title": [string] }>();
 
 // ---- cd / insert-path target terminals -------------------------------------
 const terminals = computed(() => {
@@ -134,6 +134,15 @@ watch(
   },
   { immediate: true },
 );
+
+// Report the pane title: the current source (local, or the host's label).
+// Falls back to "Remote files" until the host list resolves a label.
+const paneTitle = computed(() => {
+  const s = source.value;
+  if (s === "local") return "Local files";
+  return hosts.value.find((h) => h.id === s)?.label ?? "Remote files";
+});
+watch(paneTitle, (t) => emit("update:title", t), { immediate: true });
 
 // Repair the source when its host is deleted (e.g. removed in the host
 // manager). Skipped until hosts have loaded so a freshly-seeded host isn't
