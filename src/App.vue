@@ -82,7 +82,9 @@ import {
   windowCloseMessage,
 } from "./state/closeGuard";
 import { notify, notifyBell } from "./state/notifications";
+import { openCommandPalette, paletteOpen } from "./state/commandPalette";
 import { showToast } from "./state/toasts";
+import CommandPalette from "./components/CommandPalette.vue";
 import HomeView from "./components/HomeView.vue";
 import HostKeyFirstConnectModal from "./components/HostKeyFirstConnectModal.vue";
 import HostKeyMismatchModal from "./components/HostKeyMismatchModal.vue";
@@ -399,6 +401,7 @@ async function splitActive(dir: "h" | "v"): Promise<void> {
 // canvas isn't, so the global paste handler never sees the paste chord
 // (Cmd+V / Ctrl+Shift+V) via keyboard — we drive it from this table instead.
 const shortcuts: Shortcut[] = [
+  { mod: "meta", match: (k) => k === "k" || k === "K", run: () => openCommandPalette() },
   { mod: "meta", match: (k) => k === "t", run: () => void spawnNewTab() },
   { mod: "meta", match: (k) => k === "n", run: () => void openNewWindow() },
   {
@@ -483,6 +486,10 @@ const shortcuts: Shortcut[] = [
 ];
 
 function onKeyDown(e: KeyboardEvent) {
+  // The command palette is a focused overlay that drives its own keyboard
+  // (typing, arrows, Enter, Esc, Cmd+K to close) — never let App shortcuts or
+  // PTY forwarding fire underneath it.
+  if (paletteOpen.value) return;
   // While the welcome overlay is up, keep keystrokes and app shortcuts away
   // from the terminal booting underneath. No preventDefault — the welcome's
   // own inputs (backup passphrase) must keep native typing.
@@ -554,6 +561,7 @@ function onKeyDown(e: KeyboardEvent) {
 }
 
 function onKeyUp(e: KeyboardEvent) {
+  if (paletteOpen.value) return;
   if (welcomeOpen.value) return;
   if (focusedEditable(e.target) != null) return;
   if (e.metaKey || isPrimaryMod(e)) return;
@@ -832,4 +840,5 @@ onBeforeUnmount(() => {
   <UpdateModal />
   <Toasts />
   <FloatingMenu />
+  <CommandPalette />
 </template>
