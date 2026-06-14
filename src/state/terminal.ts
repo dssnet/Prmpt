@@ -31,6 +31,7 @@ import {
 import {
   findLeafByTabId,
   getWorkspace,
+  isPanelLeaf,
   layout as layoutWorkspace,
   markTabConsumed,
   setRatio,
@@ -40,8 +41,7 @@ import {
   type PaneRect,
   type Workspace,
 } from "./workspace";
-import { isSftpVisible, setSftpDockRatio, sftpDockRatio } from "./sftp";
-import { isLocalVisible } from "./localBrowser";
+import type { PanelKind } from "./panels";
 import {
   clearLinkHover,
   decoratePayloadForHover,
@@ -85,38 +85,25 @@ let wsPanes: PaneRect[] = [];
 let wsDividers: DividerRect[] = [];
 let wsSplitBoxes = new Map<string, { x: number; y: number; w: number; h: number }>();
 
-/** A docked SFTP browser carved out of the bottom of an SSH pane. The rect is
- *  host/canvas-relative CSS px; `paneTop`/`paneHeight` are the full pane extent
- *  (before the carve) so the resize handle can recompute the ratio. */
-export interface SftpDock {
+/** A panel pane (file browser, git, …) tiled into the active workspace. The
+ *  rect is host/canvas-relative CSS px; `tabId` is the panel leaf's negative
+ *  frontend id (stable identity for keys, drag-rearrange, close). */
+export interface PanelPane {
   tabId: number;
-  hostLabel: string;
+  kind: PanelKind;
+  title: string;
+  /** files: SSH connection the left column was seeded with. */
+  seedSshTabId?: number;
+  /** Initial folder seed (local path). */
+  seedPath?: string;
+  /** files: initial cd / insert-path target terminal. */
+  seedTargetTabId?: number;
   x: number;
   y: number;
   w: number;
   h: number;
-  paneTop: number;
-  paneHeight: number;
 }
-let wsSftpDocks: SftpDock[] = [];
-
-/** A docked local file browser carved out of the bottom of a local terminal
- *  pane. Same geometry as [`SftpDock`]; `label` is the pane title shown in the
- *  docked browser's header. */
-export interface LocalDock {
-  tabId: number;
-  label: string;
-  x: number;
-  y: number;
-  w: number;
-  h: number;
-  paneTop: number;
-  paneHeight: number;
-}
-let wsLocalDocks: LocalDock[] = [];
-// Below these the pane is too small to usefully split, so it stays all-terminal.
-const MIN_DOCK_H = 80;
-const MIN_TERM_H = 60;
+let wsPanelPanes: PanelPane[] = [];
 // Inner padding (CSS px) between a workspace pane's edge and its cell grid,
 // so the rounded-corner mask (--pane-radius) never clips edge glyphs. Must
 // stay ≥ radius·(1 − 1/√2) ≈ 3.6px for the default 12px radius.
@@ -182,65 +169,33 @@ export function computeDims(): { cols: number; rows: number; w: number; h: numbe
   return { cols, rows, w: rect.width, h: rect.height };
 }
 
-/** If `tabId` is an SSH pane that should carry a docked file browser, return
- *  its host label; otherwise null. */
-function paneSftpLabel(ws: Workspace, tabId: number): string | null {
-  const leaf = findLeafByTabId(ws.root, tabId);
-  if (!leaf || leaf.origin.kind !== "ssh" || leaf.origin.disableSftp) return null;
-  if (!isSftpVisible(tabId)) return null;
-  return leaf.origin.hostLabel || leaf.origin.title;
-}
-
-/** If `tabId` is a local terminal pane whose docked file browser is toggled
- *  on, return its header label; otherwise null. */
-function paneLocalLabel(ws: Workspace, tabId: number): string | null {
-  const leaf = findLeafByTabId(ws.root, tabId);
-  if (!leaf || leaf.origin.kind !== "terminal") return null;
-  if (!isLocalVisible(tabId)) return null;
-  return snapshotFor(tabId)?.title || leaf.origin.title || "Terminal";
-}
-
-/** Lay out the active workspace into the full host rect and tell each pane's
- *  backend tab its new cols/rows. SSH panes reserve a bottom strip for their
- *  docked SFTP browser (the terminal gets the rest). Caches the terminal rects
- *  (used by draw/hit/resize) and the dock rects (DOM overlays). */
+/** Lay out the active workspace into the full host rect: terminal leaves get
+ *  canvas rects (and their backend tabs new cols/rows); panel leaves get DOM
+ *  overlay rects. Caches both for the draw path / hit-testing / overlays. */
 function reflowWorkspaceLayout(ws: Workspace, w: number, h: number): void {
   const { panes, dividers, splitBoxes } = layoutWorkspace(ws.root, 0, 0, w, h);
   wsDividers = dividers;
   wsSplitBoxes = splitBoxes;
 
   const termPanes: PaneRect[] = [];
-  const docks: SftpDock[] = [];
-  const localDocks: LocalDock[] = [];
+  const panelPanes: PanelPane[] = [];
   for (const pane of panes) {
-    // A pane is either SSH (→ SFTP dock) or local terminal (→ local dock).
-    // Both share one dock-height ratio so resizing any dock resizes all of them.
-    const sftpLabel = paneSftpLabel(ws, pane.tabId);
-    const localLabel = sftpLabel ? null : paneLocalLabel(ws, pane.tabId);
-    const ratio = sftpDockRatio();
-    const hasDock = sftpLabel != null || localLabel != null;
-    const dockH = hasDock ? Math.round(pane.h * ratio) : 0;
-    const termH = pane.h - dockH - (hasDock ? GUTTER : 0);
-    if (hasDock && dockH >= MIN_DOCK_H && termH >= MIN_TERM_H) {
-      termPanes.push({ tabId: pane.tabId, x: pane.x, y: pane.y, w: pane.w, h: termH });
-      const geom = {
-        tabId: pane.tabId,
-        x: pane.x,
-        y: pane.y + termH + GUTTER,
-        w: pane.w,
-        h: dockH,
-        paneTop: pane.y,
-        paneHeight: pane.h,
-      };
-      if (sftpLabel != null) docks.push({ ...geom, hostLabel: sftpLabel });
-      else localDocks.push({ ...geom, label: localLabel! });
+    const leaf = findLeafByTabId(ws.root, pane.tabId);
+    if (leaf && isPanelLeaf(leaf) && leaf.origin.panel) {
+      panelPanes.push({
+        ...pane,
+        kind: leaf.origin.panel.kind,
+        title: leaf.origin.title,
+        seedSshTabId: leaf.origin.panel.seedSshTabId,
+        seedPath: leaf.origin.panel.seedPath,
+        seedTargetTabId: leaf.origin.panel.seedTargetTabId,
+      });
     } else {
       termPanes.push(pane);
     }
   }
   wsPanes = termPanes;
-  wsSftpDocks = docks;
-  wsLocalDocks = localDocks;
+  wsPanelPanes = panelPanes;
   layoutVersion.value++;
   for (const pane of wsPanes) {
     // The grid only gets the pane minus its inner padding (see PANE_PAD).
@@ -256,41 +211,8 @@ function reflowWorkspaceLayout(ws: Workspace, w: number, h: number): void {
   }
 }
 
-export function getActiveSftpDocks(): SftpDock[] {
-  return activeWs() ? wsSftpDocks : [];
-}
-
-export function getActiveLocalDocks(): LocalDock[] {
-  return activeWs() ? wsLocalDocks : [];
-}
-
-/** Commit a dock resize-handle drag: pointer Y → new dock-height ratio. */
-export function commitSftpDockResize(dock: SftpDock, clientY: number): void {
-  commitDockResize(dock, clientY, setSftpDockRatio);
-}
-
-/** Same as [`commitSftpDockResize`] for a local pane's docked browser. Local
- *  and SFTP docks share one ratio, so this drives the same setter. */
-export function commitLocalDockResize(dock: LocalDock, clientY: number): void {
-  commitDockResize(dock, clientY, setSftpDockRatio);
-}
-
-function commitDockResize(
-  dock: { paneTop: number; paneHeight: number },
-  clientY: number,
-  setRatio: (r: number) => void,
-): void {
-  if (!canvasEl) return;
-  const r = canvasEl.getBoundingClientRect();
-  const localY = clientY - r.top;
-  const newDockH = dock.paneTop + dock.paneHeight - localY;
-  setRatio(newDockH / Math.max(1, dock.paneHeight));
-  const a = activeWs();
-  if (a) {
-    const dims = computeDims();
-    reflowWorkspaceLayout(a.ws, dims.w, dims.h);
-    drawNow();
-  }
+export function getActivePanelPanes(): PanelPane[] {
+  return activeWs() ? wsPanelPanes : [];
 }
 
 export function getActiveDividers(): DividerRect[] {
@@ -300,34 +222,23 @@ export function getActiveDividers(): DividerRect[] {
 export interface PaneOverlay extends PaneRect {
   title: string;
   focused: boolean;
-  /** SSH pane that can carry a docked file browser (drives the pane-bar toggle). */
-  sftpDockable: boolean;
-  /** Whether its dock is currently shown. */
-  sftpVisible: boolean;
-  /** Local terminal pane that can carry a docked local file browser. */
-  localDockable: boolean;
-  /** Whether its local dock is currently shown. */
-  localVisible: boolean;
+  /** Local terminal pane (the git pill button only shows for these). */
+  isLocalTerminal: boolean;
 }
 
-/** Pane rects + titles for the active workspace, for DOM overlays (hover bar,
- *  close, move). Empty when the active tab isn't a workspace. */
+/** Terminal pane rects + titles for the active workspace, for DOM overlays
+ *  (hover bar, close, move). Empty when the active tab isn't a workspace.
+ *  Panel panes are listed separately via [`getActivePanelPanes`]. */
 export function getActivePanes(): PaneOverlay[] {
   const a = activeWs();
   if (!a) return [];
   return wsPanes.map((p) => {
     const leaf = findLeafByTabId(a.ws.root, p.tabId);
-    const dockable =
-      !!leaf && leaf.origin.kind === "ssh" && !leaf.origin.disableSftp;
-    const localDockable = !!leaf && leaf.origin.kind === "terminal";
     return {
       ...p,
       title: snapshotFor(p.tabId)?.title || "Terminal",
       focused: p.tabId === a.ws.focusedTabId,
-      sftpDockable: dockable,
-      sftpVisible: dockable && isSftpVisible(p.tabId),
-      localDockable,
-      localVisible: localDockable && isLocalVisible(p.tabId),
+      isLocalTerminal: !!leaf && leaf.origin.kind === "terminal",
     };
   });
 }
@@ -685,6 +596,17 @@ function paneAt(x: number, y: number): PaneRect | null {
   return null;
 }
 
+/** Panel pane under a host-relative point (drop targets only — panel panes
+ *  never take terminal focus or selection). */
+function panelPaneAt(x: number, y: number): PanelPane | null {
+  for (const pane of wsPanelPanes) {
+    if (x >= pane.x && x < pane.x + pane.w && y >= pane.y && y < pane.y + pane.h) {
+      return pane;
+    }
+  }
+  return null;
+}
+
 /** Cell under the pointer, resolved against the pane UNDER the pointer —
  *  unlike `cellFromEvent`, which maps into the *focused* pane (correct for
  *  selection, wrong for hover). Null outside any pane or without a snapshot. */
@@ -990,7 +912,8 @@ export function resolveDropAt(
 
   const a = activeWs();
   if (a) {
-    const pane = paneAt(lp.x, lp.y);
+    // Terminal panes and panel panes are both valid split targets.
+    const pane = paneAt(lp.x, lp.y) ?? panelPaneAt(lp.x, lp.y);
     if (!pane) return null;
     rect = { x: pane.x, y: pane.y, w: pane.w, h: pane.h };
     slotId = a.slotId;

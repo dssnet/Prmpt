@@ -32,6 +32,12 @@ import {
 } from "../ipc";
 import { popupMenu } from "../contextMenu";
 import {
+  openFloatingMenu,
+  type FloatingMenuEntry,
+  type FloatingMenuItem,
+} from "../state/floatingMenu";
+import { clearHighlightedPane, setHighlightedPane } from "../state/paneHighlight";
+import {
   deliverSftpDrop,
   startMarqueeSelect,
   type MarqueeRect,
@@ -59,23 +65,36 @@ import {
   toggleSize,
 } from "../state/uiPrefs";
 import { columnWidth, startColumnResize } from "../state/fileColumns";
-import { browserLocations, localBrowserCwd } from "../state/filesPanel";
+import { browserLocations } from "../state/filesPanel";
 import { fitCrumbs } from "../lib/crumbs";
 import { ConfirmDialog, DropdownMenu, Input } from "./ui";
 
 const props = withDefaults(
   defineProps<{
-    /** Terminal tab to target for `cd` / insert-path (active tab or pane). */
-    targetTabId: number;
+    /** Terminals offered as cd / insert-path targets in the row context menu
+     *  (one direct item if a single terminal, a submenu otherwise). */
+    targets?: { id: number; title: string; focused?: boolean }[];
+    /** Implicit target for a single-click path insert (the panel's seed /
+     *  focused terminal); null when there is none. */
+    defaultTargetTabId?: number | null;
     /** Picker entries (panel mode): "local" + "sftp:<id>" values, see FilesPanel. */
     sources?: { value: string; label: string }[];
     /** The picker entry this column currently shows. */
     sourceValue?: string;
+    /** Initial folder to open on first mount (overrides the remembered cwd) —
+     *  set when a panel is seeded from a terminal's cwd. */
+    seedPath?: string | null;
     canClose?: boolean;
     /** Shown in the header instead of the generic title (docked mode). */
     fixedLabel?: string;
   }>(),
-  { canClose: false, sources: () => [] },
+  {
+    canClose: false,
+    sources: () => [],
+    targets: () => [],
+    defaultTargetTabId: null,
+    seedPath: null,
+  },
 );
 const emit = defineEmits<{ "update:source": [value: string]; close: [] }>();
 
@@ -117,10 +136,6 @@ function closeFilter(): void {
   filterOpen.value = false;
 }
 watch(cwd, closeFilter);
-// Feed the git panel's repo-follow: see `localBrowserCwd` in state/filesPanel.
-watch(cwd, (v) => {
-  if (v) localBrowserCwd.value = v;
-});
 
 // Hide dot-prefixed (hidden) entries unless the shared toggle is on; then
 // apply the name filter.
@@ -309,6 +324,14 @@ function saveLocation(): void {
 async function init(): Promise<void> {
   backStack.value = [];
   forwardStack.value = [];
+  // A panel seeded from a terminal's cwd opens there directly, ignoring the
+  // shared remembered location (and falling back to it / home if the seed no
+  // longer loads).
+  if (props.seedPath) {
+    await load(props.seedPath);
+    if (cwd.value === props.seedPath) return;
+    error.value = null;
+  }
   // Resume the last visited directory; if it no longer loads (deleted,
   // permissions…) forget it and fall back to the home directory.
   const mem = browserLocations.get("local");
@@ -367,7 +390,7 @@ function navigate(e: LocalEntry): void {
  *  still inserts its path into the terminal. */
 function onNameClick(ev: MouseEvent, e: LocalEntry): void {
   if (ev.shiftKey || ev.metaKey || ev.ctrlKey) return;
-  if (!e.is_dir) insertPath(e);
+  if (!e.is_dir) insertPath(e, props.defaultTargetTabId);
 }
 function goUp(): void {
   if (parent.value) void visit(parent.value);
@@ -381,14 +404,15 @@ function shellQuote(p: string): string {
   if (IS_WIN) return `"${p.replace(/"/g, '\\"')}"`;
   return `'${p.replace(/'/g, "'\\''")}'`;
 }
-function sendToTerminal(text: string): void {
-  void writeInput(props.targetTabId, new TextEncoder().encode(text));
+function sendToTerminal(text: string, tabId: number | null): void {
+  if (tabId == null) return;
+  void writeInput(tabId, new TextEncoder().encode(text));
 }
-function cdInto(e: LocalEntry): void {
-  sendToTerminal(`cd ${shellQuote(e.path)}\n`);
+function cdInto(e: LocalEntry, tabId: number | null): void {
+  sendToTerminal(`cd ${shellQuote(e.path)}\n`, tabId);
 }
-function insertPath(e: LocalEntry): void {
-  sendToTerminal(shellQuote(e.path));
+function insertPath(e: LocalEntry, tabId: number | null): void {
+  sendToTerminal(shellQuote(e.path), tabId);
 }
 
 // ---- OS integration ----
@@ -535,9 +559,11 @@ function onRowMouseDown(ev: MouseEvent, e: LocalEntry): void {
     selected.value.has(e.path) && selected.value.size > 1
       ? visibleEntries.value.filter((x) => selected.value.has(x.path))
       : [e];
+  // srcTabId only disambiguates SFTP sources; local items match by kind, so
+  // a placeholder is fine when no terminal is targeted.
   const items: SftpDragItem[] = group.map((x) => ({
     source: "local",
-    srcTabId: props.targetTabId,
+    srcTabId: props.defaultTargetTabId ?? -1,
     path: x.path,
     name: x.name,
     isDir: x.is_dir,
@@ -583,7 +609,7 @@ const myTransfers = computed(() => transfers.value.filter((t) => t.key === "loca
 
 async function downloadInto(d: SftpDragItem, dstDir: string): Promise<void> {
   if (d.source !== "sftp") return;
-  const id = trackTransfer("local", props.targetTabId, d.name, "down");
+  const id = trackTransfer("local", props.defaultTargetTabId ?? -1, d.name, "down");
   try {
     await sftpDownload(d.srcTabId, d.path, joinLocal(dstDir, d.name), id);
     refresh();
@@ -595,8 +621,12 @@ async function downloadInto(d: SftpDragItem, dstDir: string): Promise<void> {
 const dropHandler = (items: SftpDragItem[], dstDir: string) => {
   for (const item of items) void downloadInto(item, dstDir);
 };
+// Drop-registry id for this column (also stamped on the DOM via
+// data-sftp-tab). Local columns match drops by kind, so the value only has
+// to round-trip the registry — -1 stands in when no terminal is targeted.
+const dropId = computed(() => props.defaultTargetTabId ?? -1);
 watch(
-  () => props.targetTabId,
+  dropId,
   (next, prev) => {
     if (prev != null) unregisterSftpTarget("local", prev, dropHandler);
     registerSftpTarget("local", next, dropHandler);
@@ -627,7 +657,31 @@ function openToolbarMenu(): void {
     },
   ]);
 }
-function openRowMenu(e: LocalEntry): void {
+/** A "cd here" / "insert path" entry: a direct action when one terminal is
+ *  available, a per-terminal submenu (hovering an entry highlights that pane)
+ *  when several are, or null when there are none to target. */
+function terminalMenuItem(
+  text: string,
+  send: (tabId: number) => void,
+): FloatingMenuEntry {
+  const terms = props.targets;
+  if (terms.length === 0) return null;
+  if (terms.length === 1) {
+    const id = terms[0].id;
+    return { text, action: () => send(id) };
+  }
+  return {
+    text,
+    submenu: terms.map((t) => ({
+      text: t.title,
+      action: () => send(t.id),
+      onHover: () => setHighlightedPane(t.id),
+      onLeave: () => clearHighlightedPane(),
+    })),
+  };
+}
+
+function openRowMenu(ev: MouseEvent, e: LocalEntry): void {
   // Right-clicking outside the current selection re-targets it to this row
   // (Finder-style); inside it, the menu acts on the whole selection.
   if (!selected.value.has(e.path)) {
@@ -638,24 +692,31 @@ function openRowMenu(e: LocalEntry): void {
     selected.value.size > 1
       ? visibleEntries.value.filter((x) => selected.value.has(x.path))
       : [e];
-  void popupMenu([
+  const cdItem = e.is_dir
+    ? terminalMenuItem("cd here in terminal", (id) => cdInto(e, id))
+    : null;
+  const insertItem = terminalMenuItem("Insert path into terminal", (id) =>
+    insertPath(e, id),
+  );
+  const items: FloatingMenuEntry[] = [
     { text: "Open", action: () => void openInOs(e) },
     { text: "Reveal in file manager", action: () => void reveal(e) },
-    null,
-    ...(e.is_dir
-      ? [{ text: "cd here in terminal", action: () => cdInto(e) }]
-      : []),
-    { text: "Insert path into terminal", action: () => insertPath(e) },
+  ];
+  const termItems = [cdItem, insertItem].filter(Boolean) as FloatingMenuItem[];
+  if (termItems.length) items.push(null, ...termItems);
+  items.push(
     null,
     { text: "Rename", action: () => startRename(e) },
     null,
     {
       text: group.length > 1 ? `Delete ${group.length} items` : "Delete",
+      danger: true,
       action: () => {
         pendingDelete.value = group;
       },
     },
-  ]);
+  );
+  openFloatingMenu(ev.clientX, ev.clientY, items);
 }
 
 onMounted(() => void init());
@@ -663,7 +724,7 @@ onMounted(() => void init());
 onBeforeUnmount(() => {
   saveLocation();
   crumbRo.disconnect();
-  unregisterSftpTarget("local", props.targetTabId, dropHandler);
+  unregisterSftpTarget("local", dropId.value, dropHandler);
 });
 </script>
 
@@ -793,11 +854,11 @@ onBeforeUnmount(() => {
       class="relative flex-1 min-h-0 overflow-y-auto pb-3"
       :class="{
         'ring-1 ring-inset ring-accent/50':
-          sftpDropHint && sftpDropHint.kind === 'local' && sftpDropHint.tabId === targetTabId && sftpDropHint.dir === cwd,
+          sftpDropHint && sftpDropHint.kind === 'local' && sftpDropHint.tabId === dropId && sftpDropHint.dir === cwd,
       }"
       data-sftp-list
       data-sftp-kind="local"
-      :data-sftp-tab="targetTabId"
+      :data-sftp-tab="dropId"
       :data-sftp-cwd="cwd"
       @mousedown="onListMouseDown"
     >
@@ -879,16 +940,16 @@ onBeforeUnmount(() => {
             class="group cursor-default select-none hover:bg-surface-2"
             :class="{
               'bg-accent/15 ring-1 ring-accent/40':
-                e.is_dir && sftpDropHint && sftpDropHint.kind === 'local' && sftpDropHint.tabId === targetTabId && sftpDropHint.dir === e.path,
+                e.is_dir && sftpDropHint && sftpDropHint.kind === 'local' && sftpDropHint.tabId === dropId && sftpDropHint.dir === e.path,
               'bg-accent/10': selected.has(e.path),
             }"
             data-sftp-kind="local"
-            :data-sftp-tab="targetTabId"
+            :data-sftp-tab="dropId"
             :data-sftp-folder="e.is_dir ? e.path : undefined"
             :data-marquee-path="e.path"
             @mousedown="onRowMouseDown($event, e)"
             @dblclick="e.is_dir ? navigate(e) : openInOs(e)"
-            @contextmenu.prevent.stop="openRowMenu(e)"
+            @contextmenu.prevent.stop="openRowMenu($event, e)"
           >
             <td class="pl-2.5 pr-1 py-1">
               <div class="flex items-center gap-2 min-w-0">
@@ -931,7 +992,7 @@ onBeforeUnmount(() => {
                 data-local-action
                 class="flex justify-end opacity-0 group-hover:opacity-100"
               >
-                <button type="button" class="icon-btn" title="Actions" @click.stop="openRowMenu(e)">
+                <button type="button" class="icon-btn" title="Actions" @click.stop="openRowMenu($event, e)">
                   <MoreHorizontal :size="13" />
                 </button>
               </span>

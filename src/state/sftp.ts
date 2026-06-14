@@ -1,7 +1,7 @@
 /**
- * SFTP panel visibility. The panel auto-opens for SSH tabs; a per-tab toggle
- * can hide it to reclaim full terminal width. The last-used choice is the
- * default for newly opened SSH tabs (persisted across restarts).
+ * Shared file-browser drag/selection machinery (used by the SFTP and local
+ * browsers), plus the remembered "auto-open the file browser for new SSH
+ * tabs" default.
  */
 import { ref } from "vue";
 
@@ -261,46 +261,18 @@ export function startMarqueeSelect(
   window.addEventListener("mouseup", up);
 }
 
-const SHOWN_KEY = "prmpt.sftpPanelShown";
+// Whether a new SSH tab auto-opens a files panel pane. Follows the user's
+// last explicit choice (opening/closing a files panel in an SSH context),
+// persisted across restarts. Key name predates the panel system.
+const AUTO_OPEN_KEY = "prmpt.sftpPanelShown";
 
-// Global default applied to any tab the user hasn't explicitly toggled.
-const defaultShown = ref(localStorage.getItem(SHOWN_KEY) !== "0");
-// Per-tab overrides (tab ids are ephemeral, so this isn't persisted).
-const overrides = ref<Record<number, boolean>>({});
+const autoOpen = ref(localStorage.getItem(AUTO_OPEN_KEY) !== "0");
 
-export function isSftpVisible(tabId: number): boolean {
-  return overrides.value[tabId] ?? defaultShown.value;
+export function sftpAutoOpen(): boolean {
+  return autoOpen.value;
 }
 
-export function toggleSftpPanel(tabId: number): void {
-  const next = !isSftpVisible(tabId);
-  overrides.value = { ...overrides.value, [tabId]: next };
-  defaultShown.value = next;
-  localStorage.setItem(SHOWN_KEY, next ? "1" : "0");
-}
-
-/** Drop a closed tab's override so the map doesn't grow unbounded. */
-export function forgetSftpPanel(tabId: number): void {
-  if (tabId in overrides.value) {
-    const next = { ...overrides.value };
-    delete next[tabId];
-    overrides.value = next;
-  }
-}
-
-// Fraction of an SSH workspace pane's height given to its docked SFTP browser
-// (the rest is the terminal). Shared across panes, persisted, drag-adjustable.
-const DOCK_RATIO_KEY = "prmpt.sftpDockRatio";
-const savedDockRatio = parseFloat(localStorage.getItem(DOCK_RATIO_KEY) ?? "");
-const dockRatio = ref(
-  Number.isFinite(savedDockRatio) ? Math.min(0.75, Math.max(0.15, savedDockRatio)) : 0.4,
-);
-
-export function sftpDockRatio(): number {
-  return dockRatio.value;
-}
-export function setSftpDockRatio(r: number): void {
-  const clamped = Math.min(0.75, Math.max(0.15, r));
-  dockRatio.value = clamped;
-  localStorage.setItem(DOCK_RATIO_KEY, clamped.toFixed(3));
+export function setSftpAutoOpen(v: boolean): void {
+  autoOpen.value = v;
+  localStorage.setItem(AUTO_OPEN_KEY, v ? "1" : "0");
 }

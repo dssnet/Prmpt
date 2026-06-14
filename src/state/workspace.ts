@@ -1,17 +1,22 @@
 import { ref } from "vue";
 
-// A workspace is a recursive (tmux-like) binary tiling tree. Each leaf is a
-// backend tab (its own PTY/thread/render stream); each split divides its area
-// horizontally ("h" → side-by-side, vertical divider) or vertically ("v" →
-// stacked, horizontal divider). A workspace occupies one tab-bar slot whose
-// TabState.id is reused as the registry key.
+import type { PanelDesc } from "./panels";
+
+// A workspace is a recursive (tmux-like) binary tiling tree. Each leaf is
+// either a backend tab (its own PTY/thread/render stream) or a frontend
+// panel (file browser, git, … — see state/panels.ts); each split divides its
+// area horizontally ("h" → side-by-side, vertical divider) or vertically
+// ("v" → stacked, horizontal divider). A workspace occupies one tab-bar slot
+// whose TabState.id is reused as the registry key.
 
 export type SplitDir = "h" | "v";
 
 /** Snapshot of the originating tab so a collapse (workspace → single pane)
- *  can restore the surviving leaf to a normal tab without losing ssh info. */
+ *  can restore the surviving leaf to a normal tab without losing ssh info.
+ *  Panel leaves (kind "panel") have no originating tab — they exist only as
+ *  workspace panes and carry their view descriptor instead. */
 export interface TabOrigin {
-  kind: "terminal" | "ssh";
+  kind: "terminal" | "ssh" | "panel";
   title: string;
   hostLabel?: string;
   hostId?: number;
@@ -20,6 +25,17 @@ export interface TabOrigin {
   /** SSH panes only: SFTP-only host (no shell). Such tabs never actually
    *  join workspaces; carried for completeness when origins are copied. */
   disableSsh?: boolean;
+  /** Panel leaves only: what the pane shows. */
+  panel?: PanelDesc;
+}
+
+export function isPanelLeaf(leaf: LeafNode): boolean {
+  return leaf.origin.kind === "panel";
+}
+
+/** Leaves backed by a real PTY tab (terminal or ssh), i.e. not panels. */
+export function collectTerminalLeaves(node: WorkspaceNode): LeafNode[] {
+  return collectLeaves(node).filter((l) => !isPanelLeaf(l));
 }
 
 export interface LeafNode {
@@ -99,22 +115,24 @@ export function findLeafByTabId(
 }
 
 /** Replace the leaf for `targetTabId` with a split that also holds a new leaf
- *  for `newTabId`. `placeNewFirst` puts the new pane on the left/top. */
+ *  for `newTabId`. `placeNewFirst` puts the new pane on the left/top. `ratio`
+ *  is the fraction kept by the first child (default even split). */
 export function splitLeaf(
   root: WorkspaceNode,
   targetTabId: number,
   newLeaf: LeafNode,
   dir: SplitDir,
   placeNewFirst: boolean,
+  ratio = 0.5,
 ): WorkspaceNode {
   if (root.kind === "leaf") {
     if (root.tabId !== targetTabId) return root;
     return placeNewFirst
-      ? makeSplit(dir, newLeaf, root)
-      : makeSplit(dir, root, newLeaf);
+      ? makeSplit(dir, newLeaf, root, 1 - ratio)
+      : makeSplit(dir, root, newLeaf, ratio);
   }
-  const a = splitLeaf(root.a, targetTabId, newLeaf, dir, placeNewFirst);
-  const b = splitLeaf(root.b, targetTabId, newLeaf, dir, placeNewFirst);
+  const a = splitLeaf(root.a, targetTabId, newLeaf, dir, placeNewFirst, ratio);
+  const b = splitLeaf(root.b, targetTabId, newLeaf, dir, placeNewFirst, ratio);
   if (a === root.a && b === root.b) return root;
   return { ...root, a, b };
 }

@@ -1,37 +1,30 @@
 /**
- * Git-panel visibility + hoisted UI state. Mirrors `state/localBrowser.ts`:
- * the panel is opt-in per terminal tab (Cmd/Ctrl+G), with no shared default
- * that would leak one tab's toggle into the others.
+ * Git-panel UI state, hoisted out of GitPanel.vue so a tab switch (which
+ * unmounts the panel pane) doesn't eat a half-written commit message or
+ * collapse the log.
  *
- * The panel follows the local file browser's cwd (`localBrowserCwd` in
- * `state/filesPanel.ts`) to find the repo, so all tabs show the same repo —
- * only visibility is per-tab.
+ * Panels are self-contained now, so multiple git panels can coexist — state
+ * is keyed per panel instance (by the panel pane's stable identity), like the
+ * column store in `state/filesPanel.ts`. Session-only; pane ids are never
+ * reused, so entries for closed panes just sit unused.
+ *
+ * Panel visibility itself is not tracked here: the git view is a workspace
+ * panel pane (see `state/panels.ts`), opened via `openPanelPane("git", …)`.
  */
-import { ref } from "vue";
+import { ref, type Ref } from "vue";
 
-// Per-tab visibility (tab ids are ephemeral, so this isn't persisted).
-const overrides = ref<Record<number, boolean>>({});
-
-export function isGitVisible(tabId: number): boolean {
-  return overrides.value[tabId] ?? false;
+export interface GitPanelState {
+  commitDraft: Ref<string>;
+  logExpanded: Ref<boolean>;
 }
 
-export function toggleGitPanel(tabId: number): void {
-  overrides.value = { ...overrides.value, [tabId]: !isGitVisible(tabId) };
-}
+const stateByKey = new Map<string, GitPanelState>();
 
-/** Drop a closed tab's override so the map doesn't grow unbounded. */
-export function forgetGitPanel(tabId: number): void {
-  if (tabId in overrides.value) {
-    const next = { ...overrides.value };
-    delete next[tabId];
-    overrides.value = next;
+export function getGitPanelState(key: string): GitPanelState {
+  let s = stateByKey.get(key);
+  if (!s) {
+    s = { commitDraft: ref(""), logExpanded: ref(false) };
+    stateByKey.set(key, s);
   }
+  return s;
 }
-
-// Hoisted out of GitPanel.vue so a tab switch (which unmounts the panel)
-// doesn't eat a half-written commit message or collapse the log. One slot
-// each — there's one local repo context, like the "local" browser slot in
-// `state/filesPanel.ts`.
-export const commitDraft = ref("");
-export const logExpanded = ref(false);

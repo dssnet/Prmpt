@@ -17,6 +17,7 @@ import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { tabForegroundProcess } from "../ipc";
 import { confirmCloseRunning } from "./uiPrefs";
 import {
+  closePanelLeaf,
   closeTabAndForget,
   closeWorkspacePane,
   HOME_TAB_ID,
@@ -95,12 +96,17 @@ export async function requestCloseTab(t: TabState): Promise<void> {
 }
 
 /** Workspace pane X. Looks up the pane's origin itself; SSH panes close
- *  without confirmation, same as SSH tabs. */
+ *  without confirmation, same as SSH tabs. Panel panes (file browser, git, …)
+ *  are frontend-only views — close immediately, nothing can be "running". */
 export async function requestClosePane(tabId: number): Promise<void> {
+  const wsId = workspaceOfLeaf(tabId);
+  const ws = wsId !== undefined ? getWorkspace(wsId) : undefined;
+  const leaf = ws ? findLeafByTabId(ws.root, tabId) : null;
+  if (leaf?.origin.kind === "panel") {
+    if (wsId !== undefined) closePanelLeaf(wsId, tabId);
+    return;
+  }
   if (confirmCloseRunning.value) {
-    const wsId = workspaceOfLeaf(tabId);
-    const ws = wsId !== undefined ? getWorkspace(wsId) : undefined;
-    const leaf = ws ? findLeafByTabId(ws.root, tabId) : null;
     if (leaf?.origin.kind === "terminal") {
       const names = await runningNames([tabId]);
       if (names.length > 0) {
@@ -133,7 +139,8 @@ export async function windowCloseMessage(): Promise<string | null> {
       if (!ws) continue;
       for (const leaf of collectLeaves(ws.root)) {
         if (leaf.origin.kind === "terminal") localIds.push(leaf.tabId);
-        else sshCount++;
+        else if (leaf.origin.kind === "ssh") sshCount++;
+        // Panel leaves never block a close.
       }
     }
   }

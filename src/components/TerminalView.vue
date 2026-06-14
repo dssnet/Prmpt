@@ -1,16 +1,14 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
-import { GitBranch, PanelBottom, PanelRight, X } from "lucide-vue-next";
+import { computed, onBeforeUnmount, onMounted, ref, watch, type Component } from "vue";
+import { GitBranch, PanelRight, X } from "lucide-vue-next";
 
 import { wheelScroll, showContextMenu, type Config } from "../ipc";
 import { setContextLink } from "../state/links";
-import { isSftpVisible, sftpDragGhost, toggleSftpPanel } from "../state/sftp";
-import { isLocalVisible, toggleLocalBrowser } from "../state/localBrowser";
-import { isGitVisible, toggleGitPanel } from "../state/gitPanel";
+import { sftpDragGhost } from "../state/sftp";
+import { highlightedPaneId } from "../state/paneHighlight";
+import { isPanelLeafId, type PanelKind } from "../state/panels";
 import FilesPanel from "./FilesPanel.vue";
 import GitPanel from "./GitPanel.vue";
-import LocalBrowser from "./LocalBrowser.vue";
-import SftpBrowser from "./SftpBrowser.vue";
 import TerminalScrollbar from "./TerminalScrollbar.vue";
 import {
   applyRendererTheme,
@@ -28,11 +26,8 @@ import {
   onMouseUp,
   clearWorkspaceDragPreview,
   commitWorkspaceDrop,
-  commitSftpDockResize,
-  commitLocalDockResize,
   getActivePanes,
-  getActiveSftpDocks,
-  getActiveLocalDocks,
+  getActivePanelPanes,
   pingAllForRedraw,
   pointOverTerminal,
   reflowActive,
@@ -43,13 +38,13 @@ import {
   useTerminalSelection,
   wsDragPreview,
   type PaneOverlay,
-  type SftpDock,
-  type LocalDock,
+  type PanelPane,
 } from "../state/terminal";
 import {
   detachWorkspaceLeaf,
   focusWorkspacePane,
   moveWorkspaceLeaf,
+  openPanelFromTerminal,
   useTabs,
 } from "../state/tabs";
 import { requestClosePane } from "../state/closeGuard";
@@ -64,16 +59,41 @@ const wrapRef = ref<HTMLElement | null>(null);
 
 const { active, tabs, renderSeq } = useTabs();
 
-// ---- SFTP browsers --------------------------------------------------------
-// Standalone SSH tab → a right-side panel (shrinks #terminal-host, reflowed by
-// the ResizeObserver). Workspace SSH panes → a browser docked on each pane
-// (carved out of the pane rect in reflowWorkspaceLayout; rendered as overlays).
-const sftpTarget = computed<{ id: number; hostLabel?: string } | null>(() => {
-  const a = active.value;
-  if (!a || a.kind !== "ssh") return null; // workspaces use docked browsers
-  // SFTP-only tabs use the full-width browser below, not the side panel.
-  return a.disableSftp || a.disableSsh ? null : { id: a.id, hostLabel: a.hostLabel };
-});
+// ---- Panel panes -----------------------------------------------------------
+// Panels (file browser, git, …) are workspace leaves; their rects come from
+// the same tiling layout as the terminals and render as DOM overlays. This
+// map is the slot-in point for new panel types: register the component and
+// the props it gets for a given pane.
+const PANEL_VIEWS: Record<
+  PanelKind,
+  { component: Component; props: (p: PanelPane) => Record<string, unknown> }
+> = {
+  files: {
+    component: FilesPanel,
+    props: (p) => ({
+      paneId: p.tabId,
+      slotId: workspaceSlotId(),
+      seedSshTabId: p.seedSshTabId,
+      seedPath: p.seedPath,
+      seedTargetTabId: p.seedTargetTabId,
+    }),
+  },
+  git: {
+    component: GitPanel,
+    props: (p) => ({ paneId: p.tabId, seedPath: p.seedPath }),
+  },
+};
+
+// Pills are shortcuts: each opens a fresh, self-contained panel seeded from
+// the terminal it sits on (its cwd / server). `fromTabId` is the originating
+// terminal pane; on a plain tab it's the active tab itself.
+function openPanel(kind: PanelKind, fromTabId?: number): void {
+  const id =
+    fromTabId ??
+    (active.value && active.value.kind !== "home" ? active.value.id : undefined);
+  if (id == null) return;
+  void openPanelFromTerminal(kind, id);
+}
 
 // SFTP-only SSH tab (host has `disable_ssh`): no shell, no canvas — the file
 // browser takes over the whole host area as an overlay.
@@ -82,214 +102,7 @@ const fullSftp = computed<{ id: number; hostLabel?: string } | null>(() => {
   if (!a || a.kind !== "ssh" || !a.disableSsh) return null;
   return { id: a.id, hostLabel: a.hostLabel };
 });
-const showSftp = computed(
-  () => sftpTarget.value != null && isSftpVisible(sftpTarget.value.id),
-);
 
-// Docked browsers (workspace SSH panes), refreshed from the cached layout.
-const sftpDocks = ref<SftpDock[]>([]);
-
-// ---- Local file browser (opt-in) ------------------------------------------
-// Plain terminal tab → a right-side panel (mirrors the SFTP one). Workspace
-// local panes → a browser docked on each pane. Hidden by default; Cmd/Ctrl+B.
-const localTarget = computed<number | null>(() => {
-  const a = active.value;
-  return a && a.kind === "terminal" ? a.id : null;
-});
-const showLocal = computed(
-  () => localTarget.value != null && isLocalVisible(localTarget.value),
-);
-const localDocks = ref<LocalDock[]>([]);
-
-// ---- Git panel (opt-in, terminal tabs only) --------------------------------
-// Follows the local browser's cwd to the enclosing repo; Cmd/Ctrl+G. Can be
-// open alongside the file browser — it's the rightmost panel.
-const showGit = computed(
-  () => localTarget.value != null && isGitVisible(localTarget.value),
-);
-
-// Toggle a pane's dock on/off, then re-tile so the terminal reclaims/yields
-// the strip.
-function togglePaneDock(tabId: number): void {
-  toggleSftpPanel(tabId);
-  reflowActive(active.value);
-}
-function togglePaneLocalDock(tabId: number): void {
-  toggleLocalBrowser(tabId);
-  reflowActive(active.value);
-}
-
-// Dock resize handle (between a pane's terminal and its browser). Shared by
-// SFTP and local docks — `commit` routes the pointer Y to the right ratio.
-let dockResizeRaf = 0;
-let dockResizePending: { commit: (y: number) => void; y: number } | null = null;
-function onDockResizeMove(e: MouseEvent) {
-  if (!dockResizePending) return;
-  dockResizePending.y = e.clientY;
-  if (dockResizeRaf) return;
-  dockResizeRaf = requestAnimationFrame(() => {
-    dockResizeRaf = 0;
-    if (dockResizePending) dockResizePending.commit(dockResizePending.y);
-  });
-}
-function onDockResizeUp() {
-  window.removeEventListener("mousemove", onDockResizeMove);
-  window.removeEventListener("mouseup", onDockResizeUp);
-  if (dockResizeRaf) {
-    cancelAnimationFrame(dockResizeRaf);
-    dockResizeRaf = 0;
-  }
-  dockResizePending = null;
-  document.body.style.userSelect = "";
-}
-function startDockResize(commit: (y: number) => void, e: MouseEvent) {
-  e.preventDefault();
-  e.stopPropagation();
-  dockResizePending = { commit, y: e.clientY };
-  document.body.style.userSelect = "none";
-  window.addEventListener("mousemove", onDockResizeMove);
-  window.addEventListener("mouseup", onDockResizeUp);
-}
-function onDockResizeDown(dock: SftpDock, e: MouseEvent) {
-  startDockResize((y) => commitSftpDockResize(dock, y), e);
-}
-function onLocalDockResizeDown(dock: LocalDock, e: MouseEvent) {
-  startDockResize((y) => commitLocalDockResize(dock, y), e);
-}
-
-const SFTP_W_KEY = "prmpt.sftpPanelWidthPx";
-const sftpWidth = ref<number>(360);
-{
-  const saved = parseInt(localStorage.getItem(SFTP_W_KEY) ?? "", 10);
-  if (Number.isFinite(saved)) sftpWidth.value = saved;
-}
-
-function clampSftpWidth(px: number): number {
-  const wrap = wrapRef.value?.getBoundingClientRect().width ?? window.innerWidth;
-  // Keep at least ~360px for the terminal; never narrower than 260px.
-  const max = Math.max(280, wrap - 360);
-  return Math.min(max, Math.max(260, px));
-}
-
-let sftpDragRaf = 0;
-let sftpPendingX: number | null = null;
-
-function onSftpDividerMove(e: MouseEvent) {
-  sftpPendingX = e.clientX;
-  if (sftpDragRaf) return;
-  sftpDragRaf = requestAnimationFrame(() => {
-    sftpDragRaf = 0;
-    const wrap = wrapRef.value?.getBoundingClientRect();
-    if (sftpPendingX == null || !wrap) return;
-    sftpWidth.value = clampSftpWidth(wrap.right - sftpPendingX);
-  });
-}
-
-function onSftpDividerUp() {
-  window.removeEventListener("mousemove", onSftpDividerMove);
-  window.removeEventListener("mouseup", onSftpDividerUp);
-  if (sftpDragRaf) {
-    cancelAnimationFrame(sftpDragRaf);
-    sftpDragRaf = 0;
-  }
-  sftpPendingX = null;
-  document.body.style.userSelect = "";
-  localStorage.setItem(SFTP_W_KEY, String(Math.round(sftpWidth.value)));
-}
-
-function onSftpDividerDown(e: MouseEvent) {
-  e.preventDefault();
-  document.body.style.userSelect = "none";
-  window.addEventListener("mousemove", onSftpDividerMove);
-  window.addEventListener("mouseup", onSftpDividerUp);
-}
-
-// The panel opened a second column — widen it so both fit (respecting clamp).
-function onSftpExpand() {
-  sftpWidth.value = clampSftpWidth(Math.max(sftpWidth.value, 680));
-  localStorage.setItem(SFTP_W_KEY, String(Math.round(sftpWidth.value)));
-}
-
-// ---- Local panel width + divider (mirrors the SFTP one) -------------------
-const LOCAL_W_KEY = "prmpt.localPanelWidthPx";
-const localWidth = ref<number>(360);
-{
-  const saved = parseInt(localStorage.getItem(LOCAL_W_KEY) ?? "", 10);
-  if (Number.isFinite(saved)) localWidth.value = saved;
-}
-let localDragRaf = 0;
-let localPendingX: number | null = null;
-function onLocalDividerMove(e: MouseEvent) {
-  localPendingX = e.clientX;
-  if (localDragRaf) return;
-  localDragRaf = requestAnimationFrame(() => {
-    localDragRaf = 0;
-    const wrap = wrapRef.value?.getBoundingClientRect();
-    if (localPendingX == null || !wrap) return;
-    // The git panel (plus its 6px divider) sits between this panel's right
-    // edge and the wrap edge when open.
-    const gitInset = showGit.value ? gitWidth.value + 6 : 0;
-    localWidth.value = clampSftpWidth(wrap.right - gitInset - localPendingX);
-  });
-}
-function onLocalDividerUp() {
-  window.removeEventListener("mousemove", onLocalDividerMove);
-  window.removeEventListener("mouseup", onLocalDividerUp);
-  if (localDragRaf) {
-    cancelAnimationFrame(localDragRaf);
-    localDragRaf = 0;
-  }
-  localPendingX = null;
-  document.body.style.userSelect = "";
-  localStorage.setItem(LOCAL_W_KEY, String(Math.round(localWidth.value)));
-}
-function onLocalDividerDown(e: MouseEvent) {
-  e.preventDefault();
-  document.body.style.userSelect = "none";
-  window.addEventListener("mousemove", onLocalDividerMove);
-  window.addEventListener("mouseup", onLocalDividerUp);
-}
-function onLocalExpand() {
-  localWidth.value = clampSftpWidth(Math.max(localWidth.value, 680));
-  localStorage.setItem(LOCAL_W_KEY, String(Math.round(localWidth.value)));
-}
-
-// ---- Git panel width + divider (mirrors the local one; always rightmost) ---
-const GIT_W_KEY = "prmpt.gitPanelWidthPx";
-const gitWidth = ref<number>(340);
-{
-  const saved = parseInt(localStorage.getItem(GIT_W_KEY) ?? "", 10);
-  if (Number.isFinite(saved)) gitWidth.value = saved;
-}
-let gitDragRaf = 0;
-let gitPendingX: number | null = null;
-function onGitDividerMove(e: MouseEvent) {
-  gitPendingX = e.clientX;
-  if (gitDragRaf) return;
-  gitDragRaf = requestAnimationFrame(() => {
-    gitDragRaf = 0;
-    const wrap = wrapRef.value?.getBoundingClientRect();
-    if (gitPendingX == null || !wrap) return;
-    gitWidth.value = clampSftpWidth(wrap.right - gitPendingX);
-  });
-}
-function onGitDividerUp() {
-  window.removeEventListener("mousemove", onGitDividerMove);
-  window.removeEventListener("mouseup", onGitDividerUp);
-  if (gitDragRaf) {
-    cancelAnimationFrame(gitDragRaf);
-    gitDragRaf = 0;
-  }
-  gitPendingX = null;
-  document.body.style.userSelect = "";
-  localStorage.setItem(GIT_W_KEY, String(Math.round(gitWidth.value)));
-}
-function onGitDividerDown(e: MouseEvent) {
-  e.preventDefault();
-  document.body.style.userSelect = "none";
-  window.addEventListener("mousemove", onGitDividerMove);
-  window.addEventListener("mouseup", onGitDividerUp);
-}
 const { selectionTick } = useTerminalSelection();
 const { theme } = useTheme();
 
@@ -302,12 +115,12 @@ const canvasVisible = computed(
 const dropHi = wsDragPreview;
 const dividers = ref<DividerRect[]>([]);
 const panes = ref<PaneOverlay[]>([]);
+const panelPanes = ref<PanelPane[]>([]);
 
 function refreshOverlays(): void {
   dividers.value = getActiveDividers();
   panes.value = getActivePanes();
-  sftpDocks.value = getActiveSftpDocks();
-  localDocks.value = getActiveLocalDocks();
+  panelPanes.value = getActivePanelPanes();
 }
 const refreshDividers = refreshOverlays;
 
@@ -453,13 +266,14 @@ function workspaceSlotId(): number | null {
   return active.value?.kind === "workspace" ? active.value.id : null;
 }
 
-function onPaneBarDown(p: PaneOverlay, e: MouseEvent) {
+function onPaneBarDown(p: { tabId: number; title: string }, e: MouseEvent) {
   if (e.button !== 0) return;
   const slotId = workspaceSlotId();
   if (slotId == null) return;
   e.preventDefault();
   e.stopPropagation(); // don't begin a terminal text selection
-  focusWorkspacePane(slotId, p.tabId);
+  // Panel panes own their DOM focus and never take workspace (PTY) focus.
+  if (!isPanelLeafId(p.tabId)) focusWorkspacePane(slotId, p.tabId);
   paneDrag = {
     tabId: p.tabId,
     slotId,
@@ -510,7 +324,9 @@ function onPaneDragUp(e: MouseEvent) {
   detachWorkspaceLeaf(d.slotId, d.tabId);
 }
 
-function onPaneClose(p: PaneOverlay) {
+function onPaneClose(p: { tabId: number }) {
+  // requestClosePane routes panel leaves to closePanelLeaf (no confirm) and
+  // terminal leaves through the running-program guard.
   void requestClosePane(p.tabId);
 }
 
@@ -541,10 +357,6 @@ onBeforeUnmount(() => {
   window.removeEventListener("mousemove", onPaneDragMove);
   window.removeEventListener("mouseup", onPaneDragUp);
   onDividerUp();
-  onSftpDividerUp();
-  onLocalDividerUp();
-  onGitDividerUp();
-  onDockResizeUp();
   teardownTerminalSession();
 });
 
@@ -626,7 +438,10 @@ watch(theme, (next) => {
       v-for="p in panes"
       :key="p.tabId"
       class="pane-overlay"
-      :class="{ 'pane-overlay-focused': p.focused }"
+      :class="{
+        'pane-overlay-focused': p.focused,
+        'pane-overlay-highlight': p.tabId === highlightedPaneId,
+      }"
       :style="{
         left: `${p.x}px`,
         top: `${p.y}px`,
@@ -643,26 +458,23 @@ watch(theme, (next) => {
         >
           <span class="pane-title">{{ p.title }}</span>
           <button
-            v-if="p.sftpDockable"
             type="button"
             class="pane-close"
-            :class="{ 'pane-tool-on': p.sftpVisible }"
-            :title="p.sftpVisible ? 'Hide file browser' : 'Show file browser'"
+            title="Open file browser"
             @mousedown.stop.prevent
-            @click.stop="togglePaneDock(p.tabId)"
+            @click.stop="openPanel('files', p.tabId)"
           >
-            <PanelBottom :size="12" :stroke-width="2.25" />
+            <PanelRight :size="12" :stroke-width="2.25" />
           </button>
           <button
-            v-if="p.localDockable"
+            v-if="p.isLocalTerminal"
             type="button"
             class="pane-close"
-            :class="{ 'pane-tool-on': p.localVisible }"
-            :title="p.localVisible ? 'Hide file browser' : 'Show file browser'"
+            title="Open git panel"
             @mousedown.stop.prevent
-            @click.stop="togglePaneLocalDock(p.tabId)"
+            @click.stop="openPanel('git', p.tabId)"
           >
-            <PanelBottom :size="12" :stroke-width="2.25" />
+            <GitBranch :size="12" :stroke-width="2.25" />
           </button>
           <button
             type="button"
@@ -676,53 +488,43 @@ watch(theme, (next) => {
         </div>
       </div>
     </div>
-    <!-- Docked SFTP browsers: one per SSH workspace pane, carved out of the
-         bottom of the pane (the terminal already reflowed to the top strip). -->
+    <!-- Panel panes (file browser, git, …): workspace leaves rendered as DOM
+         overlays at their tiled rects. Same hover pill as terminal panes
+         (drag to rearrange, close); the view itself comes from PANEL_VIEWS. -->
     <div
-      v-for="d in sftpDocks"
-      :key="`dock-${d.tabId}`"
-      class="sftp-dock"
-      :style="{ left: `${d.x}px`, top: `${d.y}px`, width: `${d.w}px`, height: `${d.h}px` }"
+      v-for="p in panelPanes"
+      :key="`panel-${p.tabId}`"
+      class="panel-pane"
+      :style="{ left: `${p.x}px`, top: `${p.y}px`, width: `${p.w}px`, height: `${p.h}px` }"
       @mousedown.stop
       @wheel.stop
       @contextmenu.stop
     >
-      <div
-        class="sftp-dock-resize"
-        title="Resize"
-        @mousedown="onDockResizeDown(d, $event)"
+      <component
+        :is="PANEL_VIEWS[p.kind].component"
+        class="panel-pane-body"
+        v-bind="PANEL_VIEWS[p.kind].props(p)"
+        @close="onPaneClose(p)"
       />
-      <SftpBrowser
-        class="sftp-dock-browser"
-        :tab-id="d.tabId"
-        :fixed-label="d.hostLabel"
-        can-close
-        @close="togglePaneDock(d.tabId)"
-      />
-    </div>
-    <!-- Docked local browsers: one per local workspace pane (same carve as the
-         SFTP docks, for terminal panes). -->
-    <div
-      v-for="d in localDocks"
-      :key="`localdock-${d.tabId}`"
-      class="sftp-dock"
-      :style="{ left: `${d.x}px`, top: `${d.y}px`, width: `${d.w}px`, height: `${d.h}px` }"
-      @mousedown.stop
-      @wheel.stop
-      @contextmenu.stop
-    >
-      <div
-        class="sftp-dock-resize"
-        title="Resize"
-        @mousedown="onLocalDockResizeDown(d, $event)"
-      />
-      <LocalBrowser
-        class="sftp-dock-browser"
-        :target-tab-id="d.tabId"
-        :fixed-label="d.label"
-        can-close
-        @close="togglePaneLocalDock(d.tabId)"
-      />
+      <div class="pane-hover">
+        <div class="pane-grip">⋯</div>
+        <div
+          class="pane-pill pane-pill-drag"
+          :title="p.title"
+          @mousedown="onPaneBarDown(p, $event)"
+        >
+          <span class="pane-title">{{ p.title }}</span>
+          <button
+            type="button"
+            class="pane-close"
+            title="Close panel"
+            @mousedown.stop.prevent
+            @click.stop="onPaneClose(p)"
+          >
+            <X :size="12" :stroke-width="2.25" />
+          </button>
+        </div>
+      </div>
     </div>
 
     <!-- Drop-zone preview: shows the half the dropped tab will occupy. -->
@@ -757,15 +559,14 @@ watch(theme, (next) => {
       @contextmenu.stop
     >
       <FilesPanel
-        :tab-id="fullSftp.id"
-        kind="ssh"
+        :seed-ssh-tab-id="fullSftp.id"
         hide-close
         class="h-full w-full"
       />
     </div>
     <slot />
     <!-- Hover header for plain terminal/SSH tabs: same grip + pill as
-         workspace panes, but just the title and a file-browser toggle. -->
+         workspace panes. The panel toggles split the tab into a workspace. -->
     <div
       v-if="panes.length === 0 && !fullSftp && active && (active.kind === 'terminal' || active.kind === 'ssh')"
       class="pane-hover"
@@ -774,106 +575,25 @@ watch(theme, (next) => {
       <div class="pane-pill" :title="active.title">
         <span class="pane-title">{{ active.title }}</span>
         <button
-          v-if="localTarget != null"
           type="button"
           class="pane-close"
-          :class="{ 'pane-tool-on': showLocal }"
-          :title="showLocal ? 'Hide file browser' : 'Show file browser'"
-          @click="toggleLocalBrowser(localTarget)"
+          title="Open file browser"
+          @click="openPanel('files')"
         >
           <PanelRight :size="12" :stroke-width="2.25" />
         </button>
         <button
-          v-if="localTarget != null"
+          v-if="active.kind === 'terminal'"
           type="button"
           class="pane-close"
-          :class="{ 'pane-tool-on': showGit }"
-          :title="showGit ? 'Hide git panel' : 'Show git panel'"
-          @click="toggleGitPanel(localTarget)"
+          title="Open git panel"
+          @click="openPanel('git')"
         >
           <GitBranch :size="12" :stroke-width="2.25" />
-        </button>
-        <button
-          v-if="localTarget == null && sftpTarget"
-          type="button"
-          class="pane-close"
-          :class="{ 'pane-tool-on': showSftp }"
-          :title="showSftp ? 'Hide file browser' : 'Show file browser'"
-          @click="toggleSftpPanel(sftpTarget.id)"
-        >
-          <PanelRight :size="12" :stroke-width="2.25" />
         </button>
       </div>
     </div>
   </div>
-  <!-- SFTP file browser: resizable divider + panel, SSH connections only. -->
-  <template v-if="showSftp && sftpTarget">
-    <div
-      class="sftp-divider"
-      role="separator"
-      aria-orientation="vertical"
-      aria-label="Resize file browser"
-      @mousedown="onSftpDividerDown"
-    />
-    <FilesPanel
-      :tab-id="sftpTarget.id"
-      kind="ssh"
-      class="flex-none"
-      :style="{
-        width: `${sftpWidth}px`,
-        margin: 'var(--frame-inset) var(--frame-inset) var(--frame-inset) 0',
-        borderRadius: 'var(--pane-radius)',
-        overflow: 'hidden',
-      }"
-      @close="toggleSftpPanel(sftpTarget.id)"
-      @expand="onSftpExpand"
-    />
-  </template>
-  <!-- Local file browser: resizable divider + panel, plain terminal tabs only. -->
-  <template v-if="showLocal && localTarget != null">
-    <div
-      class="sftp-divider"
-      role="separator"
-      aria-orientation="vertical"
-      aria-label="Resize file browser"
-      @mousedown="onLocalDividerDown"
-    />
-    <FilesPanel
-      :tab-id="localTarget"
-      kind="terminal"
-      class="flex-none"
-      :style="{
-        width: `${localWidth}px`,
-        margin: 'var(--frame-inset) var(--frame-inset) var(--frame-inset) 0',
-        borderRadius: 'var(--pane-radius)',
-        overflow: 'hidden',
-      }"
-      @close="toggleLocalBrowser(localTarget)"
-      @expand="onLocalExpand"
-    />
-  </template>
-  <!-- Git panel: resizable divider + panel, plain terminal tabs only. Sits
-       right of the file browser when both are open. -->
-  <template v-if="showGit && localTarget != null">
-    <div
-      class="sftp-divider"
-      role="separator"
-      aria-orientation="vertical"
-      aria-label="Resize git panel"
-      @mousedown="onGitDividerDown"
-    />
-    <GitPanel
-      :tab-id="localTarget"
-      class="flex-none"
-      :style="{
-        width: `${gitWidth}px`,
-        margin: 'var(--frame-inset) var(--frame-inset) var(--frame-inset) 0',
-        borderRadius: 'var(--pane-radius)',
-        overflow: 'hidden',
-      }"
-      @close="toggleGitPanel(localTarget)"
-    />
-  </template>
   </div>
   <Teleport to="body">
     <div
@@ -914,6 +634,13 @@ watch(theme, (next) => {
    alongside the full-vs-hollow cursor distinction. */
 .pane-overlay-focused {
   border-color: color-mix(in srgb, var(--accent, #89b4fa) 55%, transparent);
+}
+/* The pane a pending "cd here / insert path" submenu entry points at, while
+   its terminal row is hovered — a stronger accent ring than focus so the
+   target reads at a glance. */
+.pane-overlay-highlight {
+  border-color: var(--accent, #89b4fa);
+  box-shadow: 0 0 0 1px var(--accent, #89b4fa) inset;
 }
 /* Hover header: a centered grip hint + pill at the top of a terminal. Only
    the small grip captures the pointer; the rest of the top row stays
@@ -1028,12 +755,10 @@ watch(theme, (next) => {
   color: var(--fg, #e6e6e6);
   background: color-mix(in srgb, var(--fg, #fff) 14%, transparent);
 }
-.pane-tool-on {
-  color: var(--accent, #89b4fa);
-}
 
-/* Docked SFTP browser, overlaid on the bottom strip of an SSH pane. */
-.sftp-dock {
+/* Panel pane (file browser, git, …): a workspace leaf rendered as a DOM
+   overlay at its tiled rect. Mirrors the terminal panes' border/radius. */
+.panel-pane {
   position: absolute;
   z-index: 16;
   box-sizing: border-box;
@@ -1045,24 +770,9 @@ watch(theme, (next) => {
   overflow: hidden;
   background: var(--surface-1, #1e1e2e);
 }
-.sftp-dock-browser {
+.panel-pane-body {
   flex: 1;
   min-height: 0;
-}
-.sftp-dock-resize {
-  position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
-  height: 6px;
-  z-index: 1;
-  cursor: row-resize;
-  background: transparent;
-  transition: background-color 120ms ease;
-}
-.sftp-dock-resize:hover,
-.sftp-dock-resize:active {
-  background: color-mix(in srgb, var(--accent, #89b4fa) 40%, transparent);
 }
 .pane-drag-ghost,
 .sftp-drag-ghost {
@@ -1107,22 +817,4 @@ watch(theme, (next) => {
     transition: none;
   }
 }
-
-/* SFTP panel resize handle: a thin self-stretch bar between the terminal and
-   the file browser. The visible line thickens on hover/drag. */
-.sftp-divider {
-  flex: none;
-  width: 6px;
-  align-self: stretch;
-  margin: var(--frame-inset) 0;
-  cursor: col-resize;
-  border-radius: 9999px;
-  background: transparent;
-  transition: background-color 120ms ease;
-}
-.sftp-divider:hover,
-.sftp-divider:active {
-  background: color-mix(in srgb, var(--accent, #89b4fa) 40%, transparent);
-}
-
 </style>

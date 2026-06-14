@@ -1,8 +1,8 @@
 /**
  * Files-panel column state, hoisted out of the component so the dual-pane
  * layout survives the panel unmounting (switching to another tab swaps the
- * whole panel out of the DOM). One slot per panel kind + hosting tab, so each
- * tab keeps its own single/dual layout.
+ * whole panel out of the DOM). One slot per panel instance, so each keeps
+ * its own single/dual layout.
  */
 import { ref, type Ref } from "vue";
 
@@ -17,18 +17,14 @@ export interface PanelColumns {
 
 const columnsByKey = new Map<string, PanelColumns>();
 
-/** Column state for one panel instance. Created on first use, seeded to the
- *  hosting tab's own connection (SSH panels) or local files. Session-only;
- *  tab ids are never reused, so entries for closed tabs just sit unused. */
-export function getPanelColumns(
-  kind: "ssh" | "terminal",
-  tabId: number,
-): PanelColumns {
-  const key = `${kind}:${tabId}`;
+/** Column state for one panel instance (keyed by the panel pane's stable
+ *  identity), seeded on first use. Session-only; pane ids are never reused,
+ *  so entries for closed panes just sit unused. */
+export function getPanelColumns(key: string, seed: PanelSource): PanelColumns {
   let cols = columnsByKey.get(key);
   if (!cols) {
     cols = {
-      left: ref<PanelSource>(kind === "ssh" ? tabId : "local"),
+      left: ref<PanelSource>(seed),
       right: ref<PanelSource | null>(null),
     };
     columnsByKey.set(key, cols);
@@ -50,10 +46,3 @@ export interface BrowserLocation {
 }
 
 export const browserLocations = new Map<string, BrowserLocation>();
-
-/** Live cwd of the local browser — the reactive twin of
- *  `browserLocations.get("local").cwd`, updated on every navigation while the
- *  browser is mounted (the map itself is only written on unmount). The git
- *  panel follows this to find the repo to show. Null until the local browser
- *  first loads a directory this session. */
-export const localBrowserCwd = ref<string | null>(null);

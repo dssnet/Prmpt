@@ -1,8 +1,10 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref } from "vue";
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import {
   ChevronLeft,
   ChevronRight,
+  FolderOpen,
   GitBranch as GitBranchIcon,
   History,
   Minus,
@@ -22,23 +24,25 @@ import {
   gitSwitchBranch,
   gitUnstage,
   localHomeDir,
-  terminalCwd,
   type GitBranch,
   type GitCommit,
   type GitFileEntry,
   type GitStatusSnapshot,
 } from "../ipc";
-import { browserLocations, localBrowserCwd } from "../state/filesPanel";
-import { commitDraft, logExpanded } from "../state/gitPanel";
+import { getGitPanelState } from "../state/gitPanel";
 import { Button, DropdownMenu, EmptyState, ErrorMessage, Input, Textarea } from "./ui";
 
 const props = withDefaults(
   defineProps<{
     canClose?: boolean;
-    /** Terminal tab whose shell cwd the panel follows (see syncDir). */
-    tabId?: number | null;
+    /** Panel pane id — keys this panel's commit-draft / log state so it
+     *  survives tab-switch unmounts and stays distinct per panel. */
+    paneId?: number | null;
+    /** Initial folder to inspect (the repo enclosing it). Seeded from the
+     *  terminal pill; the in-panel folder picker takes over after that. */
+    seedPath?: string | null;
   }>(),
-  { canClose: true, tabId: null },
+  { canClose: true, paneId: null, seedPath: null },
 );
 const emit = defineEmits<{ close: [] }>();
 
@@ -48,34 +52,41 @@ const vFocus = {
     (el instanceof HTMLInputElement ? el : el.querySelector("input"))?.focus(),
 };
 
-// ---- directory follow ----
-// The panel shows whatever repo encloses `dir` (the backend does the
-// walk-up), and `dir` tracks the most recent move in either context: `cd`
-// in the tab's shell (its OS-level process cwd, polled cheaply while the
-// panel is open) or navigation in the local file browser. On mount the
-// shell's cwd wins; before the shell reports one, the file browser / home
-// directory fill in.
-const dir = ref<string | null>(null);
-let lastShellCwd: string | null = null;
+// Per-pane commit draft + log-expanded (see state/gitPanel.ts).
+const gitState = computed(() => getGitPanelState(`pane:${props.paneId ?? "_"}`));
+const commitDraft = computed({
+  get: () => gitState.value.commitDraft.value,
+  set: (v) => {
+    gitState.value.commitDraft.value = v;
+  },
+});
+const logExpanded = computed({
+  get: () => gitState.value.logExpanded.value,
+  set: (v) => {
+    gitState.value.logExpanded.value = v;
+  },
+});
 
-/** Adopt the shell's cwd if it moved since we last looked; first-fill from
- *  the browser/home otherwise. Returns whether `dir` changed. */
-async function syncDir(): Promise<boolean> {
-  const before = dir.value;
-  if (props.tabId != null) {
-    const shell = await terminalCwd(props.tabId).catch(() => null);
-    if (shell && shell !== lastShellCwd) {
-      lastShellCwd = shell;
-      dir.value = shell;
-    }
-  }
-  if (!dir.value) {
-    dir.value =
-      localBrowserCwd.value ??
-      browserLocations.get("local")?.cwd ??
-      (await localHomeDir().catch(() => null));
-  }
-  return dir.value !== before;
+// ---- target folder ----
+// The panel shows whatever repo encloses `dir` (the backend walks up). `dir`
+// is chosen explicitly: seeded once on mount (from the terminal pill, else
+// the home directory) and changed only via the in-panel folder picker.
+const dir = ref<string | null>(null);
+
+async function initDir(): Promise<void> {
+  dir.value = props.seedPath || (await localHomeDir().catch(() => null));
+}
+
+/** Open a native folder chooser and inspect the picked directory. */
+async function pickFolder(): Promise<void> {
+  const picked = await openDialog({
+    directory: true,
+    defaultPath: dir.value ?? undefined,
+  }).catch(() => null);
+  const next = Array.isArray(picked) ? picked[0] : picked;
+  if (!next) return;
+  dir.value = next;
+  await refreshAll();
 }
 
 // ---- status state ----
@@ -122,44 +133,22 @@ async function refreshAll(): Promise<void> {
 }
 
 async function syncAndRefresh(): Promise<void> {
-  await syncDir();
+  if (!dir.value) await initDir();
   await refreshAll();
 }
 
-// File-browser navigation retargets immediately. Debounced: clicking through
-// directories shouldn't fire a git status per hop.
-let dirTimer: number | undefined;
-watch(localBrowserCwd, (v) => {
-  if (!v) return;
-  dir.value = v;
-  window.clearTimeout(dirTimer);
-  dirTimer = window.setTimeout(() => void refreshAll(), 300);
-});
-
-// Commits/branch changes made in the terminal below only become visible on
-// some signal; window refocus is the cheapest full one.
+// Commits / branch changes made in a terminal only become visible on some
+// signal; window refocus is the cheapest full one (re-stats the current dir).
 function onWindowFocus(): void {
-  void syncAndRefresh();
+  void refreshAll();
 }
-
-// Cheap shell-cwd poll (a single pid→cwd lookup, no git involved) so a `cd`
-// in the terminal retargets the open panel within a couple of seconds; the
-// full status refresh only runs when the cwd actually moved.
-let pollTimer: number | undefined;
 
 onMounted(() => {
   void syncAndRefresh();
   window.addEventListener("focus", onWindowFocus);
-  pollTimer = window.setInterval(() => {
-    void syncDir().then((moved) => {
-      if (moved) void refreshAll();
-    });
-  }, 2000);
 });
 onBeforeUnmount(() => {
   window.removeEventListener("focus", onWindowFocus);
-  window.clearTimeout(dirTimer);
-  window.clearInterval(pollTimer);
 });
 
 // ---- mutations ----
@@ -362,8 +351,16 @@ function relTime(epochSecs: number): string {
       <button
         type="button"
         class="icon-btn"
+        title="Choose folder"
+        @click="pickFolder"
+      >
+        <FolderOpen :size="14" />
+      </button>
+      <button
+        type="button"
+        class="icon-btn"
         title="Refresh"
-        @click="syncAndRefresh"
+        @click="refreshAll"
       >
         <RefreshCw :size="14" :class="{ 'animate-spin': loading }" />
       </button>
@@ -415,8 +412,7 @@ function relTime(epochSecs: number): string {
           {{ dir }}
         </div>
         <div class="mt-2 text-xs">
-          cd into a repository (or browse to one in the file browser) to use
-          the git panel.
+          Use the folder button above to choose a git repository.
         </div>
       </EmptyState>
       <EmptyState v-else>Loading…</EmptyState>

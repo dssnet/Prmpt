@@ -41,6 +41,7 @@ Tauri backend (Rust)                                        ▼
 | `src/renderer/glyph-atlas.ts` | Glyph atlas + color-glyph detection |
 | `src/renderer/shaders.ts` | GLSL |
 | `src/ipc.ts`, `src/input.ts`, `src/tabs.ts` | IPC bindings, keymap, tab bar |
+| `src/state/panels.ts` | Generic panel-pane system: workspace leaves are terminals (backend PTY, positive id) **or** frontend panels (files/git/…, negative id). Panels are *self-contained* — each picks what it operates on (server / folder / cd-target terminal) from its own controls; `PanelDesc` carries only open-time *seeds*. A pane opens fresh beside the terminal it was launched from (pill button / Cmd+B/+G → `openPanelFromTerminal`, which seeds cwd/server) and lives until closed; it no longer follows or is pruned by any one terminal, but the workspace's last terminal closing still closes it. New panel type = kind here + component in `TerminalView.vue`'s `PANEL_VIEWS` + an `openPanelPane("<kind>", …)` opener; tiling/dividers/focus/drag/close are shared. |
 | `src/assets/fonts/NotoMonoNerdFontMono-Regular.ttf` | Bundled primary mono font, patched with Powerline + Nerd Font icons (SIL OFL 1.1; Nerd Fonts patches are MIT). License at `NerdFonts-OFL.txt`. |
 
 ## Build / run

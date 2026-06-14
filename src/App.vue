@@ -46,12 +46,14 @@ import {
   handleRender,
   hydrateTabs,
   isSshReconnecting,
+  isSshTabOrPane,
   owningTabId,
   removeTabLocal,
   setActive,
   setSshReconnecting,
   snapshotFor,
   spawnTerminal,
+  openPanelOnActive,
   useTabs,
   type TabHydrateInfo,
 } from "./state/tabs";
@@ -79,8 +81,6 @@ import {
   requestCloseTab,
   windowCloseMessage,
 } from "./state/closeGuard";
-import { toggleLocalBrowser } from "./state/localBrowser";
-import { toggleGitPanel } from "./state/gitPanel";
 import { notify, notifyBell } from "./state/notifications";
 import { showToast } from "./state/toasts";
 import HomeView from "./components/HomeView.vue";
@@ -97,6 +97,7 @@ import TabBar from "./components/TabBar.vue";
 import TerminalView from "./components/TerminalView.vue";
 import TitleBar from "./components/TitleBar.vue";
 import Toasts from "./components/Toasts.vue";
+import FloatingMenu from "./components/FloatingMenu.vue";
 import WelcomeOverlay from "./components/welcome/WelcomeOverlay.vue";
 
 const props = defineProps<{ config: Config }>();
@@ -434,23 +435,26 @@ const shortcuts: Shortcut[] = [
     run: () => void pasteFromClipboard(),
   },
   { mod: "meta", match: (k) => k === "a" || k === "A", run: () => selectAll() },
+  // Panel panes (see state/panels.ts): open a fresh, self-contained panel
+  // seeded from the active tab's terminal (its cwd / server). On a plain tab
+  // this converts it into a workspace in place.
   {
     mod: "meta",
     match: (k) => k === "b" || k === "B",
-    when: () => active.value?.kind === "terminal",
-    run: () => {
+    when: () => {
       const a = active.value;
-      if (a) toggleLocalBrowser(a.id);
+      return !!a && a.kind !== "home" && !a.disableSsh;
     },
+    run: () => void openPanelOnActive("files"),
   },
   {
     mod: "meta",
     match: (k) => k === "g" || k === "G",
-    when: () => active.value?.kind === "terminal",
-    run: () => {
+    when: () => {
       const a = active.value;
-      if (a) toggleGitPanel(a.id);
+      return !!a && (a.kind === "terminal" || a.kind === "workspace");
     },
+    run: () => void openPanelOnActive("git"),
   },
   {
     mod: "meta",
@@ -601,12 +605,13 @@ onMounted(async () => {
     applyTerminalBg(p.default_bg);
   }));
   unlisteners.push(await onExit((p) => {
-    // Was this an SSH tab? If so, give the matching `ssh:connect_error`
+    // Was this an SSH tab/pane? If so, give the matching `ssh:connect_error`
     // event a moment to land before we consider closing the window — event
     // delivery order across the two channels (the direct `emit_to` and the
     // PTY → tab thread → exit chain) isn't guaranteed, and we don't want
-    // to kill the window before the error modal mounts.
-    const wasSsh = tabs.value.find((t) => t.id === p.tab_id)?.kind === "ssh";
+    // to kill the window before the error modal mounts. (Checked via the
+    // workspace tree too: an SSH tab with a files panel is a workspace.)
+    const wasSsh = isSshTabOrPane(p.tab_id);
     handleExit(p);
     const maybeCloseWindow = () => {
       const liveTerminals = tabs.value.filter((t) => t.kind !== "home");
@@ -817,4 +822,5 @@ onBeforeUnmount(() => {
   />
   <UpdateModal />
   <Toasts />
+  <FloatingMenu />
 </template>

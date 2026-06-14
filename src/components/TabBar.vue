@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
-import { Asterisk, ChevronDown, Columns2, Globe, X } from "lucide-vue-next";
+import { Asterisk, Bell, ChevronDown, Columns2, Globe, X } from "lucide-vue-next";
 
 import {
   HOME_TAB_ID,
