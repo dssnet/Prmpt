@@ -24,7 +24,7 @@ import {
   workspaceOfLeaf,
   type LeafNode,
   type SplitDir,
-  type TabOrigin,
+  type WorkspaceNode,
 } from "./workspace";
 import {
   allocPanelLeafId,
@@ -34,10 +34,16 @@ import {
   type PanelKind,
 } from "./panels";
 import { setSftpAutoOpen, sftpAutoOpen } from "./sftp";
+import { paneSftpHost, releaseSftpForPane } from "./sftpConsumers";
 
 export const HOME_TAB_ID = 0;
 
-export type TabKind = "home" | "terminal" | "ssh" | "workspace";
+// Every non-home tab is a workspace of panes (a one-pane workspace renders
+// full-bleed — see terminal.ts). Terminals and frontend panels (files/git) are
+// both just panes; a terminal is special only in that the shared canvas draws
+// its body. The connection metadata below rides on the workspace tab when the
+// tab hosts an SSH connection (the workspace slot id == the backend ssh tab id).
+export type TabKind = "home" | "workspace";
 
 export interface TabState {
   id: number;
@@ -45,11 +51,8 @@ export interface TabState {
   title: string;
   hostLabel?: string;
   hostId?: number;
-  /** SSH tabs only: the host opted out of SFTP, so no file-browser panel. */
+  /** SSH connections only: the host opted out of SFTP (lazy/no file browser). */
   disableSftp?: boolean;
-  /** SSH tabs only: SFTP-only host — no shell; renders as a full-width
-   *  file browser instead of a terminal. */
-  disableSsh?: boolean;
 }
 
 export interface TabHydrateInfo {
@@ -93,7 +96,7 @@ export function isSshReconnecting(id: number): boolean {
 export function useTabs() {
   const list = computed(() => tabs.value);
   const terminals = computed(() =>
-    tabs.value.filter((t) => t.kind === "terminal" || t.kind === "ssh"),
+    tabs.value.filter((t) => t.kind === "workspace"),
   );
   const active = computed(() => tabs.value.find((t) => t.id === activeId.value) ?? null);
   const activeTitle = computed(() => active.value?.title ?? "Prmpt");
@@ -112,38 +115,63 @@ export function isInteractiveTab(t: TabState | null | undefined): boolean {
   return !!t && t.kind !== "home";
 }
 
-/** All open SSH connections in this window — standalone SSH tabs plus SSH
- *  panes inside workspaces. Used by the SFTP browser's connection picker.
- *  Read inside a computed that also touches `workspaceTick` for reactivity to
- *  pane changes. */
-export function listSshConnections(): {
-  id: number;
-  label: string;
-  disableSftp: boolean;
-}[] {
-  const out: { id: number; label: string; disableSftp: boolean }[] = [];
+/** Host ids with a live SSH presence in this window: a shell terminal leaf, or
+ *  a files-panel leaf bound to a host's SFTP consumer. Deduped by host (a shell
+ *  and its files panel on the same host share one pooled connection). Used by
+ *  the close-guard count and reconnect/identity checks. Read inside a computed
+ *  that also touches `workspaceTick` for reactivity to pane changes. */
+export function openSshHostIds(): Set<number> {
+  const ids = new Set<number>();
   for (const t of tabs.value) {
-    if (t.kind === "ssh") {
-      out.push({
-        id: t.id,
-        label: t.hostLabel || t.title,
-        disableSftp: !!t.disableSftp,
-      });
-    } else if (t.kind === "workspace") {
-      const ws = getWorkspace(t.id);
-      if (!ws) continue;
-      for (const leaf of collectLeaves(ws.root)) {
-        if (leaf.origin.kind === "ssh") {
-          out.push({
-            id: leaf.tabId,
-            label: leaf.origin.hostLabel || leaf.origin.title,
-            disableSftp: !!leaf.origin.disableSftp,
-          });
-        }
+    if (t.kind !== "workspace") continue;
+    const ws = getWorkspace(t.id);
+    if (!ws) continue;
+    for (const leaf of collectLeaves(ws.root)) {
+      if (leaf.origin.kind === "ssh" && leaf.origin.hostId != null) {
+        ids.add(leaf.origin.hostId);
+      } else if (isPanelLeaf(leaf)) {
+        const h = paneSftpHost(leaf.tabId);
+        if (h != null) ids.add(h);
+      }
+    }
+  }
+  return ids;
+}
+
+/** Shell terminal-pane tab ids for `hostId` in this window. Empty when the
+ *  host has no shell pane (files-only) — reconnect then surfaces as a toast
+ *  rather than an in-terminal banner. */
+export function shellTabsForHost(hostId: number): number[] {
+  const out: number[] = [];
+  for (const t of tabs.value) {
+    if (t.kind !== "workspace") continue;
+    const ws = getWorkspace(t.id);
+    if (!ws) continue;
+    for (const leaf of collectLeaves(ws.root)) {
+      if (leaf.origin.kind === "ssh" && leaf.origin.hostId === hostId) {
+        out.push(leaf.tabId);
       }
     }
   }
   return out;
+}
+
+/** True if `hostId` has any live SSH presence (shell or files consumer) here. */
+export function isHostConnected(hostId: number): boolean {
+  return openSshHostIds().has(hostId);
+}
+
+/** True if `tabId` is a live SSH shell terminal pane in this window. */
+export function isSshShellTab(tabId: number): boolean {
+  for (const t of tabs.value) {
+    if (t.kind !== "workspace") continue;
+    const ws = getWorkspace(t.id);
+    if (!ws) continue;
+    for (const leaf of collectLeaves(ws.root)) {
+      if (leaf.origin.kind === "ssh" && leaf.tabId === tabId) return true;
+    }
+  }
+  return false;
 }
 
 /** The top-level tab hosting `tabId`: itself for standalone tabs, or the
@@ -161,28 +189,6 @@ export function owningTabId(tabId: number): number | null {
 
 export function isWorkspaceTab(t: TabState | null | undefined): boolean {
   return !!t && t.kind === "workspace";
-}
-
-/** True if `tabId` is a standalone SSH tab or an SSH pane in a workspace.
- *  (A plain `kind === "ssh"` check misses panes — including SSH tabs that
- *  were converted to workspaces by opening a panel.) */
-export function isSshTabOrPane(tabId: number): boolean {
-  if (findTab(tabId)?.kind === "ssh") return true;
-  const wsId = workspaceOfLeaf(tabId);
-  if (wsId === undefined) return false;
-  const ws = getWorkspace(wsId);
-  return !!ws && findLeafByTabId(ws.root, tabId)?.origin.kind === "ssh";
-}
-
-function originOf(t: TabState): TabOrigin {
-  return {
-    kind: t.kind === "ssh" ? "ssh" : "terminal",
-    title: t.title,
-    hostLabel: t.hostLabel,
-    hostId: t.hostId,
-    disableSftp: t.disableSftp,
-    disableSsh: t.disableSsh,
-  };
 }
 
 function findTab(id: number): TabState | undefined {
@@ -207,6 +213,36 @@ export function activeSnapshot(): RenderPayload | undefined {
   return snapshots.get(activeId.value);
 }
 
+/** Build the initial workspace tree for a freshly-connected tab. `base` is the
+ *  tab's primary pane — a terminal leaf, or a files panel for an SFTP-only
+ *  connection. A shell SSH connection auto-opens a files panel beside it
+ *  (unless opted out / the user last closed it). Every tab is a workspace; a
+ *  one-pane workspace just renders full-bleed (see terminal.ts). */
+function seedWorkspace(t: TabState, base: LeafNode): void {
+  let root: WorkspaceNode = base;
+  // Auto-open a files panel beside a *shell* connection (a terminal base) when
+  // the host offers SFTP and the user hasn't opted out. A files-only base
+  // (SFTP-only host) is already the file browser, so nothing to add.
+  if (
+    !isPanelLeaf(base) &&
+    t.hostId != null &&
+    !t.disableSftp &&
+    sftpAutoOpen()
+  ) {
+    root = makeSplit(
+      "h",
+      base,
+      makePanelLeaf({
+        kind: "files",
+        seedHostId: t.hostId,
+        seedTargetTabId: t.id,
+      }),
+      PANEL_SPLIT_RATIO.files,
+    );
+  }
+  setWorkspace(t.id, { root, focusedTabId: base.tabId });
+}
+
 export async function spawnTerminal(args: {
   cols: number;
   rows: number;
@@ -214,7 +250,9 @@ export async function spawnTerminal(args: {
   cellHeightPx: number;
 }): Promise<number> {
   const id = await spawnTab(args);
-  tabs.value.push({ id, kind: "terminal", title: "Terminal" });
+  const t: TabState = { id, kind: "workspace", title: "Terminal" };
+  tabs.value.push(t);
+  seedWorkspace(t, makeLeaf(id, { kind: "terminal", title: "Terminal" }));
   activeId.value = id;
   return id;
 }
@@ -235,33 +273,52 @@ export async function spawnSsh(args: {
     cellWidthPx: args.cellWidthPx,
     cellHeightPx: args.cellHeightPx,
   });
-  tabs.value.push({
+  const t: TabState = {
     id,
-    kind: "ssh",
+    kind: "workspace",
     title: args.hostLabel,
     hostLabel: args.hostLabel,
     hostId: args.hostId,
     disableSftp: args.config.disable_sftp,
-    disableSsh: args.config.disable_ssh,
-  });
+  };
+  tabs.value.push(t);
+  seedWorkspace(t, sshTerminalLeaf(t));
   activeId.value = id;
-  const t = findTab(id);
-  if (t) maybeAutoOpenFiles(t);
   return id;
 }
 
-/** The file browser auto-opens for SSH tabs unless the user last closed it
- *  (the remembered default). SFTP-only hosts already *are* a full-width
- *  browser; hosts that opted out of SFTP get nothing. Applies to fresh
- *  connects, window-restore hydration, and tabs attached via tear-off. */
-function maybeAutoOpenFiles(t: TabState): void {
-  if (t.kind !== "ssh" || t.disableSsh || t.disableSftp) return;
-  if (sftpAutoOpen())
-    openPanelOnTab(t, {
-      kind: "files",
-      seedSshTabId: t.id,
-      seedTargetTabId: t.id,
-    });
+/** The shell terminal leaf for an SSH connection workspace (owns its PTY). */
+function sshTerminalLeaf(t: TabState): LeafNode {
+  return makeLeaf(t.id, {
+    kind: "ssh",
+    title: t.title,
+    hostLabel: t.hostLabel,
+    hostId: t.hostId,
+    disableSftp: t.disableSftp,
+  });
+}
+
+/** Open a files-only workspace for an SFTP-only host (no shell). The workspace
+ *  has no backend tab; its single files panel acquires/releases the host's
+ *  SFTP consumer over the pane's lifetime. The slot id is a frontend-allocated
+ *  negative id (like a panel leaf). */
+export function openSftpOnlyHost(hostId: number, label: string): void {
+  const slotId = allocPanelLeafId();
+  const t: TabState = {
+    id: slotId,
+    kind: "workspace",
+    title: label,
+    hostLabel: label,
+    hostId,
+  };
+  tabs.value.push(t);
+  const leaf = makePanelLeaf({
+    kind: "files",
+    seedHostId: hostId,
+    seedPath: undefined,
+  });
+  setWorkspace(slotId, { root: leaf, focusedTabId: leaf.tabId });
+  activeId.value = slotId;
 }
 
 export async function closeTabAndForget(id: number): Promise<void> {
@@ -275,8 +332,14 @@ export async function closeTabAndForget(id: number): Promise<void> {
     if (ws) {
       for (const leaf of collectLeaves(ws.root)) {
         snapshots.delete(leaf.tabId);
-        // Panel leaves are frontend-only views — nothing to close backend-side.
-        if (!isPanelLeaf(leaf)) closeTab(leaf.tabId).catch(() => undefined);
+        if (!isPanelLeaf(leaf)) {
+          // Terminal pane → close its PTY (or release its pooled shell).
+          closeTab(leaf.tabId).catch(() => undefined);
+        } else if (leaf.origin.panel?.kind === "files") {
+          // File browser → release its SFTP consumer (drops the pooled
+          // connection when it was the last consumer).
+          releaseSftpForPane(leaf.tabId);
+        }
       }
     }
     return;
@@ -288,15 +351,17 @@ export async function closeTabAndForget(id: number): Promise<void> {
   }
 }
 
-/** Splice a tab out of the bar without touching the backend — its PTY lives
- *  on as a workspace pane. (Mirrors removeTabLocal but keeps the snapshot.) */
+/** Splice a tab out of the bar and drop its (now-empty) workspace, without
+ *  touching the backend — its pane has been grafted into another workspace. */
 function consumeTabIntoWorkspace(id: number): void {
+  deleteWorkspace(id);
   spliceTab(id);
 }
 
-/** Drop `draggedTabId` onto a pane. If the target is a plain tab it becomes a
- *  new workspace; if it's already a workspace the hit pane is split. Returns
- *  the workspace slot id, or null if the drop was a no-op. */
+/** Drop `draggedTabId` (a whole tab) onto a pane in the target workspace,
+ *  splitting the hit pane. Both are workspaces now; the dragged tab's single
+ *  pane is grafted in and its tab removed. Multi-pane drags are a later phase.
+ *  Returns the target slot id, or null if the drop was a no-op. */
 export function dropTabIntoTarget(
   draggedTabId: number,
   targetSlotId: number,
@@ -304,48 +369,29 @@ export function dropTabIntoTarget(
   dir: SplitDir,
   placeDraggedFirst: boolean,
 ): number | null {
-  if (draggedTabId === targetPaneTabId) return null;
+  if (draggedTabId === targetPaneTabId || draggedTabId === targetSlotId) return null;
   const dragged = findTab(draggedTabId);
   const target = findTab(targetSlotId);
-  if (!dragged || !target || dragged.kind === "home" || target.kind === "home") {
+  if (!dragged || !target || dragged.kind !== "workspace" || target.kind !== "workspace") {
     return null;
   }
-  // SFTP-only tabs render as a full-width file browser, not a terminal pane —
-  // they never join workspaces, in either role.
-  if (dragged.disableSsh || target.disableSsh) return null;
-  const draggedLeaf = makeLeaf(draggedTabId, originOf(dragged));
-
-  if (target.kind === "workspace") {
-    const ws = getWorkspace(targetSlotId);
-    if (!ws) return null;
-    const root = splitLeaf(
-      ws.root,
-      targetPaneTabId,
-      draggedLeaf,
-      dir,
-      placeDraggedFirst,
-    );
-    setWorkspace(targetSlotId, { root, focusedTabId: draggedTabId });
-    consumeTabIntoWorkspace(draggedTabId);
-    activeId.value = targetSlotId;
-    return targetSlotId;
-  }
-
-  // Plain target → convert it into a workspace in place (keeps its slot id so
-  // the tab-bar position/animation stay stable).
-  const targetLeaf = makeLeaf(target.id, originOf(target));
-  const root = placeDraggedFirst
-    ? makeSplit(dir, draggedLeaf, targetLeaf)
-    : makeSplit(dir, targetLeaf, draggedLeaf);
-  const slotId = target.id;
-  target.kind = "workspace";
-  target.title = dragged.title;
-  target.hostLabel = undefined;
-  target.hostId = undefined;
-  setWorkspace(slotId, { root, focusedTabId: draggedTabId });
+  const dws = getWorkspace(draggedTabId);
+  const tws = getWorkspace(targetSlotId);
+  if (!dws || !tws) return null;
+  const draggedLeaves = collectLeaves(dws.root);
+  if (draggedLeaves.length !== 1) return null; // single-pane drags only, for now
+  const src = draggedLeaves[0];
+  const root = splitLeaf(
+    tws.root,
+    targetPaneTabId,
+    makeLeaf(src.tabId, src.origin),
+    dir,
+    placeDraggedFirst,
+  );
+  setWorkspace(targetSlotId, { root, focusedTabId: src.tabId });
   consumeTabIntoWorkspace(draggedTabId);
-  activeId.value = slotId;
-  return slotId;
+  activeId.value = targetSlotId;
+  return targetSlotId;
 }
 
 /** Set the focused pane within a workspace (drives input/selection routing). */
@@ -389,59 +435,31 @@ export function moveTab(id: number, beforeId: number | null): void {
   tabs.value = next;
 }
 
-/** A workspace lost a leaf and now has ≤1 pane: drop the workspace and turn
- *  its slot back into a normal tab for the survivor (or remove it entirely).
- *  A panel survivor can't stand alone as a tab — it counts as no survivor. */
-function revertOrRemoveSlot(slotId: number, survivor: LeafNode | null): void {
-  if (survivor && isPanelLeaf(survivor)) survivor = null;
-  deleteWorkspace(slotId);
-  const slot = findTab(slotId);
-  if (survivor && slot) {
-    const o = survivor.origin;
-    slot.id = survivor.tabId;
-    slot.kind = o.kind as "terminal" | "ssh"; // panel survivors filtered above
-    slot.title = snapshots.get(survivor.tabId)?.title || o.title;
-    slot.hostLabel = o.hostLabel;
-    slot.hostId = o.hostId;
-    slot.disableSftp = o.disableSftp;
-    slot.disableSsh = o.disableSsh;
-    if (activeId.value === slotId) activeId.value = survivor.tabId;
-  } else {
-    spliceTab(slotId);
-    if (activeId.value === slotId) activeId.value = pickActiveAfterRemoval();
-  }
-}
-
-/** Apply a tree after a leaf was removed: collapse to a tab if ≤1 pane left,
- *  otherwise keep the workspace and fix focus if the focused pane went away.
- *  Panels can't outlive their workspace's terminals: when no terminal leaf
- *  remains, the whole slot goes (the panel panes simply unmount). */
+/** Apply a tree after a pane was removed. Every tab is a workspace, so it never
+ *  collapses to a standalone tab: it stays a workspace (a one-pane workspace
+ *  just renders full-bleed). When the last pane is gone the whole tab closes
+ *  (closing its backend connection). Focus prefers a surviving terminal, then
+ *  any pane. */
 function applyWorkspaceRemoval(
   slotId: number,
   removedTabId: number,
   newRoot: ReturnType<typeof removeLeaf>,
 ): void {
+  if (!newRoot) {
+    void closeTabAndForget(slotId);
+    return;
+  }
   const ws = getWorkspace(slotId);
-  // Panels are self-contained, so a removed terminal does NOT take any panels
-  // with it — sibling file/git panes survive. The workspace only collapses
-  // once no terminal leaf remains (handled below): panels can't keep a
-  // workspace alive on their own.
-  if (!newRoot || newRoot.kind === "leaf") {
-    revertOrRemoveSlot(slotId, newRoot && newRoot.kind === "leaf" ? newRoot : null);
-    return;
-  }
+  const leaves = collectLeaves(newRoot);
   const terminals = collectTerminalLeaves(newRoot);
-  if (terminals.length === 0) {
-    revertOrRemoveSlot(slotId, null);
-    return;
-  }
-  // Focus must stay on a terminal leaf — panel panes own their DOM focus and
-  // never receive PTY input.
   const focusedAlive =
     ws != null &&
     ws.focusedTabId !== removedTabId &&
-    terminals.some((l) => l.tabId === ws.focusedTabId);
-  const focused = focusedAlive ? ws.focusedTabId : terminals[0].tabId;
+    leaves.some((l) => l.tabId === ws.focusedTabId);
+  // Keyboard input only routes to a terminal, so prefer one for focus.
+  const focused = focusedAlive
+    ? ws.focusedTabId
+    : (terminals[0]?.tabId ?? leaves[0].tabId);
   setWorkspace(slotId, { root: newRoot, focusedTabId: focused });
   if (activeId.value === slotId) renderSeq.value++;
 }
@@ -461,7 +479,13 @@ export function handleExit(p: ExitPayload): void {
   }
 
   const idx = tabs.value.findIndex((t) => t.id === p.tab_id);
-  if (idx >= 0) tabs.value.splice(idx, 1);
+  if (idx >= 0) {
+    // A panel-only SFTP workspace's backend connection exits under the slot id
+    // (it has no PTY leaf for workspaceOfLeaf to match above), so tear down
+    // its lingering workspace state here too.
+    if (tabs.value[idx].kind === "workspace") deleteWorkspace(p.tab_id);
+    tabs.value.splice(idx, 1);
+  }
   snapshots.delete(p.tab_id);
   forgetTab(p.tab_id).catch(() => undefined);
   if (activeId.value === p.tab_id) {
@@ -499,35 +523,31 @@ export function moveWorkspaceLeaf(
   return true;
 }
 
-/** Pull a pane out of a workspace back into its own standalone tab. The PTY
- *  keeps running; the workspace collapses if it drops to ≤1 pane. */
+/** Pull a pane out of a workspace into its own (1-pane) workspace tab. Works
+ *  for terminals (the PTY keeps running) and panels alike: a panel leaf reuses
+ *  its own (negative) id as the new slot id, so the detached files/git browser
+ *  becomes a self-standing, PTY-less workspace you can split terminals or more
+ *  panels into — the same shape the SFTP-only connection workspace already has.
+ *  Detaching the slot's primary pane (tabId == slotId) or the only pane is a
+ *  no-op for now (cross-tab moves are a later phase). */
 export function detachWorkspaceLeaf(slotId: number, tabId: number): void {
   const ws = getWorkspace(slotId);
   if (!ws) return;
   const leaf = findLeafByTabId(ws.root, tabId);
   if (!leaf) return;
-  // Panel panes live only inside workspaces — there is no standalone tab to
-  // detach into.
-  if (isPanelLeaf(leaf)) return;
-  const newRoot = removeLeaf(ws.root, tabId);
-  // Collapse/revert the workspace BEFORE pushing the detached tab: when the
-  // detached leaf's id doubles as the slot id (a tab upgraded in place by a
-  // drop or a panel open), findTab(tabId) would otherwise hit the workspace
-  // slot, skip the push, and the revert would strand the live PTY without a
-  // tab. After the removal the slot has been reassigned or spliced, so the
-  // check is accurate.
-  applyWorkspaceRemoval(slotId, tabId, newRoot);
-  if (!findTab(tabId)) {
-    tabs.value.push({
-      id: tabId,
-      kind: leaf.origin.kind as "terminal" | "ssh", // panels rejected above
-      title: snapshots.get(tabId)?.title || leaf.origin.title,
-      hostLabel: leaf.origin.hostLabel,
-      hostId: leaf.origin.hostId,
-      disableSftp: leaf.origin.disableSftp,
-      disableSsh: leaf.origin.disableSsh,
-    });
-  }
+  if (tabId === slotId || collectLeaves(ws.root).length <= 1) return;
+  const origin = leaf.origin;
+  applyWorkspaceRemoval(slotId, tabId, removeLeaf(ws.root, tabId));
+  const t: TabState = {
+    id: tabId,
+    kind: "workspace",
+    title: snapshots.get(tabId)?.title || origin.title,
+    hostLabel: origin.hostLabel,
+    hostId: origin.hostId,
+    disableSftp: origin.disableSftp,
+  };
+  tabs.value.push(t);
+  setWorkspace(tabId, { root: makeLeaf(tabId, origin), focusedTabId: tabId });
   activeId.value = tabId;
 }
 
@@ -567,28 +587,37 @@ export function handleRender(payload: RenderPayload): void {
   }
 }
 
-export function hydrateTabs(infos: TabHydrateInfo[]): void {
-  for (const info of infos) {
-    if (info.id === HOME_TAB_ID || tabs.value.some((t) => t.id === info.id)) {
-      continue;
-    }
-    const kind: TabKind = info.kind === "ssh" ? "ssh" : "terminal";
-    const fallbackTitle =
-      kind === "ssh"
-        ? info.host_label ?? `SSH ${info.id}`
-        : `Terminal ${info.id}`;
-    const t: TabState = {
-      id: info.id,
-      kind,
-      title: fallbackTitle,
-      hostId: info.host_id ?? undefined,
-      hostLabel: info.host_label ?? undefined,
-      disableSftp: info.disable_sftp ?? undefined,
-      disableSsh: info.disable_ssh ?? undefined,
-    };
-    tabs.value.push(t);
-    maybeAutoOpenFiles(t);
+/** Build a workspace tab (+ its initial pane tree) from backend tab info, for
+ *  window-restore hydration and tear-off attach. Returns the tab, or null if
+ *  it's home / already present. */
+function hydrateOne(info: TabHydrateInfo): TabState | null {
+  if (info.id === HOME_TAB_ID || tabs.value.some((t) => t.id === info.id)) {
+    return null;
   }
+  const isSsh = info.kind === "ssh";
+  const fallbackTitle = isSsh
+    ? info.host_label ?? `SSH ${info.id}`
+    : `Terminal ${info.id}`;
+  const t: TabState = {
+    id: info.id,
+    kind: "workspace",
+    title: fallbackTitle,
+    hostId: info.host_id ?? undefined,
+    hostLabel: info.host_label ?? undefined,
+    disableSftp: info.disable_sftp ?? undefined,
+  };
+  tabs.value.push(t);
+  seedWorkspace(
+    t,
+    isSsh
+      ? sshTerminalLeaf(t)
+      : makeLeaf(t.id, { kind: "terminal", title: fallbackTitle }),
+  );
+  return t;
+}
+
+export function hydrateTabs(infos: TabHydrateInfo[]): void {
+  for (const info of infos) hydrateOne(info);
   const firstTerminal = tabs.value.find((t) => t.kind !== "home");
   if (firstTerminal && (activeId.value === HOME_TAB_ID || !tabs.value.some((t) => t.id === activeId.value))) {
     activeId.value = firstTerminal.id;
@@ -596,22 +625,7 @@ export function hydrateTabs(infos: TabHydrateInfo[]): void {
 }
 
 export function attachTab(info: TabHydrateInfo): void {
-  if (info.id === HOME_TAB_ID || tabs.value.some((t) => t.id === info.id)) return;
-  const kind: TabKind = info.kind === "ssh" ? "ssh" : "terminal";
-  const fallbackTitle =
-    kind === "ssh" ? info.host_label ?? `SSH ${info.id}` : `Terminal ${info.id}`;
-  const t: TabState = {
-    id: info.id,
-    kind,
-    title: fallbackTitle,
-    hostId: info.host_id ?? undefined,
-    hostLabel: info.host_label ?? undefined,
-    disableSftp: info.disable_sftp ?? undefined,
-    disableSsh: info.disable_ssh ?? undefined,
-  };
-  tabs.value.push(t);
-  maybeAutoOpenFiles(t);
-  activeId.value = info.id;
+  if (hydrateOne(info)) activeId.value = info.id;
 }
 
 // ---- Panel panes ------------------------------------------------------------
@@ -628,43 +642,15 @@ function makePanelLeaf(desc: PanelDesc): LeafNode {
   });
 }
 
-/** Convert a standalone terminal/ssh tab into a two-pane workspace hosting
- *  the tab plus a new panel (mirrors dropTabIntoTarget's in-place upgrade). */
-function openPanelOnTab(t: TabState, desc: PanelDesc): void {
-  const termLeaf = makeLeaf(t.id, originOf(t));
-  const root = makeSplit(
-    "h",
-    termLeaf,
-    makePanelLeaf(desc),
-    PANEL_SPLIT_RATIO[desc.kind],
-  );
-  const slotId = t.id;
-  // Unlike a tab-merge (dropTabIntoTarget), the workspace is born from this
-  // one tab — keep hostLabel/hostId so notifications still name the host.
-  t.kind = "workspace";
-  setWorkspace(slotId, { root, focusedTabId: termLeaf.tabId });
-}
-
-/** Close a panel pane; the workspace collapses back to a plain tab when only
- *  one terminal remains. */
+/** Close a panel pane; the workspace closes entirely when its last pane goes.
+ *  A files panel releases its SFTP consumer (dropping the pooled connection if
+ *  it was the last consumer). */
 export function closePanelLeaf(slotId: number, leafId: number): void {
   const ws = getWorkspace(slotId);
   if (!ws) return;
+  const leaf = findLeafByTabId(ws.root, leafId);
   applyWorkspaceRemoval(slotId, leafId, removeLeaf(ws.root, leafId));
-}
-
-/** ssh-ness of a terminal tab or pane, for seeding a files panel. */
-function terminalSeedInfo(tabId: number): { isSsh: boolean; disableSftp: boolean } {
-  const t = findTab(tabId);
-  if (t && t.kind === "ssh") return { isSsh: true, disableSftp: !!t.disableSftp };
-  const wsId = workspaceOfLeaf(tabId);
-  if (wsId !== undefined) {
-    const ws = getWorkspace(wsId);
-    const leaf = ws ? findLeafByTabId(ws.root, tabId) : null;
-    if (leaf && leaf.origin.kind === "ssh")
-      return { isSsh: true, disableSftp: !!leaf.origin.disableSftp };
-  }
-  return { isSsh: false, disableSftp: false };
+  if (leaf?.origin.panel?.kind === "files") releaseSftpForPane(leafId);
 }
 
 /** Terminal leaves of a workspace (`{ id, title, focused }`), for the files
@@ -682,38 +668,30 @@ export function listWorkspaceTerminals(
   }));
 }
 
-/** Open a new, self-contained panel pane on the active tab next to the
- *  terminal pane `fromTabId` (falling back to the focused pane). Always adds
- *  a fresh pane — panels no longer toggle. On a plain tab the tab becomes a
- *  workspace. */
+/** Open a new, self-contained panel pane in the active workspace next to the
+ *  pane `fromTabId` (falling back to the focused pane). Always adds a fresh
+ *  pane — panels don't toggle. */
 export function openPanelPane(
   kind: PanelKind,
   fromTabId: number,
   desc: PanelDesc,
 ): void {
   const a = findTab(activeId.value);
-  if (!a || a.kind === "home") return;
-  // SFTP-only tabs are already a full-width file browser with no terminal to
-  // tile against.
-  if (a.kind === "ssh" && a.disableSsh) return;
-
-  if (a.kind !== "workspace") {
-    openPanelOnTab(a, desc);
-    if (kind === "files" && a.kind === "ssh") setSftpAutoOpen(true);
-    return;
-  }
-
+  if (!a || a.kind !== "workspace") return;
   const ws = getWorkspace(a.id);
   if (!ws) return;
-  // Split the originating terminal pane so the panel opens next to it; fall
-  // back to the focused pane if `fromTabId` isn't a terminal leaf here.
+  // With no terminal pane to anchor on (e.g. a files-only workspace), allow
+  // splitting beside a panel; otherwise anchor on a terminal pane.
+  const panelOnly = collectTerminalLeaves(ws.root).length === 0;
+  // Split the originating pane so the panel opens next to it; fall back to the
+  // focused pane if `fromTabId` isn't a usable anchor here.
   let anchor = fromTabId;
   let anchorLeaf = findLeafByTabId(ws.root, anchor);
-  if (!anchorLeaf || isPanelLeaf(anchorLeaf)) {
+  if (!anchorLeaf || (isPanelLeaf(anchorLeaf) && !panelOnly)) {
     anchor = ws.focusedTabId;
     anchorLeaf = findLeafByTabId(ws.root, anchor);
   }
-  if (!anchorLeaf || isPanelLeaf(anchorLeaf)) return;
+  if (!anchorLeaf || (isPanelLeaf(anchorLeaf) && !panelOnly)) return;
   const root = splitLeaf(
     ws.root,
     anchor,
@@ -731,24 +709,20 @@ export function openPanelPane(
     setSftpAutoOpen(true);
 }
 
-/** Open a panel seeded from a terminal pane (pill buttons, Cmd/Ctrl+B / +G):
- *  a files panel on an SSH pane pre-selects that server; on a local pane (and
- *  any git panel) it seeds the folder from the terminal's cwd. The opened
- *  panel is independent — it targets / follows nothing automatically. */
+/** Open a panel seeded from a terminal pane (pill buttons, Cmd/Ctrl+B / +G).
+ *  The panel is independent: a files panel always opens on **local** files
+ *  (the user picks a host inside it), seeded to the terminal's cwd when that
+ *  terminal is local; a git panel seeds its folder from the cwd too. SSH cwd
+ *  isn't known here, so SSH panes just open local/home. */
 export async function openPanelFromTerminal(
   kind: PanelKind,
   terminalTabId: number,
 ): Promise<void> {
   const desc: PanelDesc = { kind, seedTargetTabId: terminalTabId };
-  const info = terminalSeedInfo(terminalTabId);
-  if (kind === "files" && info.isSsh && !info.disableSftp) {
-    desc.seedSshTabId = terminalTabId;
-  } else {
-    // Local terminal cwd (pid→cwd lookup; null for SSH — the panel then
-    // falls back to its remembered dir / home).
-    const cwd = await terminalCwd(terminalTabId).catch(() => null);
-    if (cwd) desc.seedPath = cwd;
-  }
+  // Local terminal cwd (pid→cwd lookup; null for SSH — the panel then falls
+  // back to its remembered dir / home).
+  const cwd = await terminalCwd(terminalTabId).catch(() => null);
+  if (cwd) desc.seedPath = cwd;
   openPanelPane(kind, terminalTabId, desc);
 }
 
@@ -757,7 +731,6 @@ export async function openPanelFromTerminal(
 export async function openPanelOnActive(kind: PanelKind): Promise<void> {
   const a = findTab(activeId.value);
   if (!a || a.kind === "home") return;
-  if (a.kind === "ssh" && a.disableSsh) return;
   let termId = a.id;
   if (a.kind === "workspace") {
     const ws = getWorkspace(a.id);

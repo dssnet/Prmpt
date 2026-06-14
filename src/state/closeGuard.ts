@@ -21,6 +21,7 @@ import {
   closeTabAndForget,
   closeWorkspacePane,
   HOME_TAB_ID,
+  openSshHostIds,
   useTabs,
   type TabState,
 } from "./tabs";
@@ -47,15 +48,12 @@ const { tabs } = useTabs();
  *  panes). SSH leaves are excluded — the tab-level guard can't see into
  *  them, per the window-only SSH rule. */
 function localLeafIds(t: TabState): number[] {
-  if (t.kind === "terminal") return [t.id];
-  if (t.kind === "workspace") {
-    const ws = getWorkspace(t.id);
-    if (!ws) return [];
-    return collectLeaves(ws.root)
-      .filter((l) => l.origin.kind === "terminal")
-      .map((l) => l.tabId);
-  }
-  return [];
+  if (t.kind !== "workspace") return [];
+  const ws = getWorkspace(t.id);
+  if (!ws) return [];
+  return collectLeaves(ws.root)
+    .filter((l) => l.origin.kind === "terminal")
+    .map((l) => l.tabId);
 }
 
 /** Names of foreground programs running in the given local tabs (deduped;
@@ -128,22 +126,16 @@ export async function requestClosePane(tabId: number): Promise<void> {
 export async function windowCloseMessage(): Promise<string | null> {
   if (!confirmCloseRunning.value) return null;
   const localIds: number[] = [];
-  let sshCount = 0;
   for (const t of tabs.value) {
-    if (t.kind === "terminal") {
-      localIds.push(t.id);
-    } else if (t.kind === "ssh") {
-      sshCount++;
-    } else if (t.kind === "workspace") {
-      const ws = getWorkspace(t.id);
-      if (!ws) continue;
-      for (const leaf of collectLeaves(ws.root)) {
-        if (leaf.origin.kind === "terminal") localIds.push(leaf.tabId);
-        else if (leaf.origin.kind === "ssh") sshCount++;
-        // Panel leaves never block a close.
-      }
+    if (t.kind !== "workspace") continue;
+    const ws = getWorkspace(t.id);
+    if (!ws) continue;
+    for (const leaf of collectLeaves(ws.root)) {
+      if (leaf.origin.kind === "terminal") localIds.push(leaf.tabId);
     }
   }
+  // Distinct pooled SSH connections (shells + file browsers, deduped by host).
+  const sshCount = openSshHostIds().size;
   const parts: string[] = [];
   const names = await runningNames(localIds);
   if (names.length > 0) parts.push(describeRunning(names));

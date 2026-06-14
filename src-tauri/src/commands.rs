@@ -12,7 +12,7 @@ use crate::{
     git, localfs,
     protocol::{KeyEventWire, LocalDrive, LocalListing, SftpEntry, TabInfo, WindowBootstrap},
     schedule_refill,
-    ssh::{self, SftpSlots, SshConnectConfig},
+    ssh::{self, SftpConsumers, SharedPool, SshConnectConfig},
     stronghold::{self, StrongholdUnlock},
     tab::{PtyEvent, ScrollKind, SftpReq, SharedRegistry},
     window_pool::WindowMode,
@@ -564,17 +564,18 @@ pub struct SshConnectArgs {
     pub cell_height_px: u32,
 }
 
-/// Open a tab backed by an SSH session. The frontend assembles the
-/// `SshConnectConfig` from the SQL plugin (host row + port forwards)
-/// and the Stronghold plugin (decrypted secrets) before invoking this.
+/// Open a terminal tab backed by a pooled SSH shell channel. The frontend
+/// assembles the `SshConnectConfig` from the SQL plugin (host row + port
+/// forwards) and the Stronghold plugin (decrypted secrets) before invoking
+/// this. The shell is a *consumer* of the host's shared connection; the file
+/// browser acquires its own SFTP consumer separately (`sftp_acquire`).
 #[tauri::command]
 pub fn connect_ssh_host(
     app: AppHandle,
     window: WebviewWindow,
     registry: State<'_, SharedRegistry>,
-    runtime: State<'_, SharedRuntime>,
+    pool: State<'_, SharedPool>,
     config: State<'_, SharedConfig>,
-    sftp_slots: State<'_, SftpSlots>,
     args: SshConnectArgs,
 ) -> AppResult<u64> {
     let scrollback = config.lock().scrollback_lines;
@@ -587,17 +588,7 @@ pub fn connect_ssh_host(
 
     let id = registry.next_tab_id();
     let (pty_tx, pty_rx) = unbounded::<PtyEvent>();
-    let (out_tx, sftp_tx) = ssh::spawn_session(
-        runtime.inner().as_ref(),
-        app.clone(),
-        window.label().to_string(),
-        id,
-        args.config,
-        pty_tx,
-        cols,
-        rows,
-        sftp_slots.inner().clone(),
-    );
+    let out_tx = pool.acquire_shell(&app, args.config, pty_tx, cols, rows);
 
     registry.start_ssh_tab(
         id,
@@ -611,7 +602,6 @@ pub fn connect_ssh_host(
         config.inner().clone(),
         pty_rx,
         out_tx,
-        sftp_tx,
         disable_sftp,
         disable_ssh,
     )?;
@@ -621,17 +611,45 @@ pub fn connect_ssh_host(
     Ok(id)
 }
 
-/// Resolve a pending first-connect host-key prompt. The SSH handshake for
-/// `tab_id` is parked in `check_server_key` until this delivers the user's
-/// verdict; rejecting (or never answering) aborts the connection before any
-/// credentials are sent.
+/// Acquire an SFTP consumer for a host's pooled connection (the file browser's
+/// own channel, independent of any terminal). Returns the consumer id the
+/// frontend routes `sftp_*` calls by, and releases via `sftp_release`.
+#[tauri::command]
+pub fn sftp_acquire(
+    app: AppHandle,
+    window: WebviewWindow,
+    pool: State<'_, SharedPool>,
+    consumers: State<'_, SftpConsumers>,
+    config: SshConnectConfig,
+) -> AppResult<u64> {
+    Ok(pool.acquire_sftp(&app, window.label().to_string(), config, consumers.inner()))
+}
+
+/// Release a previously-acquired SFTP consumer. Drops the file browser's
+/// channel and, if it was the host connection's last consumer, the connection.
+#[tauri::command]
+pub fn sftp_release(
+    pool: State<'_, SharedPool>,
+    consumers: State<'_, SftpConsumers>,
+    consumer_id: u64,
+) -> AppResult<()> {
+    if let Some(handle) = consumers.lock().remove(&consumer_id) {
+        pool.release_conn(&handle.conn, consumer_id);
+    }
+    Ok(())
+}
+
+/// Resolve a pending first-connect host-key prompt. The pooled connection's
+/// handshake for `host_id` is parked in `check_server_key` until this delivers
+/// the user's verdict; rejecting (or never answering) aborts the connection
+/// before any credentials are sent.
 #[tauri::command]
 pub fn ssh_confirm_host_key(
     prompts: State<'_, ssh::HostKeyPrompts>,
-    tab_id: u64,
+    host_id: i64,
     accept: bool,
 ) -> AppResult<()> {
-    if let Some(tx) = prompts.lock().remove(&tab_id) {
+    if let Some(tx) = prompts.lock().remove(&host_id) {
         let _ = tx.send(accept);
     }
     Ok(())
@@ -639,12 +657,26 @@ pub fn ssh_confirm_host_key(
 
 // ---------- SFTP file browser ----------
 //
-// Each command routes a request to the tab's SSH session task (which owns the
-// `SftpSession` on the SSH runtime) via the per-tab channel and awaits a
-// oneshot reply — the handler never touches russh/sftp types directly. Local
+// Each command routes a request to one SFTP *consumer*'s service task (which
+// owns the `SftpSession` on the SSH runtime) via that consumer's channel and
+// awaits a oneshot reply — the handler never touches russh/sftp types
+// directly. `tab_id` is the SFTP consumer id from `sftp_acquire`. Local
 // filesystem paths arrive as strings from the native dialog plugin.
 
-/// Send one request to the tab's SFTP service and await its reply.
+/// Clone an SFTP consumer's request sender, or a clean "not available" error
+/// when the consumer is unknown (released / never acquired).
+fn sftp_sender(
+    consumers: &State<'_, SftpConsumers>,
+    consumer_id: u64,
+) -> AppResult<tokio::sync::mpsc::Sender<SftpReq>> {
+    consumers
+        .lock()
+        .get(&consumer_id)
+        .map(|h| h.sftp_tx.clone())
+        .ok_or_else(|| AppError::Ssh("SFTP is not available on this connection".into()))
+}
+
+/// Send one request to the consumer's SFTP service and await its reply.
 async fn sftp_call<T>(
     tx: tokio::sync::mpsc::Sender<SftpReq>,
     build: impl FnOnce(tokio::sync::oneshot::Sender<AppResult<T>>) -> SftpReq,
@@ -661,64 +693,64 @@ async fn sftp_call<T>(
 
 #[tauri::command]
 pub async fn sftp_list_dir(
-    registry: State<'_, SharedRegistry>,
+    consumers: State<'_, SftpConsumers>,
     tab_id: u64,
     path: String,
 ) -> AppResult<Vec<SftpEntry>> {
-    let tx = registry.sftp_sender(tab_id)?;
+    let tx = sftp_sender(&consumers, tab_id)?;
     sftp_call(tx, |reply| SftpReq::List { path, reply }).await
 }
 
 #[tauri::command]
 pub async fn sftp_realpath(
-    registry: State<'_, SharedRegistry>,
+    consumers: State<'_, SftpConsumers>,
     tab_id: u64,
     path: String,
 ) -> AppResult<String> {
-    let tx = registry.sftp_sender(tab_id)?;
+    let tx = sftp_sender(&consumers, tab_id)?;
     sftp_call(tx, |reply| SftpReq::Realpath { path, reply }).await
 }
 
 #[tauri::command]
 pub async fn sftp_stat(
-    registry: State<'_, SharedRegistry>,
+    consumers: State<'_, SftpConsumers>,
     tab_id: u64,
     path: String,
 ) -> AppResult<SftpEntry> {
-    let tx = registry.sftp_sender(tab_id)?;
+    let tx = sftp_sender(&consumers, tab_id)?;
     sftp_call(tx, |reply| SftpReq::Stat { path, reply }).await
 }
 
 #[tauri::command]
 pub async fn sftp_mkdir(
-    registry: State<'_, SharedRegistry>,
+    consumers: State<'_, SftpConsumers>,
     tab_id: u64,
     path: String,
 ) -> AppResult<()> {
-    let tx = registry.sftp_sender(tab_id)?;
+    let tx = sftp_sender(&consumers, tab_id)?;
     sftp_call(tx, |reply| SftpReq::Mkdir { path, reply }).await
 }
 
 #[tauri::command]
 pub async fn sftp_rename(
-    registry: State<'_, SharedRegistry>,
+    consumers: State<'_, SftpConsumers>,
     tab_id: u64,
     from: String,
     to: String,
 ) -> AppResult<()> {
-    let tx = registry.sftp_sender(tab_id)?;
+    let tx = sftp_sender(&consumers, tab_id)?;
     sftp_call(tx, |reply| SftpReq::Rename { from, to, reply }).await
 }
 
 #[tauri::command]
 pub async fn sftp_remove(
-    registry: State<'_, SharedRegistry>,
+    consumers: State<'_, SftpConsumers>,
     tab_id: u64,
     path: String,
     is_dir: bool,
     transfer_id: u64,
 ) -> AppResult<()> {
-    let tx = registry.sftp_sender(tab_id)?;
+    let tx = sftp_sender(&consumers, tab_id)?;
     sftp_call(tx, |reply| SftpReq::Remove {
         path,
         is_dir,
@@ -730,13 +762,13 @@ pub async fn sftp_remove(
 
 #[tauri::command]
 pub async fn sftp_download(
-    registry: State<'_, SharedRegistry>,
+    consumers: State<'_, SftpConsumers>,
     tab_id: u64,
     remote: String,
     local: String,
     transfer_id: u64,
 ) -> AppResult<()> {
-    let tx = registry.sftp_sender(tab_id)?;
+    let tx = sftp_sender(&consumers, tab_id)?;
     sftp_call(tx, |reply| SftpReq::Download {
         remote,
         local: std::path::PathBuf::from(local),
@@ -748,13 +780,13 @@ pub async fn sftp_download(
 
 #[tauri::command]
 pub async fn sftp_upload(
-    registry: State<'_, SharedRegistry>,
+    consumers: State<'_, SftpConsumers>,
     tab_id: u64,
     local: String,
     remote: String,
     transfer_id: u64,
 ) -> AppResult<()> {
-    let tx = registry.sftp_sender(tab_id)?;
+    let tx = sftp_sender(&consumers, tab_id)?;
     sftp_call(tx, |reply| SftpReq::Upload {
         local: std::path::PathBuf::from(local),
         remote,
@@ -764,29 +796,30 @@ pub async fn sftp_upload(
     .await
 }
 
-/// Cross-connection copy: stream a remote file or directory tree from one SSH
-/// tab's SFTP session straight to another's (relayed through this process).
-/// Progress lands on the destination tab via `sftp:transfer_progress`.
+/// Cross-connection copy: stream a remote file or directory tree from one SFTP
+/// consumer's session straight to another's (relayed through this process).
+/// Progress lands on the destination consumer via `sftp:transfer_progress`.
+/// `src_tab`/`dst_tab` are SFTP consumer ids.
 #[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub async fn sftp_relay(
     app: AppHandle,
     window: WebviewWindow,
     runtime: State<'_, SharedRuntime>,
-    sftp_slots: State<'_, SftpSlots>,
+    consumers: State<'_, SftpConsumers>,
     src_tab: u64,
     src_path: String,
     dst_tab: u64,
     dst_path: String,
     transfer_id: u64,
 ) -> AppResult<()> {
-    let slots = sftp_slots.inner().clone();
+    let consumers = consumers.inner().clone();
     let window = window.label().to_string();
-    // Run on the SSH runtime, where both sessions' channel drivers live.
+    // Run on the SSH runtime, where both consumers' tasks live.
     let (tx, rx) = tokio::sync::oneshot::channel();
     runtime.spawn(async move {
         let r = ssh::relay(
-            slots, app, window, src_tab, src_path, dst_tab, dst_path, transfer_id,
+            consumers, app, window, src_tab, src_path, dst_tab, dst_path, transfer_id,
         )
         .await;
         let _ = tx.send(r);

@@ -5,7 +5,7 @@ import {
   markKeyHasPassphrase,
   type SshHostRow,
 } from "../db";
-import { inspectSshKey, type SshAuthConfig } from "../ipc";
+import { inspectSshKey, type SshAuthConfig, type SshConnectConfig } from "../ipc";
 import {
   hostPasswordKey,
   keyPassphraseKey,
@@ -20,7 +20,7 @@ import {
   getCellMetrics,
   reflowActive,
 } from "./terminal";
-import { spawnSsh, useTabs } from "./tabs";
+import { openSftpOnlyHost, spawnSsh, useTabs } from "./tabs";
 
 export async function resolveAuth(host: SshHostRow): Promise<SshAuthConfig> {
   if (host.auth_method === "agent") return { kind: "agent" };
@@ -77,13 +77,49 @@ export async function resolveAuth(host: SshHostRow): Promise<SshAuthConfig> {
   return { kind: "key", private_key: privateKey, passphrase };
 }
 
+/** Assemble the full `SshConnectConfig` (auth + port forwards) for a host.
+ *  Used by both the shell-tab connect path and the file browser's SFTP
+ *  consumer acquire, so a second consumer never re-prompts. */
+export async function buildSshConnectConfig(host: SshHostRow): Promise<SshConnectConfig> {
+  const auth = await resolveAuth(host);
+  const fwds = await listPortForwards(host.id);
+  return {
+    host_id: host.id,
+    label: host.label,
+    hostname: host.hostname,
+    port: host.port,
+    username: host.username,
+    auth,
+    stored_fingerprint: host.host_fp_sha256,
+    disable_sftp: host.disable_sftp,
+    disable_ssh: host.disable_ssh,
+    forwards: fwds
+      .filter((f) => f.enabled)
+      .map((f) => ({
+        id: f.id,
+        kind: f.kind,
+        bind_host: f.bind_host,
+        bind_port: f.bind_port,
+        target_host: f.target_host,
+        target_port: f.target_port,
+      })),
+  };
+}
+
 export async function connectHost(host: SshHostRow): Promise<void> {
   const { active } = useTabs();
   reflowActive(active.value);
+  // SFTP-only hosts have no shell: open a files-only workspace whose browser
+  // owns its SFTP consumer (no backend terminal tab). The file browser
+  // resolves auth + acquires the consumer itself, so nothing to do here but
+  // open the workspace.
+  if (host.disable_ssh) {
+    openSftpOnlyHost(host.id, host.label);
+    return;
+  }
   const { cellWidthPx, cellHeightPx, dpr } = getCellMetrics();
   const dims = computeDims();
-  const auth = await resolveAuth(host);
-  const fwds = await listPortForwards(host.id);
+  const config = await buildSshConnectConfig(host);
   await spawnSsh({
     hostId: host.id,
     hostLabel: host.label,
@@ -91,29 +127,7 @@ export async function connectHost(host: SshHostRow): Promise<void> {
     rows: dims.rows,
     cellWidthPx: Math.round(cellWidthPx * dpr),
     cellHeightPx: Math.round(cellHeightPx * dpr),
-    config: {
-      host_id: host.id,
-      label: host.label,
-      hostname: host.hostname,
-      port: host.port,
-      username: host.username,
-      auth,
-      stored_fingerprint: host.host_fp_sha256,
-      disable_sftp: host.disable_sftp,
-      disable_ssh: host.disable_ssh,
-      forwards: fwds
-        .filter((f) => f.enabled)
-        .map((f) => ({
-          id: f.id,
-          kind: f.kind,
-          bind_host: f.bind_host,
-          bind_port: f.bind_port,
-          target_host: f.target_host,
-          target_port: f.target_port,
-        })),
-    },
+    config,
   });
-  // SFTP-only tabs mount the file browser instead of the canvas — nothing
-  // useful to focus there.
-  if (!host.disable_ssh) focusCanvas();
+  focusCanvas();
 }

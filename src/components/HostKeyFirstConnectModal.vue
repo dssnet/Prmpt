@@ -28,7 +28,7 @@ async function onAccept() {
       props.payload.fingerprint,
       props.payload.algorithm,
     );
-    await sshConfirmHostKey(props.payload.tab_id, true);
+    await sshConfirmHostKey(props.payload.host_id, true);
   } catch (err) {
     console.error("host key accept failed:", err);
   }
@@ -38,7 +38,7 @@ async function onAccept() {
 async function onReject() {
   busy.value = true;
   try {
-    await sshConfirmHostKey(props.payload.tab_id, false);
+    await sshConfirmHostKey(props.payload.host_id, false);
   } catch (err) {
     console.error("host key reject failed:", err);
   }

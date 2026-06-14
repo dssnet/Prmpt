@@ -29,11 +29,12 @@ export type PanelKind = "files" | "git";
  *  over once it's mounted. */
 export interface PanelDesc {
   kind: PanelKind;
-  /** files: seed the left column to this SSH connection (local files
-   *  otherwise). */
-  seedSshTabId?: number;
+  /** files: seed the source to this saved host (local files otherwise). The
+   *  browser acquires its own SFTP consumer for the host and releases it when
+   *  the pane closes. */
+  seedHostId?: number;
   /** Initial folder to show (local path). Local terminals seed this from
-   *  their cwd; SSH seeds the server via `seedSshTabId`, not a remote path. */
+   *  their cwd; a host seeds the server via `seedHostId`, not a remote path. */
   seedPath?: string;
   /** files: initial cd / insert-path target terminal. */
   seedTargetTabId?: number;

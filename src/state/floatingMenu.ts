@@ -7,10 +7,12 @@
  * `components/FloatingMenu.vue` (mounted in App.vue) off the reactive model
  * below; opened via `openFloatingMenu`.
  */
-import { ref } from "vue";
+import { ref, type Component } from "vue";
 
 export interface FloatingMenuItem {
   text: string;
+  /** Optional leading icon (a lucide-vue-next component). */
+  icon?: Component;
   /** Leaf action. Omit when `submenu` is set. */
   action?: () => void;
   /** One level of nested items (e.g. a terminal list). */

@@ -184,6 +184,7 @@ const submenuItems = computed(() => {
             @mouseenter="onItemEnter(it, idx, $event.currentTarget as HTMLElement)"
             @click="runItem(it)"
           >
+            <component :is="it.icon" v-if="it.icon" :size="14" class="fm-icon" />
             <span class="fm-text">{{ it.text }}</span>
             <span v-if="it.submenu && it.submenu.length" class="fm-caret">›</span>
           </button>
@@ -206,6 +207,7 @@ const submenuItems = computed(() => {
           @mouseenter="onSubItemEnter(sit)"
           @click="runItem(sit)"
         >
+          <component :is="sit.icon" v-if="sit.icon" :size="14" class="fm-icon" />
           <span class="fm-text">{{ sit.text }}</span>
         </button>
       </div>
@@ -245,6 +247,14 @@ const submenuItems = computed(() => {
 .fm-item.fm-open {
   background: color-mix(in srgb, var(--accent, #89b4fa) 22%, transparent);
   color: var(--fg, #e6e6e6);
+}
+.fm-icon {
+  flex: none;
+  color: var(--fg-subtle, #9399b2);
+}
+.fm-item:hover:not(.fm-disabled) .fm-icon,
+.fm-item.fm-open .fm-icon {
+  color: inherit;
 }
 .fm-text {
   flex: 1;

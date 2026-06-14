@@ -7,6 +7,8 @@
  * On a link the menu grows a "Copy Link" item; the URL is hit-tested here and
  * remembered via `setContextLink`, then read back by `copyContextLink`.
  */
+import { ClipboardPaste, Copy, Link } from "lucide-vue-next";
+
 import { copyContextLink, setContextLink } from "./links";
 import { openFloatingMenu, type FloatingMenuEntry } from "./floatingMenu";
 import {
@@ -22,15 +24,16 @@ export function openTerminalContextMenu(e: MouseEvent): void {
 
   const items: FloatingMenuEntry[] = [];
   if (link) {
-    items.push({ text: "Copy Link", action: () => copyContextLink() });
+    items.push({ text: "Copy Link", icon: Link, action: () => copyContextLink() });
     items.push(null);
   }
   items.push({
     text: "Copy",
+    icon: Copy,
     disabled: !hasSelection(),
     action: () => copyCurrentSelection(),
   });
-  items.push({ text: "Paste", action: () => void pasteFromClipboard() });
+  items.push({ text: "Paste", icon: ClipboardPaste, action: () => void pasteFromClipboard() });
 
   openFloatingMenu(e.clientX, e.clientY, items);
 }

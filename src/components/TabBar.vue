@@ -11,7 +11,12 @@ import {
 } from "../state/tabs";
 import { requestCloseTab } from "../state/closeGuard";
 import { bellTabs } from "../state/notifications";
-import { resetTabConsumed } from "../state/workspace";
+import {
+  collectLeaves,
+  getWorkspace,
+  resetTabConsumed,
+  workspaceTick,
+} from "../state/workspace";
 import NotificationCenter from "./NotificationCenter.vue";
 import {
   clearWorkspaceDragPreview,
@@ -50,9 +55,22 @@ function classFor(t: TabState): string {
 
 function labelFor(t: TabState): string {
   if (t.title && t.title.length > 0) return t.title;
-  if (t.kind === "ssh") return t.hostLabel ?? "SSH";
-  if (t.kind === "workspace") return "Workspace";
+  if (t.hostId != null) return t.hostLabel ?? "SSH";
   return "Terminal";
+}
+
+/** An SSH-connection tab (shell or SFTP-only) shows a globe. */
+function tabIsSsh(t: TabState): boolean {
+  return t.hostId != null;
+}
+
+/** Pane count for the active workspace (touches workspaceTick for reactivity),
+ *  so a multi-pane tab can show the split icon. */
+function tabPaneCount(t: TabState): number {
+  void workspaceTick.value;
+  if (t.kind !== "workspace") return 0;
+  const ws = getWorkspace(t.id);
+  return ws ? collectLeaves(ws.root).length : 1;
 }
 
 function onTabClick(t: TabState): void {
@@ -220,7 +238,10 @@ function onTabMouseDown(t: TabState, e: MouseEvent): void {
     startScreenX: e.screenX,
     startScreenY: e.screenY,
     active: false,
-    reorderOnly: t.kind === "workspace",
+    // A single-pane tab (terminal or an SFTP-only file browser) can be grafted
+    // into another workspace or torn off; a multi-pane workspace can only
+    // reorder for now (its panes move individually, not as a tab — later phase).
+    reorderOnly: tabPaneCount(t) > 1,
     el,
     grabOffsetX: e.clientX - r.left,
     width: r.width,
@@ -519,12 +540,12 @@ watch(overflowTabs, (n) => {
             @mousedown.middle.prevent="onMiddleClose(t)"
           >
             <Globe
-              v-if="t.kind === 'ssh'"
+              v-if="tabIsSsh(t)"
               :size="12"
               class="flex-none text-fg-subtle"
             />
             <Columns2
-              v-else-if="t.kind === 'workspace'"
+              v-else-if="tabPaneCount(t) > 1"
               :size="12"
               class="flex-none text-fg-subtle"
             />
@@ -566,12 +587,12 @@ watch(overflowTabs, (n) => {
           @mousedown.middle.prevent="onMiddleClose(t)"
         >
           <Globe
-            v-if="t.kind === 'ssh'"
+            v-if="tabIsSsh(t)"
             :size="13"
             class="flex-none mr-1 text-fg-muted"
           />
           <Columns2
-            v-else-if="t.kind === 'workspace'"
+            v-else-if="tabPaneCount(t) > 1"
             :size="13"
             class="flex-none mr-1 text-fg-muted"
           />

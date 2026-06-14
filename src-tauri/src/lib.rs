@@ -212,10 +212,11 @@ pub fn run() {
         .manage(window_counter)
         .manage(pending)
         .manage(window_pool)
+        .manage(ssh::ConnectionPool::new(runtime.clone()))
         .manage(runtime)
         .manage(DbUrl(db_url))
         .manage(secret_store::SecretStore::new())
-        .manage(ssh::new_sftp_slots())
+        .manage(ssh::new_sftp_consumers())
         .manage(ssh::new_host_key_prompts())
         .invoke_handler(tauri::generate_handler![
             commands::spawn_tab,
@@ -247,6 +248,8 @@ pub fn run() {
             commands::connect_ssh_host,
             commands::ssh_confirm_host_key,
             commands::inspect_ssh_key,
+            commands::sftp_acquire,
+            commands::sftp_release,
             commands::sftp_list_dir,
             commands::sftp_realpath,
             commands::sftp_stat,
@@ -636,6 +639,12 @@ pub fn configure_new_window<R: Runtime>(window: &WebviewWindow<R>) {
             for tab_id in registry.tabs_in_window(&label) {
                 let _ = registry.close(tab_id);
             }
+            // File-browser SFTP consumers have no backend tab to reap above;
+            // release the ones this window held so their pooled connections
+            // drop when no other window still uses them.
+            let conn_pool = app.state::<ssh::SharedPool>();
+            let consumers = app.state::<ssh::SftpConsumers>();
+            conn_pool.release_window(consumers.inner(), &label);
             let pending = app.state::<SharedPendingHydration>();
             pending.0.lock().remove(&label);
 

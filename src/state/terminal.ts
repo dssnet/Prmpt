@@ -41,7 +41,7 @@ import {
   type PaneRect,
   type Workspace,
 } from "./workspace";
-import type { PanelKind } from "./panels";
+import { isPanelLeafId, type PanelKind } from "./panels";
 import {
   clearLinkHover,
   decoratePayloadForHover,
@@ -92,8 +92,8 @@ export interface PanelPane {
   tabId: number;
   kind: PanelKind;
   title: string;
-  /** files: SSH connection the left column was seeded with. */
-  seedSshTabId?: number;
+  /** files: saved host the source was seeded with. */
+  seedHostId?: number;
   /** Initial folder seed (local path). */
   seedPath?: string;
   /** files: initial cd / insert-path target terminal. */
@@ -108,6 +108,15 @@ let wsPanelPanes: PanelPane[] = [];
 // so the rounded-corner mask (--pane-radius) never clips edge glyphs. Must
 // stay ≥ radius·(1 − 1/√2) ≈ 3.6px for the default 12px radius.
 const PANE_PAD = 6;
+
+// A workspace with a single pane renders full-bleed — no inner padding, corner
+// radius, focus ring, or divider — so a lone terminal/panel fills the tab like
+// the old standalone view. Set during reflow; `panePad()` is the pad used by
+// the draw + coordinate-mapping paths.
+let wsSinglePane = true;
+function panePad(): number {
+  return wsSinglePane ? 0 : PANE_PAD;
+}
 
 // Bumped whenever the cached workspace layout changes (reflow, resize,
 // structural mutation) so views can refresh divider overlays.
@@ -186,7 +195,7 @@ function reflowWorkspaceLayout(ws: Workspace, w: number, h: number): void {
         ...pane,
         kind: leaf.origin.panel.kind,
         title: leaf.origin.title,
-        seedSshTabId: leaf.origin.panel.seedSshTabId,
+        seedHostId: leaf.origin.panel.seedHostId,
         seedPath: leaf.origin.panel.seedPath,
         seedTargetTabId: leaf.origin.panel.seedTargetTabId,
       });
@@ -196,11 +205,13 @@ function reflowWorkspaceLayout(ws: Workspace, w: number, h: number): void {
   }
   wsPanes = termPanes;
   wsPanelPanes = panelPanes;
+  wsSinglePane = panes.length === 1;
   layoutVersion.value++;
+  const pad = panePad();
   for (const pane of wsPanes) {
     // The grid only gets the pane minus its inner padding (see PANE_PAD).
-    const cols = Math.max(1, Math.floor((pane.w - 2 * PANE_PAD) / cellWidthPx));
-    const rows = Math.max(1, Math.floor((pane.h - 2 * PANE_PAD) / cellHeightPx));
+    const cols = Math.max(1, Math.floor((pane.w - 2 * pad) / cellWidthPx));
+    const rows = Math.max(1, Math.floor((pane.h - 2 * pad) / cellHeightPx));
     void resizeTab({
       tabId: pane.tabId,
       cols,
@@ -361,8 +372,9 @@ function drawActive(): void {
           { x: pane.x, y: pane.y, w: pane.w, h: pane.h },
           {
             cursor: focused ? "full" : "none",
-            cornerRadius: paneCornerRadius(),
-            padding: PANE_PAD,
+            // Full-bleed for a lone pane: no rounded corners or inner padding.
+            cornerRadius: wsSinglePane ? 0 : paneCornerRadius(),
+            padding: panePad(),
           },
         );
       }
@@ -457,7 +469,7 @@ function pointerOrigin(): { x: number; y: number } {
   const a = activeWs();
   if (a) {
     const pane = wsPanes.find((p) => p.tabId === a.ws.focusedTabId);
-    if (pane) return { x: pane.x + PANE_PAD, y: pane.y + PANE_PAD };
+    if (pane) return { x: pane.x + panePad(), y: pane.y + panePad() };
   }
   return { x: 0, y: 0 };
 }
@@ -468,7 +480,7 @@ function pointerAreaHeight(): number {
   const a = activeWs();
   if (a) {
     const pane = wsPanes.find((p) => p.tabId === a.ws.focusedTabId);
-    if (pane) return pane.h - 2 * PANE_PAD;
+    if (pane) return pane.h - 2 * panePad();
   }
   return canvasEl ? canvasEl.getBoundingClientRect().height : 0;
 }
@@ -622,8 +634,8 @@ function cellAtPoint(
     const pane = paneAt(lp.x, lp.y);
     if (!pane) return null;
     snap = snapshotFor(pane.tabId);
-    originX = pane.x + PANE_PAD;
-    originY = pane.y + PANE_PAD;
+    originX = pane.x + panePad();
+    originY = pane.y + panePad();
   } else {
     snap = activeSnapshot();
   }
@@ -823,7 +835,11 @@ export function inputTargetTabId(): number | null {
   const a = active.value;
   if (!a || a.kind === "home") return null;
   const ws = activeWs();
-  return ws ? ws.ws.focusedTabId : a.id;
+  if (!ws) return a.id;
+  // A panel-only SFTP workspace can have a panel focused (negative id): there
+  // is no PTY to route keyboard / paste / scroll to, so target nothing.
+  const focused = ws.ws.focusedTabId;
+  return isPanelLeafId(focused) ? null : focused;
 }
 
 export async function pasteFromClipboard(): Promise<void> {
@@ -899,10 +915,7 @@ export function resolveDropAt(
 ): DropResolution | null {
   const { active } = useTabs();
   const activeTab = active.value;
-  if (!activeTab || activeTab.kind === "home") return null;
-  // SFTP-only tabs render as a full-width file browser and never join
-  // workspaces (dropTabIntoTarget rejects them too) — no drop preview.
-  if (activeTab.kind === "ssh" && activeTab.disableSsh) return null;
+  if (!activeTab || activeTab.kind !== "workspace") return null;
   const lp = clientToLocal(clientX, clientY);
   if (!lp) return null;
 

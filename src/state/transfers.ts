@@ -12,7 +12,7 @@ import { ref } from "vue";
 
 import { onSftpTransferProgress } from "../ipc";
 import { isAway, notify } from "./notifications";
-import { listSshConnections } from "./tabs";
+import { consumerLabel } from "./sftpConsumers";
 
 export interface Transfer {
   id: number;
@@ -56,7 +56,7 @@ export function tidySftpError(message: string): string {
 function hostForKey(key: string): string {
   if (key === "local") return "Local";
   const id = Number(key.slice("sftp:".length));
-  return listSshConnections().find((c) => c.id === id)?.label ?? "remote host";
+  return consumerLabel(id) ?? "remote host";
 }
 
 /** Add a row and return its transfer id (pass it to the backend command). */

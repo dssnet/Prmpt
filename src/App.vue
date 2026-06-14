@@ -44,7 +44,9 @@ import {
   handleRender,
   hydrateTabs,
   isSshReconnecting,
-  isSshTabOrPane,
+  isSshShellTab,
+  isHostConnected,
+  shellTabsForHost,
   owningTabId,
   removeTabLocal,
   setActive,
@@ -440,7 +442,9 @@ const shortcuts: Shortcut[] = [
     match: (k) => k === "b" || k === "B",
     when: () => {
       const a = active.value;
-      return !!a && a.kind !== "home" && !a.disableSsh;
+      // Any non-home tab: terminals, SSH, the single-panel SFTP tab (adds a
+      // second file panel, promoting it to a workspace), and workspaces.
+      return !!a && a.kind !== "home";
     },
     run: () => void openPanelOnActive("files"),
   },
@@ -449,7 +453,7 @@ const shortcuts: Shortcut[] = [
     match: (k) => k === "g" || k === "G",
     when: () => {
       const a = active.value;
-      return !!a && (a.kind === "terminal" || a.kind === "workspace");
+      return !!a && a.kind === "workspace";
     },
     run: () => void openPanelOnActive("git"),
   },
@@ -602,7 +606,7 @@ onMounted(async () => {
     // PTY → tab thread → exit chain) isn't guaranteed, and we don't want
     // to kill the window before the error modal mounts. (Checked via the
     // workspace tree too: an SSH tab with a files panel is a workspace.)
-    const wasSsh = isSshTabOrPane(p.tab_id);
+    const wasSsh = isSshShellTab(p.tab_id);
     handleExit(p);
     const maybeCloseWindow = () => {
       const liveTerminals = tabs.value.filter((t) => t.kind !== "home");
@@ -685,22 +689,29 @@ onMounted(async () => {
   // Ctrl+C-cancels-reconnect shortcut — not SFTP-only tabs, where keyboard
   // focus lives in the file browser and Ctrl+C plausibly means "copy".
   unlisteners.push(await onSshReconnecting((p) => {
-    const t = tabs.value.find((t) => t.id === p.tab_id);
-    if (t?.kind === "ssh" && t.disableSsh) {
-      showToast(
-        {
-          host: p.host_label,
-          title: "Connection lost",
-          detail: "Reconnecting…",
-          kind: "error",
-        },
-        8000,
-      );
+    // Reconnect is per pooled connection (keyed by host). Shell panes show the
+    // in-terminal banner (and arm Ctrl+C-cancels-reconnect); a files-only host
+    // has no VT, so surface it as a toast instead.
+    const shellTabs = shellTabsForHost(p.host_id);
+    if (shellTabs.length === 0) {
+      if (isHostConnected(p.host_id)) {
+        showToast(
+          {
+            host: p.host_label,
+            title: "Connection lost",
+            detail: "Reconnecting…",
+            kind: "error",
+          },
+          8000,
+        );
+      }
     } else {
-      setSshReconnecting(p.tab_id);
+      shellTabs.forEach(setSshReconnecting);
     }
   }));
-  unlisteners.push(await onSshConnected((p) => clearSshReconnecting(p.tab_id)));
+  unlisteners.push(await onSshConnected((p) => {
+    shellTabsForHost(p.host_id).forEach(clearSshReconnecting);
+  }));
 
   // Confirm-on-close guard for the whole window (traffic light, custom
   // TitleBar button, OS chrome — every path lands here). Tauri awaits this

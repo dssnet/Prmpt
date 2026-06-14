@@ -242,10 +242,6 @@ pub struct TabHandle {
     pub kind: TabKind,
     pub host_id: Option<i64>,
     pub host_label: Option<String>,
-    /// Present for SSH tabs whose session offered the SFTP subsystem.
-    /// Command handlers clone this to drive the file browser. `None` for
-    /// local tabs and for SSH hosts where SFTP is disabled/unavailable.
-    pub sftp_tx: Option<tokio::sync::mpsc::Sender<SftpReq>>,
     /// SSH per-host flags, kept so `TabInfo` (hydrate/tear-off) can restore
     /// the right tab chrome in whichever window ends up owning the tab.
     pub disable_sftp: bool,
@@ -296,7 +292,6 @@ impl TabRegistry {
         config: SharedConfig,
         pty_rx: Receiver<PtyEvent>,
         out_tx: tokio::sync::mpsc::Sender<SshIoCmd>,
-        sftp_tx: tokio::sync::mpsc::Sender<SftpReq>,
         disable_sftp: bool,
         disable_ssh: bool,
     ) -> AppResult<()> {
@@ -323,7 +318,6 @@ impl TabRegistry {
                 kind: TabKind::Ssh,
                 host_id: Some(host_id),
                 host_label: Some(host_label),
-                sftp_tx: Some(sftp_tx),
                 disable_sftp,
                 disable_ssh,
                 shell_pid: None,
@@ -463,7 +457,6 @@ impl TabRegistry {
                 kind: TabKind::Local,
                 host_id: None,
                 host_label: None,
-                sftp_tx: None,
                 disable_sftp: false,
                 disable_ssh: false,
                 shell_pid,
@@ -639,18 +632,6 @@ impl TabRegistry {
     /// `platform::process_cwd`.
     pub fn shell_pid(&self, id: u64) -> Option<u32> {
         self.inner.lock().get(&id).and_then(|h| h.shell_pid)
-    }
-
-    /// Clone the SFTP request sender for an SSH tab. Errors when the tab is
-    /// unknown, is a local tab, or its session never offered SFTP (subsystem
-    /// failed / disabled for the host) — the command layer maps that to a
-    /// clean "SFTP not available" surfaced in the panel.
-    pub fn sftp_sender(&self, id: u64) -> AppResult<tokio::sync::mpsc::Sender<SftpReq>> {
-        let guard = self.inner.lock();
-        let h = guard.get(&id).ok_or(AppError::UnknownTab(id))?;
-        h.sftp_tx
-            .clone()
-            .ok_or_else(|| AppError::Ssh("SFTP is not available on this connection".into()))
     }
 
     pub fn close(&self, id: u64) -> AppResult<()> {

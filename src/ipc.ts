@@ -480,6 +480,19 @@ export async function connectSshHost(args: SshConnectArgs): Promise<number> {
   });
 }
 
+/** Acquire an SFTP consumer on a host's pooled connection (the file browser's
+ *  own channel). Returns the consumer id used to route every `sftp_*` call and
+ *  to `sftpRelease` it. */
+export async function sftpAcquire(config: SshConnectConfig): Promise<number> {
+  return await invoke<number>("sftp_acquire", { config });
+}
+
+/** Release a previously-acquired SFTP consumer (drops the channel, and the
+ *  host connection when it was the last consumer). */
+export async function sftpRelease(consumerId: number): Promise<void> {
+  await invoke("sftp_release", { consumerId });
+}
+
 export interface SshKeyInfo {
   /** True if the key text parsed (with or without a passphrase being needed). */
   valid: boolean;
@@ -544,8 +557,8 @@ export function onSshHostKeyFirstConnect(
 /** Resolve a pending first-connect host-key prompt. The SSH handshake is
  *  parked until this delivers the verdict; rejecting aborts the connection
  *  before any credentials are sent. */
-export async function sshConfirmHostKey(tabId: number, accept: boolean): Promise<void> {
-  await invoke("ssh_confirm_host_key", { tabId, accept });
+export async function sshConfirmHostKey(hostId: number, accept: boolean): Promise<void> {
+  await invoke("ssh_confirm_host_key", { hostId, accept });
 }
 
 export function onSshPortForwardError(

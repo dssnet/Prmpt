@@ -9,6 +9,7 @@ import { highlightedPaneId } from "../state/paneHighlight";
 import { isPanelLeafId, type PanelKind } from "../state/panels";
 import FilesPanel from "./FilesPanel.vue";
 import GitPanel from "./GitPanel.vue";
+import PaneTitlebar from "./PaneTitlebar.vue";
 import TerminalScrollbar from "./TerminalScrollbar.vue";
 import {
   applyRendererTheme,
@@ -72,7 +73,7 @@ const PANEL_VIEWS: Record<
     props: (p) => ({
       paneId: p.tabId,
       slotId: workspaceSlotId(),
-      seedSshTabId: p.seedSshTabId,
+      seedHostId: p.seedHostId,
       seedPath: p.seedPath,
       seedTargetTabId: p.seedTargetTabId,
     }),
@@ -94,20 +95,8 @@ function openPanel(kind: PanelKind, fromTabId?: number): void {
   void openPanelFromTerminal(kind, id);
 }
 
-// SFTP-only SSH tab (host has `disable_ssh`): no shell, no canvas — the file
-// browser takes over the whole host area as an overlay.
-const fullSftp = computed<{ id: number; hostLabel?: string } | null>(() => {
-  const a = active.value;
-  if (!a || a.kind !== "ssh" || !a.disableSsh) return null;
-  return { id: a.id, hostLabel: a.hostLabel };
-});
-
 const { selectionTick } = useTerminalSelection();
 const { theme } = useTheme();
-
-const canvasVisible = computed(
-  () => active.value?.kind !== "home" && !fullSftp.value,
-);
 
 // Drop highlight (shared with the tab drag handlers in TabBar) + divider
 // overlays. Layout is read from the cache in state/terminal.
@@ -115,6 +104,18 @@ const dropHi = wsDragPreview;
 const dividers = ref<DividerRect[]>([]);
 const panes = ref<PaneOverlay[]>([]);
 const panelPanes = ref<PanelPane[]>([]);
+
+// The canvas shows only when the active workspace has at least one terminal
+// pane to draw (a files/git-only workspace and home have none).
+const canvasVisible = computed(
+  () => active.value?.kind === "workspace" && panes.value.length > 0,
+);
+
+// A lone pane renders full-bleed: no focus ring, panel border, or dividers
+// (the canvas side of this is handled by terminal.ts' panePad/cornerRadius).
+const singlePane = computed(
+  () => panes.value.length + panelPanes.value.length === 1,
+);
 
 function refreshOverlays(): void {
   dividers.value = getActiveDividers();
@@ -432,7 +433,8 @@ watch(theme, (next) => {
       :key="p.tabId"
       class="pane-overlay"
       :class="{
-        'pane-overlay-focused': p.focused,
+        'pane-overlay-bare': singlePane,
+        'pane-overlay-focused': p.focused && !singlePane,
         'pane-overlay-highlight': p.tabId === highlightedPaneId,
       }"
       :style="{
@@ -442,14 +444,8 @@ watch(theme, (next) => {
         height: `${p.h}px`,
       }"
     >
-      <div class="pane-hover">
-        <div class="pane-grip">⋯</div>
-        <div
-          class="pane-pill pane-pill-drag"
-          :title="p.title"
-          @mousedown="onPaneBarDown(p, $event)"
-        >
-          <span class="pane-title">{{ p.title }}</span>
+      <PaneTitlebar :title="p.title" draggable @bardown="onPaneBarDown(p, $event)">
+        <template #actions>
           <button
             type="button"
             class="pane-close"
@@ -478,8 +474,8 @@ watch(theme, (next) => {
           >
             <X :size="12" :stroke-width="2.25" />
           </button>
-        </div>
-      </div>
+        </template>
+      </PaneTitlebar>
     </div>
     <!-- Panel panes (file browser, git, …): workspace leaves rendered as DOM
          overlays at their tiled rects. Same hover pill as terminal panes
@@ -499,14 +495,8 @@ watch(theme, (next) => {
         v-bind="PANEL_VIEWS[p.kind].props(p)"
         @close="onPaneClose(p)"
       />
-      <div class="pane-hover">
-        <div class="pane-grip">⋯</div>
-        <div
-          class="pane-pill pane-pill-drag"
-          :title="p.title"
-          @mousedown="onPaneBarDown(p, $event)"
-        >
-          <span class="pane-title">{{ p.title }}</span>
+      <PaneTitlebar :title="p.title" draggable @bardown="onPaneBarDown(p, $event)">
+        <template #actions>
           <button
             type="button"
             class="pane-close"
@@ -516,8 +506,8 @@ watch(theme, (next) => {
           >
             <X :size="12" :stroke-width="2.25" />
           </button>
-        </div>
-      </div>
+        </template>
+      </PaneTitlebar>
     </div>
 
     <!-- Drop-zone preview: shows the half the dropped tab will occupy. -->
@@ -539,53 +529,7 @@ watch(theme, (next) => {
       :tab-id="p.tabId"
       :rect="{ x: p.x, y: p.y, w: p.w, h: p.h }"
     />
-    <TerminalScrollbar
-      v-if="panes.length === 0 && !fullSftp && active && (active.kind === 'terminal' || active.kind === 'ssh')"
-      :tab-id="active.id"
-    />
-    <!-- SFTP-only connection: the file browser is the whole tab. -->
-    <div
-      v-if="fullSftp"
-      class="absolute inset-0 z-20"
-      @mousedown.stop
-      @wheel.stop
-      @contextmenu.stop
-    >
-      <FilesPanel
-        :seed-ssh-tab-id="fullSftp.id"
-        hide-close
-        class="h-full w-full"
-      />
-    </div>
     <slot />
-    <!-- Hover header for plain terminal/SSH tabs: same grip + pill as
-         workspace panes. The panel toggles split the tab into a workspace. -->
-    <div
-      v-if="panes.length === 0 && !fullSftp && active && (active.kind === 'terminal' || active.kind === 'ssh')"
-      class="pane-hover"
-    >
-      <div class="pane-grip">⋯</div>
-      <div class="pane-pill" :title="active.title">
-        <span class="pane-title">{{ active.title }}</span>
-        <button
-          type="button"
-          class="pane-close"
-          title="Open file browser"
-          @click="openPanel('files')"
-        >
-          <PanelRight :size="12" :stroke-width="2.25" />
-        </button>
-        <button
-          v-if="active.kind === 'terminal'"
-          type="button"
-          class="pane-close"
-          title="Open git panel"
-          @click="openPanel('git')"
-        >
-          <GitBranch :size="12" :stroke-width="2.25" />
-        </button>
-      </div>
-    </div>
   </div>
   </div>
   <Teleport to="body">
@@ -623,6 +567,12 @@ watch(theme, (next) => {
   border-radius: var(--pane-radius);
   transition: border-color 150ms ease;
 }
+/* A lone terminal pane fills the tab full-bleed — no border or rounded
+   corners (mirrors .panel-pane-bare for panel panes). */
+.pane-overlay-bare {
+  border-color: transparent;
+  border-radius: 0;
+}
 /* The focused pane carries an accent-tinted border so it reads as "active"
    alongside the full-vs-hollow cursor distinction. */
 .pane-overlay-focused {
@@ -635,104 +585,8 @@ watch(theme, (next) => {
   border-color: var(--accent, #89b4fa);
   box-shadow: 0 0 0 1px var(--accent, #89b4fa) inset;
 }
-/* Hover header: a centered grip hint + pill at the top of a terminal. Only
-   the small grip captures the pointer; the rest of the top row stays
-   interactive for the terminal beneath. The pill itself is hit-testable only
-   once revealed (visibility gates pointer events), so it never steals clicks
-   from the first terminal row. */
-.pane-hover {
-  position: absolute;
-  top: 0;
-  left: 50%;
-  transform: translateX(-50%);
-  z-index: 20;
-  display: flex;
-  justify-content: center;
-  padding: 4px 8px 6px;
-  pointer-events: none;
-}
-.pane-grip {
-  position: absolute;
-  top: 0;
-  left: 50%;
-  transform: translateX(-50%);
-  padding: 2px 12px 4px;
-  pointer-events: auto;
-  user-select: none;
-  font-size: 11px;
-  line-height: 1;
-  letter-spacing: 1px;
-  color: var(--fg-subtle, #9399b2);
-  opacity: 0.6;
-  transition:
-    opacity 140ms ease,
-    transform 140ms ease;
-}
-.pane-hover:hover .pane-grip,
-.pane-hover:active .pane-grip {
-  /* Fade out in step with the pill dropping in, nudging down with it. */
-  opacity: 0;
-  transform: translateX(-50%) translateY(3px);
-  transition-delay: 300ms;
-}
-.pane-pill {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  height: 24px;
-  max-width: 240px;
-  padding: 0 4px 0 12px;
-  box-sizing: border-box;
-  border-radius: 9999px;
-  user-select: none;
-  font-size: 11px;
-  color: var(--fg-muted, #cdd6f4);
-  background: color-mix(in srgb, var(--surface-3, #313244) 88%, transparent);
-  border: 1px solid
-    color-mix(
-      in srgb,
-      var(--border-strong, rgba(255, 255, 255, 0.18)) 60%,
-      transparent
-    );
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
-  /* Hit-testable once revealed, so hovering onto it keeps .pane-hover:hover
-     alive and its buttons are clickable; while hidden, `visibility` (not
-     this) disables hit-testing. */
-  pointer-events: auto;
-  opacity: 0;
-  visibility: hidden; /* hidden also disables hit-testing, unlike opacity */
-  /* Rest state sits slightly up and shrunk so revealing reads as a gentle
-     drop-in; the leave transition slides it back without the hover delay. */
-  transform: translateY(-5px) scale(0.96);
-  transition:
-    opacity 120ms ease,
-    transform 140ms ease,
-    visibility 0s linear 140ms;
-}
-.pane-hover:hover .pane-pill,
-.pane-hover:active .pane-pill {
-  opacity: 1;
-  visibility: visible;
-  transform: translateY(0) scale(1);
-  /* deliberate-hover delay: brushing past the grip never flashes the pill;
-     the slightly overshooting ease gives the drop-in a soft settle. */
-  transition:
-    opacity 160ms ease 300ms,
-    transform 220ms cubic-bezier(0.34, 1.4, 0.64, 1) 300ms,
-    visibility 0s linear 300ms;
-}
-.pane-pill-drag {
-  cursor: grab;
-}
-.pane-pill-drag:active {
-  cursor: grabbing;
-}
-.pane-title {
-  flex: 1;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
+/* The hover pill itself (grip + pill + title) lives in PaneTitlebar.vue; only
+   the slotted action/close buttons are styled here (and via :slotted there). */
 .pane-close {
   flex: none;
   width: 16px;

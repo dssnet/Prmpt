@@ -1,24 +1,26 @@
-//! SSH session task: bridges russh (async, tokio) with the per-tab sync
+//! SSH connection pool: bridges russh (async, tokio) with the per-tab sync
 //! libghostty-vt loop via crossbeam channels + a tokio mpsc.
 //!
-//! Lifecycle:
-//!   1. Caller spawns `spawn_session(...)` with a [`SshConnectConfig`]
-//!      that already contains everything needed to connect (host config
-//!      + decrypted credentials + port-forward rules + stored host
-//!      fingerprint, if any). Returns the outbound `mpsc::Sender`.
-//!   2. Inside the task we resolve TCP → run russh handshake → verify
-//!      host key (TOFU) → authenticate → open channel + pty + shell.
-//!   3. The task then `select!`s between inbound channel data (forwarded
-//!      to `pty_tx` as `PtyEvent::Data`) and outbound `SshIoCmd`s
-//!      (forwarded to russh via `Channel::data`/`window_change`).
-//!   4. On any terminal condition we send `PtyEvent::Eof` so the tab
-//!      loop exits cleanly.
+//! One authenticated russh transport per saved host (`ConnectionPool` →
+//! `PooledConn`), shared by reference-counted *consumers*: a terminal owns a
+//! shell channel (`acquire_shell`), a file browser owns an SFTP channel
+//! (`acquire_sftp`). The last consumer to leave drops the connection.
+//!
+//! Per attempt: resolve TCP → russh handshake → verify host key (TOFU) →
+//! authenticate. A shell consumer then opens channel + pty + shell and
+//! `select!`s inbound channel data (→ `pty_tx` as `PtyEvent::Data`) against
+//! outbound `SshIoCmd`s (→ russh `Channel::data`/`window_change`); on a
+//! transport drop it re-opens against the reconnected transport, and on close
+//! it sends `PtyEvent::Eof`. Reconnect lives on `PooledConn` and fans out to
+//! every consumer (shell channels re-open, SFTP slots re-fill).
 //!
 //! Persistence is the frontend's job: this module emits
 //! `ssh:host_key_first_connect`, `ssh:host_key_mismatch`, and
 //! `ssh:port_forward_error` events. The frontend persists fingerprints
 //! and surfaces errors via the SQL plugin.
 
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use parking_lot::Mutex;
@@ -45,28 +47,50 @@ use crate::{
         SshPortForwardError, SshReconnecting,
     },
     tab::{PtyEvent, SftpReq, SshIoCmd},
+    SharedRuntime,
 };
 
-/// Slot holding the SFTP session for the *current* transport. `run_session`
-/// fills it after a successful connect and clears it on disconnect; the
-/// long-lived `sftp_service` task reads it per request so it transparently
-/// follows reconnects (and rejects requests while disconnected).
+/// Slot holding the SFTP session for the *current* transport. The pooled
+/// connection's supervisor fills it after a successful connect and clears it
+/// on disconnect; the long-lived `sftp_service` task reads it per request so
+/// it transparently follows reconnects (and rejects requests while
+/// disconnected).
 pub type SftpSlot = Arc<AsyncMutex<Option<Arc<SftpSession>>>>;
 
-/// Registry of per-tab SFTP slots, keyed by tab id. Lets a cross-connection
-/// relay reach two different sessions' SFTP channels at once (the per-tab
-/// request channels only serve their own tab).
-pub type SftpSlots = Arc<parking_lot::Mutex<std::collections::HashMap<u64, SftpSlot>>>;
+/// One SFTP consumer's command sender + live-session slot. Stored in the
+/// `SftpConsumers` registry keyed by **consumer id** (negative panel-scoped
+/// ids in the frontend, but a plain `u64` here). The command layer routes
+/// `sftp_*` to `sftp_tx`; the cross-connection relay reads `slot` directly.
+#[derive(Clone)]
+pub struct SftpConsumerHandle {
+    pub sftp_tx: mpsc::Sender<SftpReq>,
+    pub slot: SftpSlot,
+    /// The pooled connection this consumer rides on — kept so `sftp_release`
+    /// can drop the consumer (refcount--) and tear the connection down when
+    /// it was the last one.
+    pub conn: Arc<PooledConn>,
+    /// Owning window label, so a window-destroyed cleanup can release every
+    /// consumer that window held (file browsers have no backend tab to reap).
+    pub window: String,
+}
 
-pub fn new_sftp_slots() -> SftpSlots {
+/// Registry of live SFTP consumers, keyed by consumer id. Lets the command
+/// layer find a consumer's request channel and lets a cross-connection relay
+/// reach two different consumers' SFTP sessions at once.
+pub type SftpConsumers =
+    Arc<parking_lot::Mutex<std::collections::HashMap<u64, SftpConsumerHandle>>>;
+
+pub fn new_sftp_consumers() -> SftpConsumers {
     Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new()))
 }
 
-/// Pending first-connect host-key prompts, keyed by tab id. `check_server_key`
-/// parks a oneshot sender here while the user looks at the fingerprint; the
-/// `ssh_confirm_host_key` command resolves it (managed as Tauri state).
+/// Pending first-connect host-key prompts, keyed by **host id**. A pooled
+/// connection handshakes once per host, so the prompt is per-host (not
+/// per-tab). `check_server_key` parks a oneshot sender here while the user
+/// looks at the fingerprint; the `ssh_confirm_host_key` command resolves it
+/// (managed as Tauri state).
 pub type HostKeyPrompts =
-    Arc<parking_lot::Mutex<std::collections::HashMap<u64, tokio::sync::oneshot::Sender<bool>>>>;
+    Arc<parking_lot::Mutex<std::collections::HashMap<i64, tokio::sync::oneshot::Sender<bool>>>>;
 
 pub fn new_host_key_prompts() -> HostKeyPrompts {
     Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new()))
@@ -183,8 +207,6 @@ struct RemoteForwardRoute {
 struct ClientHandler {
     stored_fp: Option<String>,
     app: AppHandle,
-    owner_window: String,
-    tab_id: u64,
     host_id: i64,
     state: Arc<Mutex<HandlerState>>,
 }
@@ -249,12 +271,14 @@ impl Handler for ClientHandler {
                 use tauri::Manager;
                 let prompts = self.app.state::<crate::ssh::HostKeyPrompts>();
                 let (tx, rx) = tokio::sync::oneshot::channel();
-                prompts.lock().insert(self.tab_id, tx);
-                let _ = self.app.emit_to(
-                    EventTarget::webview_window(&self.owner_window),
+                prompts.lock().insert(self.host_id, tx);
+                // Broadcast: a pooled connection may back consumers in more
+                // than one window; whichever shows the modal can confirm
+                // (the prompt is keyed by host id).
+                let _ = self.app.emit(
                     "ssh:host_key_first_connect",
                     SshHostKeyFirstConnect {
-                        tab_id: self.tab_id,
+                        tab_id: 0,
                         host_id: self.host_id,
                         fingerprint: fp.clone(),
                         algorithm: alg.clone(),
@@ -264,7 +288,7 @@ impl Handler for ClientHandler {
                     tokio::time::timeout(HOST_KEY_PROMPT_TIMEOUT, rx).await,
                     Ok(Ok(true))
                 );
-                prompts.lock().remove(&self.tab_id);
+                prompts.lock().remove(&self.host_id);
                 if accepted {
                     self.state.lock().captured_fp = Some((fp, alg));
                     Ok(true)
@@ -275,11 +299,10 @@ impl Handler for ClientHandler {
             }
             Some(stored) if stored == &fp => Ok(true),
             Some(stored) => {
-                let _ = self.app.emit_to(
-                    EventTarget::webview_window(&self.owner_window),
+                let _ = self.app.emit(
                     "ssh:host_key_mismatch",
                     SshHostKeyMismatch {
-                        tab_id: self.tab_id,
+                        tab_id: 0,
                         host_id: self.host_id,
                         stored_fp: stored.clone(),
                         received_fp: fp,
@@ -293,208 +316,19 @@ impl Handler for ClientHandler {
     }
 }
 
-// ---------- session lifecycle ----------
+// ---------- session lifecycle (see "connection pool" section below) ----------
 
-/// Spawn the SSH session on the supplied tokio runtime. Returns the
-/// outbound shell command channel and the SFTP request channel.
-#[allow(clippy::too_many_arguments)]
-pub fn spawn_session(
-    rt: &tokio::runtime::Runtime,
-    app: AppHandle,
-    owner_window: String,
-    tab_id: u64,
-    config: SshConnectConfig,
-    pty_tx: crossbeam_channel::Sender<PtyEvent>,
-    cols: u16,
-    rows: u16,
-    slots: SftpSlots,
-) -> (mpsc::Sender<SshIoCmd>, mpsc::Sender<SftpReq>) {
-    let (out_tx, out_rx) = mpsc::channel::<SshIoCmd>(128);
-    let (sftp_tx, sftp_rx) = mpsc::channel::<SftpReq>(32);
-    // The slot's content follows reconnects; the registry entry is stable for
-    // the tab's lifetime so a relay can always find it.
-    let sftp_slot: SftpSlot = Arc::new(AsyncMutex::new(None));
-    slots.lock().insert(tab_id, sftp_slot.clone());
-    rt.spawn(session_task(
-        app,
-        owner_window,
-        tab_id,
-        config,
-        pty_tx,
-        out_rx,
-        sftp_rx,
-        cols,
-        rows,
-        sftp_slot,
-        slots,
-    ));
-    (out_tx, sftp_tx)
-}
-
-/// Why a single connect+drive attempt stopped. Decides whether
-/// `session_task` reconnects or lets the tab close.
+/// Why a shell channel's drive loop stopped. Decides whether the pooled
+/// connection reconnects (and the consumer re-opens its channel) or the
+/// consumer goes away.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SessionOutcome {
-    /// Tab is being closed locally (user closed it / VT thread gone).
+    /// Consumer is being closed locally (tab closed / VT thread gone).
     LocalClose,
     /// Remote shell exited cleanly (`exit`/logout, exit status/signal).
     RemoteExit,
     /// Transport vanished unexpectedly — candidate for auto-reconnect.
     Dropped,
-    /// Host key changed; the mismatch dialog was shown. Never reconnect.
-    Rejected,
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn session_task(
-    app: AppHandle,
-    owner_window: String,
-    tab_id: u64,
-    config: SshConnectConfig,
-    pty_tx: crossbeam_channel::Sender<PtyEvent>,
-    mut out_rx: mpsc::Receiver<SshIoCmd>,
-    sftp_rx: mpsc::Receiver<SftpReq>,
-    cols: u16,
-    rows: u16,
-    sftp_slot: SftpSlot,
-    slots: SftpSlots,
-) {
-    // Preserve host identity for the error event; `config` is borrowed by
-    // each attempt so it survives reconnects (credentials included).
-    let host_id = config.host_id;
-    let host_label = config.label.clone();
-    let hostname = config.hostname.clone();
-
-    // One SFTP service task lives for the whole session (across reconnects).
-    // It reads the current `SftpSession` from the shared slot that
-    // `run_session` populates/clears, so it follows reconnects without
-    // re-plumbing the receiver, and rejects requests while the transport is
-    // down.
-    let sftp_service = tokio::spawn(sftp_service(
-        sftp_rx,
-        sftp_slot.clone(),
-        app.clone(),
-        owner_window.clone(),
-        tab_id,
-    ));
-    // These outlive a single transport and are threaded through every
-    // attempt: the latest terminal size (so a reconnect requests the right
-    // PTY), the now-known host fingerprint (so a key change is still caught
-    // on reconnect), and whether we ever got a working shell (gates the
-    // reconnect-vs-give-up decision).
-    let mut cols = cols;
-    let mut rows = rows;
-    let mut stored_fp = config.stored_fingerprint.clone();
-    let mut ever_established = false;
-    let mut backoff_secs = 1u64;
-
-    loop {
-        let result = run_session(
-            &app,
-            &owner_window,
-            tab_id,
-            &config,
-            &pty_tx,
-            &mut out_rx,
-            &mut cols,
-            &mut rows,
-            &mut stored_fp,
-            &sftp_slot,
-        )
-        .await;
-
-        match result {
-            // Intentional stops — let the tab close.
-            Ok((SessionOutcome::LocalClose, _))
-            | Ok((SessionOutcome::RemoteExit, _))
-            | Ok((SessionOutcome::Rejected, _)) => break,
-            // Unexpected drop of a working session — reconnect. A good
-            // connection just died, so restart the backoff from scratch.
-            Ok((SessionOutcome::Dropped, _)) => {
-                ever_established = true;
-                backoff_secs = 1;
-            }
-            Err(e) => {
-                let raw = e.to_string();
-                if !ever_established {
-                    // First connect failed: keep the existing modal UX and
-                    // give up (the tab closes).
-                    let msg = format!("\r\n\x1b[31mSSH error:\x1b[0m {}\r\n", raw);
-                    let _ = pty_tx.send(PtyEvent::Data(msg.into_bytes()));
-                    let _ = app.emit_to(
-                        EventTarget::webview_window(&owner_window),
-                        "ssh:connect_error",
-                        SshConnectError {
-                            tab_id,
-                            host_id,
-                            host_label: host_label.clone(),
-                            hostname,
-                            kind: classify_connect_error(&raw).to_string(),
-                            message: raw,
-                        },
-                    );
-                    break;
-                }
-                // A reconnect attempt failed; report it and keep retrying
-                // (backoff keeps growing).
-                let msg = format!("\r\n\x1b[31mreconnect failed:\x1b[0m {}\r\n", raw);
-                let _ = pty_tx.send(PtyEvent::Data(msg.into_bytes()));
-            }
-        }
-
-        // Only reached when we intend to reconnect. The banner covers shell
-        // tabs; the event covers SFTP-only tabs whose VT is never shown (the
-        // frontend decides who actually toasts).
-        let _ = pty_tx.send(PtyEvent::Data(
-            "\r\n\x1b[33m\u{26a0} connection lost \u{2014} reconnecting\u{2026} (Ctrl+C cancels)\x1b[0m\r\n"
-                .as_bytes()
-                .to_vec(),
-        ));
-        let _ = app.emit_to(
-            EventTarget::webview_window(&owner_window),
-            "ssh:reconnecting",
-            SshReconnecting {
-                tab_id,
-                host_id,
-                host_label: host_label.clone(),
-            },
-        );
-        if wait_or_close(&mut out_rx, &mut cols, &mut rows, backoff_secs).await {
-            break; // tab closed during the backoff wait
-        }
-        backoff_secs = (backoff_secs * 2).min(30);
-    }
-    sftp_service.abort();
-    slots.lock().remove(&tab_id);
-    let _ = pty_tx.send(PtyEvent::Eof);
-}
-
-/// Backoff wait that stays responsive to tab-close. Returns `true` if the
-/// tab is being closed (so the caller stops reconnecting). Resize commands
-/// update the tracked terminal size; queued input is discarded — the old
-/// shell is gone and replaying stale keystrokes into a fresh one is wrong.
-async fn wait_or_close(
-    out_rx: &mut mpsc::Receiver<SshIoCmd>,
-    cols: &mut u16,
-    rows: &mut u16,
-    secs: u64,
-) -> bool {
-    let sleep = tokio::time::sleep(std::time::Duration::from_secs(secs));
-    tokio::pin!(sleep);
-    loop {
-        tokio::select! {
-            biased;
-            cmd = out_rx.recv() => match cmd {
-                Some(SshIoCmd::Close) | None => return true,
-                Some(SshIoCmd::Resize { cols: c, rows: r, .. }) => {
-                    *cols = c;
-                    *rows = r;
-                }
-                Some(SshIoCmd::Write(_)) => {}
-            },
-            _ = &mut sleep => return false,
-        }
-    }
 }
 
 /// Coarse classification of an SSH error string so the frontend can pick
@@ -524,200 +358,6 @@ fn classify_connect_error(msg: &str) -> &'static str {
     } else {
         "other"
     }
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn run_session(
-    app: &AppHandle,
-    owner_window: &str,
-    tab_id: u64,
-    config: &SshConnectConfig,
-    pty_tx: &crossbeam_channel::Sender<PtyEvent>,
-    out_rx: &mut mpsc::Receiver<SshIoCmd>,
-    cols: &mut u16,
-    rows: &mut u16,
-    stored_fp: &mut Option<String>,
-    sftp_slot: &SftpSlot,
-) -> AppResult<(SessionOutcome, bool)> {
-    let host_id = config.host_id;
-    let russh_config = Arc::new(client::Config {
-        inactivity_timeout: None,
-        ..Default::default()
-    });
-
-    // Pre-populate remote-forward routing so the handler can dispatch
-    // inbound `forwarded-tcpip` channels without a back-channel.
-    let mut handler_state = HandlerState::default();
-    for f in config.forwards.iter() {
-        if !matches!(f.kind, SshForwardKind::Remote) {
-            continue;
-        }
-        if let (Some(th), Some(tp)) = (f.target_host.clone(), f.target_port) {
-            handler_state.remote_forwards.push(RemoteForwardRoute {
-                bind_host: f.bind_host.clone(),
-                bind_port: f.bind_port,
-                target_host: th,
-                target_port: tp,
-            });
-        }
-    }
-    let state = Arc::new(Mutex::new(handler_state));
-    let handler = ClientHandler {
-        stored_fp: stored_fp.clone(),
-        app: app.clone(),
-        owner_window: owner_window.to_string(),
-        tab_id,
-        host_id,
-        state: state.clone(),
-    };
-
-    let addr = format!("{}:{}", config.hostname, config.port);
-    let banner = format!(
-        "\r\n\x1b[36m\u{2192} connecting to {} ({})\u{2026}\x1b[0m\r\n",
-        config.label, addr,
-    );
-    let _ = pty_tx.send(PtyEvent::Data(banner.into_bytes()));
-
-    let mut session = client::connect(russh_config, &addr, handler)
-        .await
-        .map_err(|e| AppError::Ssh(format!("connect: {e}")))?;
-
-    let auth_ok = authenticate(&mut session, &config.username, &config.auth).await?;
-    if !auth_ok {
-        if state.lock().host_key_rejected {
-            let _ = pty_tx.send(PtyEvent::Data(
-                "\r\n\x1b[31m\u{2717} host key changed \u{2014} see dialog.\x1b[0m\r\n"
-                    .as_bytes()
-                    .to_vec(),
-            ));
-            let _ = session.disconnect(Disconnect::ByApplication, "", "").await;
-            return Ok((SessionOutcome::Rejected, false));
-        }
-        return Err(AppError::Ssh(
-            "authentication failed (check password / key / agent identities)".into(),
-        ));
-    }
-
-    // TOFU: the user already confirmed the fingerprint in check_server_key
-    // (the frontend persists it from the prompt); remember it locally so a
-    // key change is still detected if this session later reconnects.
-    if let Some((fp, _alg)) = state.lock().captured_fp.take() {
-        *stored_fp = Some(fp);
-    }
-
-    // Share the Handle with forward tasks (the shell channel, when one is
-    // opened, is owned by the loop below).
-    let session = Arc::new(tokio::sync::Mutex::new(session));
-
-    // Shell channel — skipped entirely for SFTP-only hosts: real-world
-    // targets are `ForceCommand internal-sftp` accounts that reject shell
-    // requests, so we must not even ask.
-    let mut channel = if config.disable_ssh {
-        None
-    } else {
-        let ch = session
-            .lock()
-            .await
-            .channel_open_session()
-            .await
-            .map_err(|e| AppError::Ssh(format!("channel open: {e}")))?;
-        ch.request_pty(false, "xterm-256color", *cols as u32, *rows as u32, 0, 0, &[])
-            .await
-            .map_err(|e| AppError::Ssh(format!("request pty: {e}")))?;
-        ch.request_shell(false)
-            .await
-            .map_err(|e| AppError::Ssh(format!("request shell: {e}")))?;
-        Some(ch)
-    };
-
-    let connected_banner = if config.disable_ssh {
-        "\r\n\x1b[32m\u{2713} connected (SFTP only).\x1b[0m\r\n"
-    } else {
-        "\r\n\x1b[32m\u{2713} connected.\x1b[0m\r\n"
-    };
-    let _ = pty_tx.send(PtyEvent::Data(connected_banner.as_bytes().to_vec()));
-    // Clears the frontend's per-tab "reconnecting" state (set by the
-    // `ssh:reconnecting` emit in `session_task`) so Ctrl+C goes back to
-    // being plain input instead of cancel-and-close.
-    let _ = app.emit_to(
-        EventTarget::webview_window(owner_window),
-        "ssh:connected",
-        SshConnected {
-            tab_id,
-            host_id,
-            host_label: config.label.clone(),
-        },
-    );
-    let mut forward_tasks: Vec<JoinHandle<()>> = Vec::new();
-    for fw in config.forwards.clone() {
-        let handle = session.clone();
-        let app_for_task = app.clone();
-        let window_for_task = owner_window.to_string();
-        let fw_id = fw.id;
-        let task = tokio::spawn(async move {
-            if let Err(e) = run_forward(handle, fw).await {
-                let _ = app_for_task.emit_to(
-                    EventTarget::webview_window(&window_for_task),
-                    "ssh:port_forward_error",
-                    SshPortForwardError {
-                        tab_id,
-                        host_id,
-                        forward_id: fw_id,
-                        message: e.to_string(),
-                    },
-                );
-            }
-        });
-        forward_tasks.push(task);
-    }
-
-    // Best-effort SFTP subsystem on a second channel of the same session.
-    // Failures (server without the subsystem, or the per-host opt-out) leave
-    // the slot empty so the panel shows "unavailable" — the shell is
-    // unaffected. For SFTP-only hosts the opt-out is ignored and a missing
-    // subsystem is fatal: there is nothing else this connection could do.
-    let sftp = if config.disable_sftp && !config.disable_ssh {
-        None
-    } else {
-        open_sftp(&session).await
-    };
-    if config.disable_ssh && sftp.is_none() {
-        let s = session.lock().await;
-        let _ = s.disconnect(Disconnect::ByApplication, "", "").await;
-        return Err(AppError::Ssh(
-            "SFTP subsystem unavailable on this host".into(),
-        ));
-    }
-    let sftp_available = sftp.is_some();
-    *sftp_slot.lock().await = sftp;
-    // Tell the (already-mounted) panel SFTP is ready to query — it waits for
-    // this rather than failing on the pre-handshake race, and reloads on each
-    // reconnect. `false` means the host doesn't offer the subsystem.
-    let _ = app.emit_to(
-        EventTarget::webview_window(owner_window),
-        "sftp:availability",
-        SftpAvailability {
-            tab_id,
-            available: sftp_available,
-        },
-    );
-
-    let outcome = match channel.as_mut() {
-        Some(ch) => drive_channel_loop(ch, pty_tx, out_rx, cols, rows).await,
-        None => drive_sftp_only_loop(&session, out_rx).await,
-    };
-
-    // Drop the SFTP session before tearing down the transport so in-flight
-    // browser requests fail fast (and so a reconnect installs a fresh one).
-    *sftp_slot.lock().await = None;
-
-    for t in forward_tasks {
-        t.abort();
-    }
-
-    let s = session.lock().await;
-    let _ = s.disconnect(Disconnect::ByApplication, "", "").await;
-    Ok((outcome, true))
 }
 
 /// Open the SFTP subsystem on a fresh channel of an established session.
@@ -874,31 +514,711 @@ async fn drive_channel_loop(
     }
 }
 
-/// Shell-less drive loop for SFTP-only sessions. Input/resize commands are
-/// ignored (there is no PTY); `Close` still tears the tab down. With no
-/// channel to `wait()` on, transport loss is detected by polling the client
-/// handle so the auto-reconnect path in `session_task` still engages —
-/// russh 0.49 offers no async "closed" future.
-async fn drive_sftp_only_loop(
-    session: &Arc<tokio::sync::Mutex<Handle<ClientHandler>>>,
-    out_rx: &mut mpsc::Receiver<SshIoCmd>,
-) -> SessionOutcome {
+// ---------- connection pool ----------
+//
+// One authenticated russh transport per saved host, shared by independent
+// reference-counted *consumers*: a terminal owns a shell channel, a file
+// browser owns an SFTP channel. The last consumer to leave drops the
+// connection. Reconnect lives on the connection and fans out to every
+// consumer: a shell channel that dies re-opens against the fresh transport,
+// and every SFTP slot is re-filled.
+
+/// A live transport handle + the generation it belongs to. A consumer compares
+/// the generation it last saw against the connection's current one to tell a
+/// transient channel error apart from a transport it already knows is stale.
+#[derive(Clone)]
+struct TransportRef {
+    handle: Arc<AsyncMutex<Handle<ClientHandler>>>,
+    generation: u64,
+}
+
+/// One registered SFTP consumer, kept on the connection so every (re)connect
+/// re-opens its subsystem and a shell drop can clear its slot. Cloneable so
+/// `on_connected` can iterate a snapshot without holding the registry lock
+/// across awaits.
+#[derive(Clone)]
+struct SftpReg {
+    slot: SftpSlot,
+    /// Latches once the user actually browses a "Shell only" (lazy) host, so
+    /// later reconnects re-open the subsystem eagerly.
+    wanted: Arc<AtomicBool>,
+    lazy: bool,
+    /// Window that owns this consumer, for the `sftp:availability` emit.
+    window: String,
+}
+
+/// Mutable transport state for a pooled connection, behind one async mutex.
+struct TransportState {
+    handle: Option<Arc<AsyncMutex<Handle<ClientHandler>>>>,
+    /// Bumped on every successful (re)connect.
+    generation: u64,
+    /// Known host fingerprint; updated in place after a TOFU accept so a key
+    /// change is still caught on reconnect.
+    stored_fp: Option<String>,
+    forward_tasks: Vec<JoinHandle<()>>,
+    /// True once a transport was ever established — distinguishes "first
+    /// connect failed (surface the modal, give up)" from "reconnect".
+    ever_connected: bool,
+    /// True between a drop and the next successful connect (dedups the
+    /// reconnecting/connected emits).
+    reconnecting: bool,
+    /// Set when the connection is being abandoned (last consumer left, first
+    /// connect failed, or host key rejected) — stops all (re)connect attempts.
+    shutdown: bool,
+    backoff: u64,
+}
+
+/// A shared SSH connection for one saved host. See the section comment.
+pub struct PooledConn {
+    host_id: i64,
+    app: AppHandle,
+    /// Auth + forward config captured at first acquire.
+    config: Mutex<SshConnectConfig>,
+    state: AsyncMutex<TransportState>,
+    /// Serializes (re)connect attempts; held across the connect + backoff.
+    connect_lock: AsyncMutex<()>,
+    /// Live SFTP consumers, keyed by consumer id.
+    sftp_regs: Mutex<HashMap<u64, SftpReg>>,
+    /// Number of live consumers (shells + browsers). Drops to 0 → teardown.
+    refcount: AtomicUsize,
+    /// Sync mirror of `state.shutdown` so the (sync) pool lock can skip a dead
+    /// connection without awaiting the state mutex.
+    dead: AtomicBool,
+}
+
+impl PooledConn {
+    fn new(app: AppHandle, config: SshConnectConfig) -> Self {
+        let stored_fp = config.stored_fingerprint.clone();
+        Self {
+            host_id: config.host_id,
+            app,
+            config: Mutex::new(config),
+            state: AsyncMutex::new(TransportState {
+                handle: None,
+                generation: 0,
+                stored_fp,
+                forward_tasks: Vec::new(),
+                ever_connected: false,
+                reconnecting: false,
+                shutdown: false,
+                backoff: 1,
+            }),
+            connect_lock: AsyncMutex::new(()),
+            sftp_regs: Mutex::new(HashMap::new()),
+            refcount: AtomicUsize::new(0),
+            dead: AtomicBool::new(false),
+        }
+    }
+
+    async fn current_session(&self) -> Option<Arc<AsyncMutex<Handle<ClientHandler>>>> {
+        self.state.lock().await.handle.clone()
+    }
+
+    /// One connect+auth attempt. `Ok(Some)` connected; `Ok(None)` host key
+    /// rejected (never retry); `Err` other failure (caller decides retry).
+    async fn connect_once(&self) -> AppResult<Option<Arc<AsyncMutex<Handle<ClientHandler>>>>> {
+        let config = self.config.lock().clone();
+        let stored_fp = self.state.lock().await.stored_fp.clone();
+
+        let russh_config = Arc::new(client::Config {
+            inactivity_timeout: None,
+            ..Default::default()
+        });
+        let mut handler_state = HandlerState::default();
+        for f in config.forwards.iter() {
+            if !matches!(f.kind, SshForwardKind::Remote) {
+                continue;
+            }
+            if let (Some(th), Some(tp)) = (f.target_host.clone(), f.target_port) {
+                handler_state.remote_forwards.push(RemoteForwardRoute {
+                    bind_host: f.bind_host.clone(),
+                    bind_port: f.bind_port,
+                    target_host: th,
+                    target_port: tp,
+                });
+            }
+        }
+        let state = Arc::new(Mutex::new(handler_state));
+        let handler = ClientHandler {
+            stored_fp,
+            app: self.app.clone(),
+            host_id: self.host_id,
+            state: state.clone(),
+        };
+
+        let addr = format!("{}:{}", config.hostname, config.port);
+        let mut session = client::connect(russh_config, &addr, handler)
+            .await
+            .map_err(|e| AppError::Ssh(format!("connect: {e}")))?;
+        let auth_ok = authenticate(&mut session, &config.username, &config.auth).await?;
+        if !auth_ok {
+            if state.lock().host_key_rejected {
+                let _ = session.disconnect(Disconnect::ByApplication, "", "").await;
+                return Ok(None);
+            }
+            return Err(AppError::Ssh(
+                "authentication failed (check password / key / agent identities)".into(),
+            ));
+        }
+        // TOFU: remember the now-confirmed fingerprint so a later reconnect
+        // still detects a key change. Take it out of the (sync) handler lock
+        // *before* awaiting the state mutex — a parking_lot guard isn't Send.
+        let captured = state.lock().captured_fp.take();
+        if let Some((fp, _alg)) = captured {
+            self.state.lock().await.stored_fp = Some(fp);
+        }
+        Ok(Some(Arc::new(AsyncMutex::new(session))))
+    }
+
+    /// Return a live transport, (re)connecting if needed. Serialized so
+    /// concurrent consumers don't dial in parallel; the first to arrive
+    /// connects, the rest wait then reuse. `Err` means give up (first connect
+    /// failed, host key rejected, or the connection is shutting down).
+    async fn await_session(self: &Arc<Self>) -> AppResult<TransportRef> {
+        {
+            let st = self.state.lock().await;
+            if let Some(h) = &st.handle {
+                return Ok(TransportRef { handle: h.clone(), generation: st.generation });
+            }
+            if st.shutdown {
+                return Err(AppError::Ssh("connection closed".into()));
+            }
+        }
+        let _guard = self.connect_lock.lock().await;
+        {
+            let st = self.state.lock().await;
+            if let Some(h) = &st.handle {
+                return Ok(TransportRef { handle: h.clone(), generation: st.generation });
+            }
+            if st.shutdown {
+                return Err(AppError::Ssh("connection closed".into()));
+            }
+        }
+        loop {
+            if self.state.lock().await.shutdown {
+                return Err(AppError::Ssh("connection closed".into()));
+            }
+            match self.connect_once().await {
+                Ok(Some(session)) => {
+                    let gen = {
+                        let mut st = self.state.lock().await;
+                        st.generation += 1;
+                        st.handle = Some(session.clone());
+                        st.reconnecting = false;
+                        st.ever_connected = true;
+                        st.backoff = 1;
+                        st.generation
+                    };
+                    self.on_connected(&session, gen).await;
+                    return Ok(TransportRef { handle: session, generation: gen });
+                }
+                Ok(None) => {
+                    self.dead.store(true, Ordering::SeqCst);
+                    self.state.lock().await.shutdown = true;
+                    return Err(AppError::Ssh("host key changed — see dialog".into()));
+                }
+                Err(e) => {
+                    let ever = self.state.lock().await.ever_connected;
+                    if !ever {
+                        let raw = e.to_string();
+                        let (label, hostname) = {
+                            let c = self.config.lock();
+                            (c.label.clone(), c.hostname.clone())
+                        };
+                        let _ = self.app.emit(
+                            "ssh:connect_error",
+                            SshConnectError {
+                                tab_id: 0,
+                                host_id: self.host_id,
+                                host_label: label,
+                                hostname,
+                                kind: classify_connect_error(&raw).to_string(),
+                                message: raw,
+                            },
+                        );
+                        self.dead.store(true, Ordering::SeqCst);
+                        self.state.lock().await.shutdown = true;
+                        return Err(e);
+                    }
+                    // Reconnect attempt failed — back off and retry, staying
+                    // responsive to shutdown.
+                    let backoff = {
+                        let mut st = self.state.lock().await;
+                        let b = st.backoff;
+                        st.backoff = (st.backoff * 2).min(30);
+                        b
+                    };
+                    for _ in 0..backoff {
+                        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                        if self.state.lock().await.shutdown {
+                            return Err(AppError::Ssh("connection closed".into()));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// A consumer observed its channel die. If the dropped transport is still
+    /// the current one, clear it (so the next `await_session` reconnects),
+    /// abort forwards, clear every SFTP slot, and announce "reconnecting".
+    async fn mark_dropped(self: &Arc<Self>, gen: u64) {
+        {
+            let mut st = self.state.lock().await;
+            if st.shutdown || st.generation != gen || st.handle.is_none() {
+                return;
+            }
+            st.handle = None;
+            st.reconnecting = true;
+            for t in st.forward_tasks.drain(..) {
+                t.abort();
+            }
+        }
+        let slots: Vec<SftpSlot> = self
+            .sftp_regs
+            .lock()
+            .values()
+            .map(|r| r.slot.clone())
+            .collect();
+        for slot in slots {
+            *slot.lock().await = None;
+        }
+        let label = self.config.lock().label.clone();
+        let _ = self.app.emit(
+            "ssh:reconnecting",
+            SshReconnecting {
+                tab_id: 0,
+                host_id: self.host_id,
+                host_label: label,
+            },
+        );
+    }
+
+    /// Runs once per successful (re)connect: (re)spawn port forwards, re-open
+    /// every registered SFTP subsystem (skipping a lazy host nobody has browsed
+    /// yet), and announce per-consumer availability + connection "connected".
+    async fn on_connected(
+        self: &Arc<Self>,
+        session: &Arc<AsyncMutex<Handle<ClientHandler>>>,
+        _gen: u64,
+    ) {
+        let config = self.config.lock().clone();
+        let mut forward_tasks = Vec::new();
+        for fw in config.forwards.clone() {
+            let handle = session.clone();
+            let app = self.app.clone();
+            let host_id = self.host_id;
+            let fw_id = fw.id;
+            forward_tasks.push(tokio::spawn(async move {
+                if let Err(e) = run_forward(handle, fw).await {
+                    let _ = app.emit(
+                        "ssh:port_forward_error",
+                        SshPortForwardError {
+                            tab_id: 0,
+                            host_id,
+                            forward_id: fw_id,
+                            message: e.to_string(),
+                        },
+                    );
+                }
+            }));
+        }
+        self.state.lock().await.forward_tasks = forward_tasks;
+
+        let regs: Vec<(u64, SftpReg)> = self
+            .sftp_regs
+            .lock()
+            .iter()
+            .map(|(id, r)| (*id, r.clone()))
+            .collect();
+        for (id, reg) in regs {
+            let lazy_deferred = reg.lazy && !reg.wanted.load(Ordering::Relaxed);
+            let sftp = if lazy_deferred {
+                None
+            } else {
+                open_sftp(session).await
+            };
+            let available = sftp.is_some();
+            *reg.slot.lock().await = sftp;
+            let _ = self.app.emit_to(
+                EventTarget::webview_window(&reg.window),
+                "sftp:availability",
+                SftpAvailability { tab_id: id, available },
+            );
+        }
+
+        let _ = self.app.emit(
+            "ssh:connected",
+            SshConnected {
+                tab_id: 0,
+                host_id: self.host_id,
+                host_label: config.label.clone(),
+            },
+        );
+    }
+
+    /// Open the SFTP subsystem for one already-registered consumer against the
+    /// live transport, if it isn't open yet (and isn't a lazy host still
+    /// awaiting its first browse). Used when a consumer joins a host that is
+    /// *already* connected — `on_connected` only runs on a fresh (re)connect.
+    async fn ensure_sftp_open(self: &Arc<Self>, consumer_id: u64) {
+        let reg = self.sftp_regs.lock().get(&consumer_id).cloned();
+        let Some(reg) = reg else {
+            return;
+        };
+        if reg.lazy && !reg.wanted.load(Ordering::Relaxed) {
+            return;
+        }
+        if reg.slot.lock().await.is_some() {
+            return;
+        }
+        let Some(session) = self.current_session().await else {
+            return;
+        };
+        let sftp = open_sftp(&session).await;
+        let available = sftp.is_some();
+        *reg.slot.lock().await = sftp;
+        let _ = self.app.emit_to(
+            EventTarget::webview_window(&reg.window),
+            "sftp:availability",
+            SftpAvailability {
+                tab_id: consumer_id,
+                available,
+            },
+        );
+    }
+
+    /// Disconnect the transport and stop all activity. Called once, after the
+    /// last consumer leaves.
+    async fn teardown(&self) {
+        let mut st = self.state.lock().await;
+        st.shutdown = true;
+        for t in st.forward_tasks.drain(..) {
+            t.abort();
+        }
+        let handle = st.handle.take();
+        drop(st);
+        if let Some(h) = handle {
+            let _ = h.lock().await.disconnect(Disconnect::ByApplication, "", "").await;
+        }
+    }
+}
+
+/// Periodic transport-liveness poll for one connection. Detects a drop even
+/// when no shell channel is driving I/O (a file-browser-only connection), and
+/// proactively reconnects so an idle SFTP-only host comes back on its own.
+/// russh 0.49 has no async "closed" future, hence the poll. Exits on teardown.
+async fn conn_health_check(conn: Arc<PooledConn>) {
     let mut tick = tokio::time::interval(std::time::Duration::from_secs(2));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
-        tokio::select! {
+        tick.tick().await;
+        let (shutdown, handle, gen, reconnecting) = {
+            let st = conn.state.lock().await;
+            (st.shutdown, st.handle.clone(), st.generation, st.reconnecting)
+        };
+        if shutdown {
+            break;
+        }
+        match handle {
+            Some(h) => {
+                if h.lock().await.is_closed() {
+                    conn.mark_dropped(gen).await;
+                    let _ = conn.await_session().await;
+                }
+            }
+            None => {
+                // Mid-reconnect with no shell consumer driving it — keep the
+                // SFTP-only case progressing.
+                if reconnecting {
+                    let _ = conn.await_session().await;
+                }
+            }
+        }
+    }
+}
+
+/// Open a shell channel (pty + shell) on an established transport.
+async fn open_shell_channel(
+    session: &Arc<AsyncMutex<Handle<ClientHandler>>>,
+    cols: u16,
+    rows: u16,
+) -> AppResult<Channel<client::Msg>> {
+    let ch = session
+        .lock()
+        .await
+        .channel_open_session()
+        .await
+        .map_err(|e| AppError::Ssh(format!("channel open: {e}")))?;
+    ch.request_pty(false, "xterm-256color", cols as u32, rows as u32, 0, 0, &[])
+        .await
+        .map_err(|e| AppError::Ssh(format!("request pty: {e}")))?;
+    ch.request_shell(false)
+        .await
+        .map_err(|e| AppError::Ssh(format!("request shell: {e}")))?;
+    Ok(ch)
+}
+
+/// Drain a shell consumer's outbound queue while (re)connecting: track the
+/// latest size from Resize, drop queued Write (the old shell is gone), and
+/// return when Close arrives / the sender is dropped so the consumer stops.
+async fn drain_until_close(
+    out_rx: &mut mpsc::Receiver<SshIoCmd>,
+    cols: &mut u16,
+    rows: &mut u16,
+) {
+    loop {
+        match out_rx.recv().await {
+            Some(SshIoCmd::Close) | None => return,
+            Some(SshIoCmd::Resize { cols: c, rows: r, .. }) => {
+                *cols = c;
+                *rows = r;
+            }
+            Some(SshIoCmd::Write(_)) => {}
+        }
+    }
+}
+
+/// A terminal's shell consumer. Acquires a channel from the pooled connection,
+/// drives its I/O, and on a transport drop re-acquires against the reconnected
+/// transport. Banners mirror the old per-session UX. Releases the consumer
+/// (refcount--) when the tab closes or the remote shell exits.
+#[allow(clippy::too_many_arguments)]
+async fn run_shell_consumer(
+    pool: Arc<ConnectionPool>,
+    conn: Arc<PooledConn>,
+    consumer_id: u64,
+    pty_tx: crossbeam_channel::Sender<PtyEvent>,
+    mut out_rx: mpsc::Receiver<SshIoCmd>,
+    mut cols: u16,
+    mut rows: u16,
+) {
+    let (label, addr) = {
+        let c = conn.config.lock();
+        (c.label.clone(), format!("{}:{}", c.hostname, c.port))
+    };
+    let mut first = true;
+    loop {
+        if first {
+            let _ = pty_tx.send(PtyEvent::Data(
+                format!(
+                    "\r\n\x1b[36m\u{2192} connecting to {label} ({addr})\u{2026}\x1b[0m\r\n"
+                )
+                .into_bytes(),
+            ));
+        }
+        // Stay cancellable while (re)connecting: a Close during a backoff must
+        // tear the consumer down instead of waiting out the retry.
+        let sess = tokio::select! {
             biased;
-            cmd = out_rx.recv() => {
-                match cmd {
-                    Some(SshIoCmd::Close) | None => return SessionOutcome::LocalClose,
-                    Some(SshIoCmd::Write(_)) | Some(SshIoCmd::Resize { .. }) => {}
+            _ = drain_until_close(&mut out_rx, &mut cols, &mut rows) => break,
+            s = conn.await_session() => match s {
+                Ok(s) => s,
+                Err(e) => {
+                    let _ = pty_tx.send(PtyEvent::Data(
+                        format!("\r\n\x1b[31mSSH error:\x1b[0m {e}\r\n").into_bytes(),
+                    ));
+                    break;
                 }
+            },
+        };
+        let mut channel = match open_shell_channel(&sess.handle, cols, rows).await {
+            Ok(c) => c,
+            Err(_) => {
+                conn.mark_dropped(sess.generation).await;
+                first = false;
+                continue;
             }
-            _ = tick.tick() => {
-                if session.lock().await.is_closed() {
-                    return SessionOutcome::Dropped;
+        };
+        let banner = if first {
+            "\r\n\x1b[32m\u{2713} connected.\x1b[0m\r\n"
+        } else {
+            "\r\n\x1b[32m\u{2713} reconnected.\x1b[0m\r\n"
+        };
+        let _ = pty_tx.send(PtyEvent::Data(banner.as_bytes().to_vec()));
+        first = false;
+        match drive_channel_loop(&mut channel, &pty_tx, &mut out_rx, &mut cols, &mut rows).await {
+            SessionOutcome::LocalClose | SessionOutcome::RemoteExit => break,
+            SessionOutcome::Dropped => {
+                let _ = pty_tx.send(PtyEvent::Data(
+                    "\r\n\x1b[33m\u{26a0} connection lost \u{2014} reconnecting\u{2026} (Ctrl+C cancels)\x1b[0m\r\n"
+                        .as_bytes()
+                        .to_vec(),
+                ));
+                conn.mark_dropped(sess.generation).await;
+            }
+        }
+    }
+    let _ = pty_tx.send(PtyEvent::Eof);
+    pool.release_conn(&conn, consumer_id);
+}
+
+/// Tauri-managed handle to the pool.
+pub type SharedPool = Arc<ConnectionPool>;
+
+/// Per-host connection pool (Tauri managed state). See the section comment.
+pub struct ConnectionPool {
+    rt: SharedRuntime,
+    inner: Mutex<HashMap<i64, Arc<PooledConn>>>,
+    next_consumer: AtomicU64,
+}
+
+impl ConnectionPool {
+    pub fn new(rt: SharedRuntime) -> Arc<Self> {
+        Arc::new(Self {
+            rt,
+            inner: Mutex::new(HashMap::new()),
+            next_consumer: AtomicU64::new(1),
+        })
+    }
+
+    fn alloc_consumer_id(&self) -> u64 {
+        self.next_consumer.fetch_add(1, Ordering::SeqCst)
+    }
+
+    /// Reuse the host's connection or create one. Increments the refcount under
+    /// the pool lock (so it can't race a teardown). Spawns the health task for
+    /// a freshly created connection.
+    fn get_or_create(self: &Arc<Self>, app: &AppHandle, config: &SshConnectConfig) -> Arc<PooledConn> {
+        let mut map = self.inner.lock();
+        if let Some(c) = map.get(&config.host_id) {
+            if !c.dead.load(Ordering::SeqCst) {
+                c.refcount.fetch_add(1, Ordering::SeqCst);
+                return c.clone();
+            }
+        }
+        let conn = Arc::new(PooledConn::new(app.clone(), config.clone()));
+        conn.refcount.store(1, Ordering::SeqCst);
+        map.insert(config.host_id, conn.clone());
+        self.rt.spawn(conn_health_check(conn.clone()));
+        conn
+    }
+
+    /// Attach a terminal: open a pooled shell channel feeding `pty_tx`, return
+    /// the outbound command channel for the tab thread.
+    pub fn acquire_shell(
+        self: &Arc<Self>,
+        app: &AppHandle,
+        config: SshConnectConfig,
+        pty_tx: crossbeam_channel::Sender<PtyEvent>,
+        cols: u16,
+        rows: u16,
+    ) -> mpsc::Sender<SshIoCmd> {
+        let (out_tx, out_rx) = mpsc::channel::<SshIoCmd>(128);
+        let conn = self.get_or_create(app, &config);
+        let consumer_id = self.alloc_consumer_id();
+        let pool = self.clone();
+        self.rt.spawn(run_shell_consumer(
+            pool, conn, consumer_id, pty_tx, out_rx, cols, rows,
+        ));
+        out_tx
+    }
+
+    /// Attach a file browser: register an SFTP consumer, start its service
+    /// task, and kick an initial connect (so the host-key prompt + availability
+    /// fire). Returns the consumer id the frontend routes `sftp_*` by.
+    pub fn acquire_sftp(
+        self: &Arc<Self>,
+        app: &AppHandle,
+        window: String,
+        config: SshConnectConfig,
+        consumers: &SftpConsumers,
+    ) -> u64 {
+        let conn = self.get_or_create(app, &config);
+        let consumer_id = self.alloc_consumer_id();
+        let (sftp_tx, sftp_rx) = mpsc::channel::<SftpReq>(32);
+        let slot: SftpSlot = Arc::new(AsyncMutex::new(None));
+        let wanted = Arc::new(AtomicBool::new(false));
+        // "Shell only" hosts defer the subsystem to the first browse.
+        let lazy = config.disable_sftp && !config.disable_ssh;
+        conn.sftp_regs.lock().insert(
+            consumer_id,
+            SftpReg {
+                slot: slot.clone(),
+                wanted: wanted.clone(),
+                lazy,
+                window: window.clone(),
+            },
+        );
+        consumers.lock().insert(
+            consumer_id,
+            SftpConsumerHandle {
+                sftp_tx,
+                slot: slot.clone(),
+                conn: conn.clone(),
+                window: window.clone(),
+            },
+        );
+        self.rt.spawn(sftp_service(
+            sftp_rx,
+            slot,
+            conn.clone(),
+            wanted,
+            lazy,
+            app.clone(),
+            window,
+            consumer_id,
+        ));
+        // Establish the transport so the prompt + availability happen even
+        // before the first browse. A fresh (re)connect opens this reg via
+        // `on_connected`; if the host was already connected, open it directly.
+        // A lazy ("Shell only") reg waits for the first browse either way.
+        let conn2 = conn.clone();
+        self.rt.spawn(async move {
+            if conn2.await_session().await.is_ok() {
+                conn2.ensure_sftp_open(consumer_id).await;
+            }
+        });
+        consumer_id
+    }
+
+    /// Release every SFTP consumer a (now-destroyed) window held. File
+    /// browsers have no backend tab for the window-Destroyed handler to reap,
+    /// so without this their consumers — and the pooled connections they keep
+    /// alive — would leak until app exit.
+    pub fn release_window(self: &Arc<Self>, consumers: &SftpConsumers, window: &str) {
+        let dropped: Vec<(u64, Arc<PooledConn>)> = {
+            let mut map = consumers.lock();
+            let ids: Vec<u64> = map
+                .iter()
+                .filter(|(_, h)| h.window == window)
+                .map(|(id, _)| *id)
+                .collect();
+            ids.into_iter()
+                .filter_map(|id| map.remove(&id).map(|h| (id, h.conn)))
+                .collect()
+        };
+        for (id, conn) in dropped {
+            self.release_conn(&conn, id);
+        }
+    }
+
+    /// Drop one consumer (refcount--). Tears the connection down — and removes
+    /// it from the pool — when the last consumer leaves. Matching the mapped
+    /// connection by pointer keeps a stale entry from being clobbered after a
+    /// dead connection was already replaced.
+    pub fn release_conn(self: &Arc<Self>, conn: &Arc<PooledConn>, consumer_id: u64) {
+        conn.sftp_regs.lock().remove(&consumer_id);
+        let teardown = {
+            let mut map = self.inner.lock();
+            let prev = conn.refcount.fetch_sub(1, Ordering::SeqCst);
+            if prev <= 1 {
+                conn.dead.store(true, Ordering::SeqCst);
+                if let Some(existing) = map.get(&conn.host_id) {
+                    if Arc::ptr_eq(existing, conn) {
+                        map.remove(&conn.host_id);
+                    }
                 }
+                true
+            } else {
+                false
             }
+        };
+        if teardown {
+            let conn = conn.clone();
+            self.rt.spawn(async move {
+                conn.teardown().await;
+            });
         }
     }
 }
@@ -1115,15 +1435,48 @@ async fn pipe_socket_channel(sock: TcpStream, chan: Channel<client::Msg>) {
 /// rejects everything while the transport is down. Metadata ops run inline
 /// (fast, and naturally serialized); transfers and directory deletes are
 /// spawned so a big one doesn't block browsing.
+///
+/// For `lazy` ("Shell only") hosts the subsystem isn't opened at connect; the
+/// first request ensures the transport is up (via the pooled `conn`), latches
+/// `sftp_wanted` (so reconnects re-open eagerly), opens it on demand, and
+/// announces availability. `tab_id` here is the SFTP consumer id.
+#[allow(clippy::too_many_arguments)]
 async fn sftp_service(
     mut rx: mpsc::Receiver<SftpReq>,
     slot: SftpSlot,
+    conn: Arc<PooledConn>,
+    sftp_wanted: Arc<AtomicBool>,
+    lazy: bool,
     app: AppHandle,
     window: String,
     tab_id: u64,
 ) {
     while let Some(req) = rx.recv().await {
-        let current = slot.lock().await.clone();
+        let mut current = slot.lock().await.clone();
+        // On-demand open for lazy hosts: the first browse latches `wanted` and
+        // ensures the transport is up. If the connection had to (re)connect,
+        // `on_connected` already opened the subsystem (wanted is now set), so
+        // re-read the slot; otherwise open it here against the live transport.
+        // Serialized request handling means no two opens race within a consumer.
+        if current.is_none() && lazy {
+            sftp_wanted.store(true, Ordering::Relaxed);
+            if conn.await_session().await.is_ok() {
+                current = slot.lock().await.clone();
+                if current.is_none() {
+                    if let Some(session) = conn.current_session().await {
+                        if let Some(opened) = open_sftp(&session).await {
+                            *slot.lock().await = Some(opened.clone());
+                            let _ = app.emit_to(
+                                EventTarget::webview_window(&window),
+                                "sftp:availability",
+                                SftpAvailability { tab_id, available: true },
+                            );
+                            current = Some(opened);
+                        }
+                    }
+                }
+            }
+        }
         let Some(sftp) = current else {
             reject_sftp(req, "SFTP is not connected");
             continue;
@@ -1698,13 +2051,14 @@ async fn sftp_download_dir(
     finish_transfer(app, window, tab_id, transfer_id, total, result)
 }
 
-/// Cross-connection copy: stream a file or directory tree from one tab's SFTP
-/// session straight into another's, relayed through this process (there's no
-/// server-to-server SFTP). Progress is emitted against the destination tab.
-/// Must run on the SSH runtime (both sessions' channel drivers live there).
+/// Cross-connection copy: stream a file or directory tree from one consumer's
+/// SFTP session straight into another's, relayed through this process (there's
+/// no server-to-server SFTP). Progress is emitted against the destination
+/// consumer. Must run on the SSH runtime (both consumers' tasks live there).
+/// `src_tab`/`dst_tab` are SFTP consumer ids.
 #[allow(clippy::too_many_arguments)]
 pub async fn relay(
-    slots: SftpSlots,
+    consumers: SftpConsumers,
     app: AppHandle,
     window: String,
     src_tab: u64,
@@ -1713,15 +2067,15 @@ pub async fn relay(
     dst_path: String,
     transfer_id: u64,
 ) -> AppResult<()> {
-    let src_slot = slots
+    let src_slot = consumers
         .lock()
         .get(&src_tab)
-        .cloned()
+        .map(|h| h.slot.clone())
         .ok_or_else(|| AppError::Ssh("source connection not found".into()))?;
-    let dst_slot = slots
+    let dst_slot = consumers
         .lock()
         .get(&dst_tab)
-        .cloned()
+        .map(|h| h.slot.clone())
         .ok_or_else(|| AppError::Ssh("destination connection not found".into()))?;
     let src = src_slot
         .lock()

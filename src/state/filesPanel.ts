@@ -1,32 +1,29 @@
 /**
- * Files-panel column state, hoisted out of the component so the dual-pane
- * layout survives the panel unmounting (switching to another tab swaps the
- * whole panel out of the DOM). One slot per panel instance, so each keeps
- * its own single/dual layout.
+ * Files-panel source state, hoisted out of the component so the chosen
+ * source survives the panel unmounting (switching to another tab swaps the
+ * whole panel out of the DOM). One slot per panel instance. Side-by-side
+ * browsing is done by tiling two file panels in the workspace, so each panel
+ * shows a single source.
  */
 import { ref, type Ref } from "vue";
 
-/** What a column shows: an SSH connection's SFTP browser (by tab id) or the
+/** What a panel shows: an SSH connection's SFTP browser (by tab id) or the
  *  local file browser. */
 export type PanelSource = number | "local";
 
 export interface PanelColumns {
-  left: Ref<PanelSource>;
-  right: Ref<PanelSource | null>;
+  source: Ref<PanelSource>;
 }
 
 const columnsByKey = new Map<string, PanelColumns>();
 
-/** Column state for one panel instance (keyed by the panel pane's stable
+/** Source state for one panel instance (keyed by the panel pane's stable
  *  identity), seeded on first use. Session-only; pane ids are never reused,
  *  so entries for closed panes just sit unused. */
 export function getPanelColumns(key: string, seed: PanelSource): PanelColumns {
   let cols = columnsByKey.get(key);
   if (!cols) {
-    cols = {
-      left: ref<PanelSource>(seed),
-      right: ref<PanelSource | null>(null),
-    };
+    cols = { source: ref<PanelSource>(seed) };
     columnsByKey.set(key, cols);
   }
   return cols;
