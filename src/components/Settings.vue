@@ -4,17 +4,32 @@ import {
   ArrowLeft,
   Bell,
   FolderOpen,
+  Keyboard,
   Palette,
   RefreshCw,
+  RotateCcw,
   SquareTerminal,
 } from "lucide-vue-next";
-import { computed, ref, watch } from "vue";
+import { computed, onBeforeUnmount, ref, watch } from "vue";
 
 import { getVersion } from "@tauri-apps/api/app";
 import { save as saveDialog } from "@tauri-apps/plugin-dialog";
 
 import { errText, useBackupImport } from "../composables/useBackupImport";
+import { isModifierKey } from "../input";
 import { defaultTerminalConfig, exportBackup, getConfig, setTerminalPrefs } from "../ipc";
+import {
+  ACTIONS,
+  actionTokens,
+  chordFromEvent,
+  conflictFor,
+  isBindableChord,
+  isCustomized,
+  KEYBIND_SECTIONS,
+  resetBinding,
+  setBinding,
+  type ActionMeta,
+} from "../state/keybindings";
 import { applyTheme, useTheme } from "../state/theme";
 import { findPresetMatch, PRESETS } from "../state/themes";
 import {
@@ -45,6 +60,7 @@ const { status: updateStatus } = useUpdate();
 type Section =
   | "appearance"
   | "terminal"
+  | "shortcuts"
   | "filebrowser"
   | "notifications"
   | "updates"
@@ -53,6 +69,7 @@ const section = ref<Section>("appearance");
 const SECTIONS = [
   { id: "appearance", label: "Appearance", icon: Palette },
   { id: "terminal", label: "Terminal", icon: SquareTerminal },
+  { id: "shortcuts", label: "Shortcuts", icon: Keyboard },
   { id: "filebrowser", label: "File Browser", icon: FolderOpen },
   { id: "notifications", label: "Notifications", icon: Bell },
   { id: "updates", label: "Updates", icon: RefreshCw },
@@ -161,6 +178,65 @@ watch(
   },
   { deep: true },
 );
+
+// ---- Keyboard shortcuts ----
+// Actions grouped for display in the shipped section order.
+const shortcutGroups = computed(() =>
+  KEYBIND_SECTIONS.map((s) => ({
+    section: s,
+    actions: ACTIONS.filter((a) => a.section === s),
+  })).filter((g) => g.actions.length > 0),
+);
+
+// id of the action currently capturing a new chord (null = idle), plus the
+// last rejection reason shown beneath it.
+const capturingId = ref<string | null>(null);
+const captureError = ref<string | null>(null);
+
+function startCapture(a: ActionMeta) {
+  if (a.editable === false) return;
+  if (capturingId.value === a.id) {
+    stopCapture();
+    return;
+  }
+  captureError.value = null;
+  capturingId.value = a.id;
+  window.addEventListener("keydown", onCaptureKey, true);
+}
+
+function stopCapture() {
+  capturingId.value = null;
+  captureError.value = null;
+  window.removeEventListener("keydown", onCaptureKey, true);
+}
+
+function onCaptureKey(e: KeyboardEvent) {
+  // Swallow everything while recording so the chord can't also fire an app
+  // shortcut or reach the terminal underneath.
+  e.preventDefault();
+  e.stopPropagation();
+  if (e.key === "Escape") {
+    stopCapture();
+    return;
+  }
+  if (isModifierKey(e)) return; // wait for the non-modifier key in the chord
+  const id = capturingId.value;
+  if (!id) return;
+  const chord = chordFromEvent(e);
+  if (!isBindableChord(chord)) {
+    captureError.value = "Add a modifier (⌘, ⌥…) — a bare key would clash with the terminal.";
+    return;
+  }
+  const clash = conflictFor(id, chord);
+  if (clash) {
+    captureError.value = `Already used by “${clash.label}”.`;
+    return;
+  }
+  setBinding(id, chord);
+  stopCapture();
+}
+
+onBeforeUnmount(stopCapture);
 
 async function pickPreset(idx: number) {
   await applyTheme(PRESETS[idx].theme);
@@ -425,6 +501,82 @@ function openImport() {
           >
             {{ termStatus.text }}
           </span>
+        </template>
+
+        <!-- Keyboard Shortcuts -->
+        <template v-else-if="section === 'shortcuts'">
+          <header>
+            <h2 class="m-0 text-base font-medium tracking-wide">Keyboard Shortcuts</h2>
+            <p class="m-0 mt-1 text-xs text-fg-muted leading-snug">
+              Click a shortcut to record a new one; press Esc to cancel. Copy,
+              paste, select-all and the tab-number switches are fixed.
+            </p>
+          </header>
+          <div
+            v-for="g in shortcutGroups"
+            :key="g.section"
+            class="flex flex-col"
+          >
+            <h3 class="mt-2 mb-0.5 text-xs font-medium text-fg-muted tracking-wide">
+              {{ g.section }}
+            </h3>
+            <div v-for="a in g.actions" :key="a.id" class="setting-row">
+              <div class="setting-info">
+                <div class="setting-title">{{ a.label }}</div>
+                <div v-if="a.hint" class="setting-hint">{{ a.hint }}</div>
+                <div
+                  v-if="capturingId === a.id && captureError"
+                  class="setting-hint text-danger"
+                >
+                  {{ captureError }}
+                </div>
+              </div>
+              <div class="flex items-center gap-2 shrink-0">
+                <!-- Recording this action -->
+                <button
+                  v-if="capturingId === a.id"
+                  type="button"
+                  class="rounded border border-accent bg-surface-2 px-2 py-1 text-[11px] leading-none text-accent cursor-pointer"
+                  @click="stopCapture"
+                >
+                  Press keys… <span class="text-fg-subtle">Esc</span>
+                </button>
+                <!-- Editable: click to rebind -->
+                <button
+                  v-else-if="a.editable !== false"
+                  type="button"
+                  title="Click to rebind"
+                  class="flex items-center gap-1 rounded px-1 py-0.5 cursor-pointer hover:bg-surface-2 transition-colors duration-150"
+                  @click="startCapture(a)"
+                >
+                  <kbd
+                    v-for="(t, ti) in actionTokens(a)"
+                    :key="ti"
+                    class="rounded border border-border bg-surface-2 px-1.5 py-0.5 text-[11px] leading-none text-fg-subtle"
+                  >{{ t }}</kbd>
+                </button>
+                <!-- Fixed: display only -->
+                <span v-else class="flex items-center gap-1 opacity-60">
+                  <kbd
+                    v-for="(t, ti) in actionTokens(a)"
+                    :key="ti"
+                    class="rounded border border-border bg-surface-2 px-1.5 py-0.5 text-[11px] leading-none text-fg-subtle"
+                  >{{ t }}</kbd>
+                </span>
+                <!-- Reset to default -->
+                <button
+                  v-if="a.editable !== false && isCustomized(a.id)"
+                  type="button"
+                  title="Reset to default"
+                  class="shrink-0 grid place-items-center w-6 h-6 rounded-md text-fg-muted hover:text-fg hover:bg-surface-2 cursor-pointer transition-colors duration-150"
+                  @click="resetBinding(a.id)"
+                >
+                  <RotateCcw :size="13" />
+                </button>
+                <span v-else class="w-6 h-6 shrink-0" />
+              </div>
+            </div>
+          </div>
         </template>
 
         <!-- File Browser -->

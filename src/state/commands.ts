@@ -30,6 +30,7 @@ import {
   registerCommandSource,
   type Command,
 } from "./commandPalette";
+import { commandShortcut } from "./keybindings";
 import { requestCloseTab, requestClosePane } from "./closeGuard";
 import {
   computeDims,
@@ -139,7 +140,7 @@ function rootCommands(): Command[] {
       section: "Create",
       icon: Plus,
       keywords: "shell spawn",
-      shortcut: ["⌘", "T"],
+      shortcut: commandShortcut("tab.new"),
       perform: () => void newTerminalTab(),
     },
     {
@@ -147,7 +148,7 @@ function rootCommands(): Command[] {
       title: "New Window",
       section: "Create",
       icon: AppWindow,
-      shortcut: ["⌘", "N"],
+      shortcut: commandShortcut("window.new"),
       perform: () => void openNewWindow(),
     },
 
@@ -159,7 +160,7 @@ function rootCommands(): Command[] {
       section: "Panels",
       icon: FolderTree,
       keywords: "sftp folder directory explorer",
-      shortcut: ["⌘", "B"],
+      shortcut: commandShortcut("panel.files"),
       when: isInteractive,
       perform: () => void openPanelOnActive("files"),
     },
@@ -170,7 +171,7 @@ function rootCommands(): Command[] {
       section: "Panels",
       icon: GitBranch,
       keywords: "status diff commit branch",
-      shortcut: ["⌘", "G"],
+      shortcut: commandShortcut("panel.git"),
       when: isWorkspace,
       perform: () => void openPanelOnActive("git"),
     },
@@ -214,7 +215,7 @@ function rootCommands(): Command[] {
       section: "Layout",
       icon: Columns2,
       keywords: "vertical divide pane",
-      shortcut: ["⌘", "D"],
+      shortcut: commandShortcut("layout.split.right"),
       when: isInteractive,
       perform: () => void splitActive("h"),
     },
@@ -225,7 +226,7 @@ function rootCommands(): Command[] {
       section: "Layout",
       icon: Rows2,
       keywords: "horizontal divide pane",
-      shortcut: ["⌘", "⇧", "D"],
+      shortcut: commandShortcut("layout.split.down"),
       when: isInteractive,
       perform: () => void splitActive("v"),
     },
@@ -296,7 +297,7 @@ function rootCommands(): Command[] {
       section: "Tab",
       icon: X,
       danger: true,
-      shortcut: ["⌘", "W"],
+      shortcut: commandShortcut("tab.close"),
       when: isInteractive,
       perform: () => {
         const a = active.value;

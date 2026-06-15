@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::{fs, path::PathBuf};
+use std::{collections::BTreeMap, fs, path::PathBuf};
 
 use crate::error::{AppError, AppResult};
 use crate::paths;
@@ -17,6 +17,10 @@ pub struct Config {
     pub scrollback_lines: usize,
     pub theme: Theme,
     pub ui: UiPrefs,
+    /// User keyboard-shortcut overrides: action id → serialized chord (e.g.
+    /// `"Mod+Shift+D"`). Only actions that differ from their built-in default
+    /// are stored. BTreeMap so the `[keybindings]` table writes in stable order.
+    pub keybindings: BTreeMap<String, String>,
 }
 
 /// The terminal-core subset of `Config`, editable from the settings pane.
@@ -93,6 +97,7 @@ impl Default for Config {
             scrollback_lines: 10_000,
             theme: Theme::default(),
             ui: UiPrefs::default(),
+            keybindings: BTreeMap::new(),
         }
     }
 }

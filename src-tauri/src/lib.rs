@@ -234,6 +234,7 @@ pub fn run() {
             commands::default_terminal_config,
             commands::set_theme,
             commands::set_ui_prefs,
+            commands::set_keybindings,
             commands::set_terminal_prefs,
             commands::forget_tab,
             commands::frontend_log,

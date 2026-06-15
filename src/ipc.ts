@@ -123,6 +123,9 @@ export interface Config {
   scrollback_lines: number;
   theme: ThemeConfig;
   ui: UiPrefs;
+  /** User keyboard-shortcut overrides: action id → serialized chord. Only
+   *  actions that differ from their default appear here. */
+  keybindings: Record<string, string>;
 }
 
 /** UI behavior preferences, persisted in config.toml's `[ui]` section. */
@@ -302,6 +305,11 @@ export async function setTheme(theme: ThemeConfig): Promise<void> {
 
 export async function setUiPrefs(ui: UiPrefs): Promise<void> {
   await invoke("set_ui_prefs", { ui });
+}
+
+/** Persist keyboard-shortcut overrides (action id → serialized chord). */
+export async function setKeybindings(keybindings: Record<string, string>): Promise<void> {
+  await invoke("set_keybindings", { keybindings });
 }
 
 /** The terminal-core subset of `Config`, editable from the settings pane. */

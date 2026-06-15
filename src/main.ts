@@ -9,6 +9,7 @@ import { getConfig } from "./ipc";
 import { openSecrets } from "./secrets";
 import { initTheme } from "./state/theme";
 import { initUiPrefs } from "./state/uiPrefs";
+import { initKeybindings } from "./state/keybindings";
 import nerdFontUrl from "./assets/fonts/NotoMonoNerdFontMono-Regular.ttf?url";
 
 // Tag <html> with the OS so platform-specific CSS can branch without
@@ -112,6 +113,7 @@ async function init() {
 
   initTheme(config.theme);
   initUiPrefs(config.ui);
+  initKeybindings(config.keybindings);
 
   // Always append the bundled Nerd Font so icons / Powerline glyphs are
   // available regardless of what's in the user's config. The user's chosen

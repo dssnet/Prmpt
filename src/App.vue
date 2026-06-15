@@ -82,6 +82,14 @@ import {
   windowCloseMessage,
 } from "./state/closeGuard";
 import { notify, notifyBell } from "./state/notifications";
+import {
+  ACTIONS,
+  bindingFor,
+  canonicalKey,
+  chordMatchesEvent,
+  isPrimaryMod,
+  IS_WIN,
+} from "./state/keybindings";
 import { openCommandPalette, paletteOpen } from "./state/commandPalette";
 import { showToast } from "./state/toasts";
 import CommandPalette from "./components/CommandPalette.vue";
@@ -340,39 +348,6 @@ async function pasteIntoInput(el: EditableInput): Promise<void> {
   el.dispatchEvent(new Event("input", { bubbles: true }));
 }
 
-// macOS uses Cmd (metaKey) as the app modifier; Linux/Windows terminals use
-// Ctrl+Shift so plain Ctrl stays free for shell control codes (Ctrl+C =
-// SIGINT, Ctrl+D = EOF, …). Matches GNOME Terminal / Konsole / Windows
-// Terminal conventions.
-const IS_MAC =
-  /Mac|iPhone|iPod|iPad/.test(navigator.platform) ||
-  navigator.userAgent.includes("Mac OS X");
-const IS_WIN = !IS_MAC && /Win/i.test(navigator.platform);
-
-// True when the platform's primary app-shortcut chord is held.
-function isPrimaryMod(e: KeyboardEvent): boolean {
-  return IS_MAC
-    ? e.metaKey && !e.ctrlKey
-    : e.ctrlKey && e.shiftKey && !e.metaKey;
-}
-
-// Layout/Shift-stable key name: physical letter/digit via `code` (so
-// Ctrl+Shift+C still reads as "c" and Ctrl+Shift+1 as "1"), otherwise the
-// logical key ("ArrowUp", "Home", …).
-function canonicalKey(e: KeyboardEvent): string {
-  if (/^Key[A-Z]$/.test(e.code)) return e.code.slice(3).toLowerCase();
-  if (/^Digit[0-9]$/.test(e.code)) return e.code.slice(5);
-  if (e.key.length === 1) return e.key.toLowerCase();
-  return e.key;
-}
-
-type Shortcut = {
-  mod: "meta" | "shift";
-  match: (key: string) => boolean;
-  when?: () => boolean;
-  run: (e: KeyboardEvent) => void;
-};
-
 function scrollActive(
   kind: "line_up" | "line_down" | "page_up" | "page_down" | "top" | "bottom",
 ) {
@@ -397,93 +372,50 @@ async function splitActive(dir: "h" | "v"): Promise<void> {
   focusCanvas();
 }
 
-// The webview only fires `paste` when something editable is focused. The
-// canvas isn't, so the global paste handler never sees the paste chord
-// (Cmd+V / Ctrl+Shift+V) via keyboard — we drive it from this table instead.
-const shortcuts: Shortcut[] = [
-  { mod: "meta", match: (k) => k === "k" || k === "K", run: () => openCommandPalette() },
-  { mod: "meta", match: (k) => k === "t", run: () => void spawnNewTab() },
-  { mod: "meta", match: (k) => k === "n", run: () => void openNewWindow() },
-  {
-    mod: "meta",
-    match: (k) => k === "w",
+// What each bindable action *does*. The chords themselves (and any user
+// overrides) live in state/keybindings.ts — this table only maps action id →
+// behavior, plus the visibility guard that decides whether the action is live
+// for the current tab. The keydown loop below resolves the live chord per
+// action and dispatches here.
+//
+// The webview only fires `paste` when something editable is focused; the
+// canvas isn't, so the paste chord (Cmd+V / Ctrl+Shift+V) never arrives as a
+// `paste` event — `edit.paste` here is what drives it.
+interface ActionHandler {
+  when?: () => boolean;
+  run: (e: KeyboardEvent) => void;
+}
+const isInteractiveTab = () => !!active.value && active.value.kind !== "home";
+const actionHandlers: Record<string, ActionHandler> = {
+  "palette.open": { run: () => openCommandPalette() },
+  "tab.new": { run: () => void spawnNewTab() },
+  "window.new": { run: () => void openNewWindow() },
+  "tab.close": {
     run: () => {
       const a = active.value;
       if (a) void requestCloseTab(a);
     },
   },
-  {
-    mod: "meta",
-    match: (k) => k === "d" || k === "D",
-    run: (e) => void splitActive(e.shiftKey ? "v" : "h"),
-  },
-  {
-    mod: "meta",
-    match: (k) => /^[1-9]$/.test(k),
-    run: (e) => {
-      const idx = Number(canonicalKey(e)) - 1;
-      const list = tabs.value.filter((t) => t.kind !== "home");
-      if (list[idx]) setActive(list[idx].id);
-    },
-  },
-  {
-    mod: "meta",
-    match: (k) => k === "c" || k === "C",
-    when: () => hasSelection(),
-    run: () => copyCurrentSelection(),
-  },
-  {
-    mod: "meta",
-    match: (k) => k === "v" || k === "V",
-    run: () => void pasteFromClipboard(),
-  },
-  { mod: "meta", match: (k) => k === "a" || k === "A", run: () => selectAll() },
   // Panel panes (see state/panels.ts): open a fresh, self-contained panel
   // seeded from the active tab's terminal (its cwd / server). On a plain tab
   // this converts it into a workspace in place.
-  {
-    mod: "meta",
-    match: (k) => k === "b" || k === "B",
-    when: () => {
-      const a = active.value;
-      // Any non-home tab: terminals, SSH, the single-panel SFTP tab (adds a
-      // second file panel, promoting it to a workspace), and workspaces.
-      return !!a && a.kind !== "home";
-    },
-    run: () => void openPanelOnActive("files"),
-  },
-  {
-    mod: "meta",
-    match: (k) => k === "g" || k === "G",
-    when: () => {
-      const a = active.value;
-      return !!a && a.kind === "workspace";
-    },
+  "layout.split.right": { when: isInteractiveTab, run: () => void splitActive("h") },
+  "layout.split.down": { when: isInteractiveTab, run: () => void splitActive("v") },
+  "panel.files": { when: isInteractiveTab, run: () => void openPanelOnActive("files") },
+  "panel.git": {
+    when: () => active.value?.kind === "workspace",
     run: () => void openPanelOnActive("git"),
   },
-  {
-    mod: "meta",
-    match: (k) => k === "ArrowUp",
-    run: () => scrollActive("line_up"),
-  },
-  {
-    mod: "meta",
-    match: (k) => k === "ArrowDown",
-    run: () => scrollActive("line_down"),
-  },
-  { mod: "meta", match: (k) => k === "Home", run: () => scrollActive("top") },
-  { mod: "meta", match: (k) => k === "End", run: () => scrollActive("bottom") },
-  {
-    mod: "shift",
-    match: (k) => k === "PageUp",
-    run: () => scrollActive("page_up"),
-  },
-  {
-    mod: "shift",
-    match: (k) => k === "PageDown",
-    run: () => scrollActive("page_down"),
-  },
-];
+  "scroll.lineUp": { run: () => scrollActive("line_up") },
+  "scroll.lineDown": { run: () => scrollActive("line_down") },
+  "scroll.top": { run: () => scrollActive("top") },
+  "scroll.bottom": { run: () => scrollActive("bottom") },
+  "scroll.pageUp": { run: () => scrollActive("page_up") },
+  "scroll.pageDown": { run: () => scrollActive("page_down") },
+  "edit.copy": { when: () => hasSelection(), run: () => copyCurrentSelection() },
+  "edit.paste": { run: () => void pasteFromClipboard() },
+  "edit.selectAll": { run: () => selectAll() },
+};
 
 function onKeyDown(e: KeyboardEvent) {
   // The command palette is a focused overlay that drives its own keyboard
@@ -530,14 +462,28 @@ function onKeyDown(e: KeyboardEvent) {
       return;
     }
   }
-  for (const s of shortcuts) {
-    if (s.mod === "meta" && !primary) continue;
-    if (s.mod === "shift" && !(e.shiftKey && !primary)) continue;
-    if (!s.match(key)) continue;
-    if (editable && s.mod === "meta" && /^[acvx]$/.test(key)) continue;
-    if (s.when && !s.when()) continue;
+  // Cmd+1…9 / Ctrl+Shift+1…9 — switch to the Nth non-home tab. A numeric
+  // family rather than a single rebindable chord (see "nav.switchNumber" in
+  // the keybindings registry), so handled directly here.
+  if (primary && /^[1-9]$/.test(key)) {
     e.preventDefault();
-    s.run(e);
+    const idx = Number(key) - 1;
+    const list = tabs.value.filter((t) => t.kind !== "home");
+    if (list[idx]) setActive(list[idx].id);
+    return;
+  }
+  for (const a of ACTIONS) {
+    if (a.info) continue;
+    const chord = bindingFor(a.id);
+    if (!chordMatchesEvent(chord, e)) continue;
+    // Don't hijack native editing shortcuts (a/c/v/x) in a focused text field —
+    // let it handle them, or the Edit-menu accelerators route through.
+    if (editable && chord.primary && /^[acvx]$/.test(chord.key)) continue;
+    const h = actionHandlers[a.id];
+    if (!h) continue;
+    if (h.when && !h.when()) continue;
+    e.preventDefault();
+    h.run(e);
     return;
   }
   // Swallow the primary chord even when nothing matched, so an unbound

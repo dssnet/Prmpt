@@ -231,6 +231,19 @@ pub fn set_ui_prefs(config: State<'_, SharedConfig>, ui: UiPrefs) -> AppResult<(
     guard.save()
 }
 
+/// Persist keyboard-shortcut overrides (action id → serialized chord). The
+/// frontend sends only the actions that differ from their defaults; this
+/// replaces the whole table.
+#[tauri::command]
+pub fn set_keybindings(
+    config: State<'_, SharedConfig>,
+    keybindings: std::collections::BTreeMap<String, String>,
+) -> AppResult<()> {
+    let mut guard = config.lock();
+    guard.keybindings = keybindings;
+    guard.save()
+}
+
 /// Save the terminal-core settings. `shell` / `login_shell` /
 /// `scrollback_lines` are read from the live config when a tab spawns, so
 /// they apply to new tabs immediately; the font fields are consumed by the
