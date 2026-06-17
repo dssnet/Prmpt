@@ -57,6 +57,11 @@ pub struct UiPrefs {
     /// Show the created date column in the file browsers (local only — the
     /// SFTP protocol doesn't report creation time).
     pub show_created_date: bool,
+    /// Automatically open the update dialog when a background check finds a
+    /// newer release. When false, only the tab-bar download icon lights up
+    /// and the dialog opens on demand. A manual "Check for updates" always
+    /// opens the dialog regardless.
+    pub auto_open_update_dialog: bool,
 }
 
 impl Default for UiPrefs {
@@ -69,6 +74,7 @@ impl Default for UiPrefs {
             show_size: true,
             show_changed_date: false,
             show_created_date: false,
+            auto_open_update_dialog: true,
         }
     }
 }

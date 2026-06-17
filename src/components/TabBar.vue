@@ -30,6 +30,7 @@ import {
   workspaceTick,
 } from "../state/workspace";
 import NotificationCenter from "./NotificationCenter.vue";
+import UpdateIcon from "./UpdateIcon.vue";
 import {
   clearWorkspaceDragPreview,
   commitPanelWorkspaceDrop,
@@ -712,7 +713,10 @@ watch(overflowTabs, (n) => {
         </div>
       </Transition>
     </div>
-    <NotificationCenter class="ml-auto" />
+    <div class="ml-auto flex items-center gap-1.5">
+      <UpdateIcon />
+      <NotificationCenter />
+    </div>
   </div>
   <Teleport to="body">
     <div

@@ -137,6 +137,7 @@ export interface UiPrefs {
   show_size: boolean;
   show_changed_date: boolean;
   show_created_date: boolean;
+  auto_open_update_dialog: boolean;
 }
 
 export const FLAG_BOLD = 1 << 0;

@@ -4,6 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { type Update } from "@tauri-apps/plugin-updater";
 
+import { autoOpenUpdateDialog } from "./uiPrefs";
 import { checkForUpdate, downloadUpdate, installAndExit } from "../updater";
 
 export type UpdateStatus =
@@ -24,9 +25,21 @@ const available = shallowRef<Update | null>(null);
 // (indeterminate progress bar).
 const progress = ref<number | null>(null);
 const errorMessage = ref<string>("");
+// Whether the update dialog is actually on screen. Decoupled from
+// `status === "available"`: a background check always surfaces the
+// tab-bar download icon (status "available"), but whether it also pops
+// the modal depends on the "Show update dialog automatically" setting
+// (see `runUpdateCheck`). The icon's click handler (`openUpdateModal`)
+// opens it on demand.
+const modalOpen = ref(false);
 
 export function useUpdate() {
-  return { status, available, progress, errorMessage };
+  return { status, available, progress, errorMessage, modalOpen };
+}
+
+/** Open the update dialog for an already-detected, pending update. */
+export function openUpdateModal(): void {
+  if (status.value === "available") modalOpen.value = true;
 }
 
 /**
@@ -54,6 +67,11 @@ export async function runUpdateCheck(announce = false): Promise<void> {
   if (update) {
     available.value = update;
     status.value = "available";
+    // A manual "Check for updates" (announce) always opens the dialog.
+    // Silent startup/interval checks only open it when the user has left
+    // "Show update dialog automatically" on; otherwise they just light up
+    // the tab-bar download icon.
+    modalOpen.value = announce || autoOpenUpdateDialog.value;
   } else if (announce) {
     status.value = "uptodate";
   } else {
@@ -91,10 +109,20 @@ export async function installUpdate(): Promise<void> {
   }
 }
 
-/** Dismiss the modal ("Later" / close after up-to-date / error). */
+/**
+ * Dismiss the modal ("Later" / close after up-to-date / error).
+ *
+ * "Later" on an available update only closes the dialog — `status`
+ * stays "available" so the tab-bar download icon persists and the user
+ * can reopen it. The terminal info states (uptodate / error) reset back
+ * to idle since there's nothing left to act on.
+ */
 export function dismissUpdate(): void {
-  status.value = "idle";
-  available.value = null;
-  progress.value = null;
-  errorMessage.value = "";
+  modalOpen.value = false;
+  if (status.value !== "available") {
+    status.value = "idle";
+    available.value = null;
+    progress.value = null;
+    errorMessage.value = "";
+  }
 }

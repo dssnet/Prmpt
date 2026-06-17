@@ -33,6 +33,11 @@ export const showChangedDate = ref(false);
  *  protocol doesn't report creation time). */
 export const showCreatedDate = ref(false);
 
+/** Automatically open the update dialog when a background check finds a newer
+ *  release. When false, only the tab-bar download icon appears and the dialog
+ *  opens on demand. Consulted in `state/update.ts::runUpdateCheck`. */
+export const autoOpenUpdateDialog = ref(true);
+
 /** Seed from the loaded config (called once at startup, before mount). Values
  *  left over in localStorage from when these prefs lived there are adopted
  *  into the config once, then removed. */
@@ -46,6 +51,7 @@ export function initUiPrefs(ui: UiPrefs): void {
   showSize.value = ui.show_size;
   showChangedDate.value = ui.show_changed_date;
   showCreatedDate.value = ui.show_created_date;
+  autoOpenUpdateDialog.value = ui.auto_open_update_dialog;
   if (lsToasts !== null || lsHidden !== null) {
     localStorage.removeItem("prmpt.toastsEnabled");
     localStorage.removeItem("prmpt.showHiddenFiles");
@@ -62,6 +68,7 @@ function persist(): Promise<void> {
     show_size: showSize.value,
     show_changed_date: showChangedDate.value,
     show_created_date: showCreatedDate.value,
+    auto_open_update_dialog: autoOpenUpdateDialog.value,
   });
 }
 
@@ -97,6 +104,11 @@ export function setShowChangedDate(v: boolean): void {
 
 export function setShowCreatedDate(v: boolean): void {
   showCreatedDate.value = v;
+  void persist();
+}
+
+export function setAutoOpenUpdateDialog(v: boolean): void {
+  autoOpenUpdateDialog.value = v;
   void persist();
 }
 

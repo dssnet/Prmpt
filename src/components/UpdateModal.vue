@@ -8,14 +8,15 @@ import {
 } from "../state/update";
 import { Button, Modal } from "./ui";
 
-const { status, available, progress, errorMessage } = useUpdate();
+const { status, available, progress, errorMessage, modalOpen } = useUpdate();
 
 // The modal is invisible while idle/checking — those states never block
-// the UI; only a result (available / uptodate / error) or an in-progress
-// download is worth a dialog.
+// the UI. An available update only shows the dialog once the user opens
+// it (via the tab-bar download icon or a manual check); downloading /
+// installing / uptodate / error always warrant a dialog.
 const visible = computed(
   () =>
-    status.value === "available" ||
+    (status.value === "available" && modalOpen.value) ||
     status.value === "downloading" ||
     status.value === "installing" ||
     status.value === "uptodate" ||

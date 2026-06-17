@@ -33,8 +33,10 @@ import {
 import { applyTheme, useTheme } from "../state/theme";
 import { findPresetMatch, PRESETS } from "../state/themes";
 import {
+  autoOpenUpdateDialog,
   confirmCloseRunning,
   notificationSounds,
+  setAutoOpenUpdateDialog,
   setConfirmCloseRunning,
   setNotificationSounds,
   setShowChangedDate,
@@ -687,6 +689,22 @@ function openImport() {
             >
               {{ updateStatus === "checking" ? "Checking…" : "Check for updates" }}
             </Button>
+          </div>
+          <div class="setting-row">
+            <div class="setting-info">
+              <div class="setting-title">Show update dialog automatically</div>
+              <div class="setting-hint">
+                Pop up the update dialog when Prmpt finds a new version on
+                launch or during a background check. Turn this off to update on
+                your own time — a green download icon appears in the tab bar
+                instead, and clicking it opens the dialog. "Check for updates"
+                above always opens it.
+              </div>
+            </div>
+            <Switch
+              :model-value="autoOpenUpdateDialog"
+              @update:model-value="setAutoOpenUpdateDialog"
+            />
           </div>
         </template>
 
