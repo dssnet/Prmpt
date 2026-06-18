@@ -15,6 +15,11 @@ export const toastsEnabled = ref(true);
  *  notification (e.g. Claude Code finishing a task). */
 export const notificationSounds = ref(true);
 
+/** When true, notification sounds only play while the app window is in the
+ *  background (unfocused). Opt-in: silences the chime for a task that
+ *  finished in the window you're already watching. */
+export const notificationSoundsBackgroundOnly = ref(false);
+
 /** Ask before a close would kill a running foreground program (tab or
  *  window) or drop an open SSH connection (window close only). */
 export const confirmCloseRunning = ref(true);
@@ -46,6 +51,7 @@ export function initUiPrefs(ui: UiPrefs): void {
   const lsHidden = localStorage.getItem("prmpt.showHiddenFiles");
   toastsEnabled.value = lsToasts !== null ? lsToasts !== "0" : ui.toast_notifications;
   notificationSounds.value = ui.notification_sounds;
+  notificationSoundsBackgroundOnly.value = ui.notification_sounds_background_only;
   confirmCloseRunning.value = ui.confirm_close_running;
   showHiddenFiles.value = lsHidden !== null ? lsHidden === "1" : ui.show_hidden_files;
   showSize.value = ui.show_size;
@@ -63,6 +69,7 @@ function persist(): Promise<void> {
   return setUiPrefs({
     toast_notifications: toastsEnabled.value,
     notification_sounds: notificationSounds.value,
+    notification_sounds_background_only: notificationSoundsBackgroundOnly.value,
     confirm_close_running: confirmCloseRunning.value,
     show_hidden_files: showHiddenFiles.value,
     show_size: showSize.value,
@@ -79,6 +86,11 @@ export function setToastsEnabled(v: boolean): void {
 
 export function setNotificationSounds(v: boolean): void {
   notificationSounds.value = v;
+  void persist();
+}
+
+export function setNotificationSoundsBackgroundOnly(v: boolean): void {
+  notificationSoundsBackgroundOnly.value = v;
   void persist();
 }
 

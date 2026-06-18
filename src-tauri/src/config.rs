@@ -45,6 +45,10 @@ pub struct UiPrefs {
     /// Play a chime when a program rings the terminal bell or sends an OSC
     /// notification (e.g. Claude Code finishing a task).
     pub notification_sounds: bool,
+    /// Only play notification sounds when the app window is in the background
+    /// (unfocused). When false, sounds play regardless of focus. Opt-in: avoids
+    /// chiming for a task that finished in the window you're already watching.
+    pub notification_sounds_background_only: bool,
     /// Ask before a close would kill a running foreground program (tab or
     /// window) or drop an open SSH connection (window close only).
     pub confirm_close_running: bool,
@@ -69,6 +73,7 @@ impl Default for UiPrefs {
         Self {
             toast_notifications: true,
             notification_sounds: true,
+            notification_sounds_background_only: false,
             confirm_close_running: true,
             show_hidden_files: false,
             show_size: true,

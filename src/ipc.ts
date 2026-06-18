@@ -132,6 +132,7 @@ export interface Config {
 export interface UiPrefs {
   toast_notifications: boolean;
   notification_sounds: boolean;
+  notification_sounds_background_only: boolean;
   confirm_close_running: boolean;
   show_hidden_files: boolean;
   show_size: boolean;

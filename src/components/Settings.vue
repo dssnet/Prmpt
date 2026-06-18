@@ -36,9 +36,11 @@ import {
   autoOpenUpdateDialog,
   confirmCloseRunning,
   notificationSounds,
+  notificationSoundsBackgroundOnly,
   setAutoOpenUpdateDialog,
   setConfirmCloseRunning,
   setNotificationSounds,
+  setNotificationSoundsBackgroundOnly,
   setShowChangedDate,
   setShowCreatedDate,
   setShowHiddenFiles,
@@ -669,6 +671,21 @@ function openImport() {
             <Switch
               :model-value="notificationSounds"
               @update:model-value="setNotificationSounds"
+            />
+          </div>
+          <div class="setting-row">
+            <div class="setting-info">
+              <div class="setting-title">Only when in the background</div>
+              <div class="setting-hint">
+                Play notification sounds only while the Prmpt window is
+                unfocused. Silences the chime for a task that finishes in the
+                window you're already watching.
+              </div>
+            </div>
+            <Switch
+              :model-value="notificationSoundsBackgroundOnly"
+              :disabled="!notificationSounds"
+              @update:model-value="setNotificationSoundsBackgroundOnly"
             />
           </div>
         </template>

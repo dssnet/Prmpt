@@ -26,7 +26,8 @@ import { computed, ref, watch } from "vue";
 import { playBell, playChime } from "../audio/chime";
 import { owningTabId, useTabs } from "./tabs";
 import { showToast } from "./toasts";
-import { notificationSounds } from "./uiPrefs";
+import { notificationSounds, notificationSoundsBackgroundOnly } from "./uiPrefs";
+import { windowFocused } from "./windowFocus";
 
 const { tabs: allTabs, active: activeTab } = useTabs();
 
@@ -47,11 +48,20 @@ export interface AppNotification {
  *  layouts can show a connection's column on a different tab). */
 export function isAway(tabId: number): boolean {
   const owner = owningTabId(tabId);
-  return !document.hasFocus() || owner == null || owner !== activeTab.value?.id;
+  return !windowFocused.value || owner == null || owner !== activeTab.value?.id;
+}
+
+/** Whether a notification sound may play right now. Gated on the master
+ *  sound toggle and, when "background only" is opted into, on the app
+ *  window being unfocused — no chime for a window you're actively watching. */
+function soundAllowed(): boolean {
+  if (!notificationSounds.value) return false;
+  if (notificationSoundsBackgroundOnly.value && windowFocused.value) return false;
+  return true;
 }
 
 export function notify(n: AppNotification): void {
-  if (notificationSounds.value) void playChime();
+  if (soundAllowed()) void playChime();
   // Watching the originating tab in a focused window: the chime is the
   // whole signal. Only genuinely missed events earn a history entry,
   // toast and badge.
@@ -75,7 +85,7 @@ export function notify(n: AppNotification): void {
 
 /** Terminal BEL: blip + away-badge only, never logged or toasted. */
 export function notifyBell(tabId: number): void {
-  if (notificationSounds.value) void playBell();
+  if (soundAllowed()) void playBell();
   if (isAway(tabId)) ringBell(tabId);
 }
 
