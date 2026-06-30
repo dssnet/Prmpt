@@ -278,20 +278,41 @@ const pinDialogs = ref<InstanceType<typeof HidePinDialogs> | null>(null);
 // hide once the new PIN is saved (see onPinCreated).
 const pendingHideGroupId = ref<number | null>(null);
 
-async function onToggleHidden(group: SshGroupRow) {
-  // First time hiding anything: require a PIN to be set first.
-  if (!group.hidden && !pinSet.value) {
-    pendingHideGroupId.value = group.id;
-    pinDialogs.value?.openSetPin();
-    return;
-  }
+// The group awaiting hide confirmation (drives the ConfirmDialog). Hiding is
+// destructive-feeling (the group vanishes until unlocked), so we confirm first;
+// unhiding is immediate.
+const hideGroupTarget = ref<SshGroupRow | null>(null);
+
+async function applyGroupHidden(group: SshGroupRow, hidden: boolean) {
   try {
-    await setGroupHidden(group.id, !group.hidden);
+    await setGroupHidden(group.id, hidden);
     await refresh();
   } catch (err) {
     console.error("setGroupHidden failed:", err);
     errorText.value = `Hide failed: ${err}`;
   }
+}
+
+async function onToggleHidden(group: SshGroupRow) {
+  // Unhiding is immediate; hiding asks for confirmation first.
+  if (group.hidden) {
+    await applyGroupHidden(group, false);
+    return;
+  }
+  hideGroupTarget.value = group;
+}
+
+async function confirmHideGroup() {
+  const group = hideGroupTarget.value;
+  hideGroupTarget.value = null;
+  if (!group) return;
+  // First time hiding anything: require a PIN to be set first.
+  if (!pinSet.value) {
+    pendingHideGroupId.value = group.id;
+    pinDialogs.value?.openSetPin();
+    return;
+  }
+  await applyGroupHidden(group, true);
 }
 
 // A brand-new PIN was just created; hide the group that triggered it.
@@ -684,6 +705,17 @@ async function confirmDeleteGroup() {
       cancel-label="Cancel"
       @confirm="confirmDeleteHost"
       @cancel="deleteHostTarget = null"
+    />
+
+    <!-- Hide group -->
+    <ConfirmDialog
+      :open="hideGroupTarget != null"
+      title="Hide group?"
+      :message="hideGroupTarget ? `Hide “${hideGroupTarget.label}” and its subgroups? Hidden groups stay out of sight until you unlock with your PIN.` : ''"
+      confirm-label="Hide group"
+      cancel-label="Cancel"
+      @confirm="confirmHideGroup"
+      @cancel="hideGroupTarget = null"
     />
 
     <!-- Advanced host info -->
