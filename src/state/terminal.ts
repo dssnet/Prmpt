@@ -9,8 +9,10 @@ import {
   resizeTab,
   scrollTab,
   writeInput,
+  writeMouse,
   writePaste,
   type Config,
+  type MouseEventWire,
   type RenderPayload,
   type ThemeConfig,
 } from "../ipc";
@@ -697,22 +699,102 @@ export function onHoverLeave(): void {
   }
 }
 
+// ---- Mouse reporting (forward to apps that enabled mouse tracking) --------
+//
+// When the app under the pointer has a mouse-tracking mode active and Shift
+// isn't held, clicks/drags/wheel are encoded and sent to the PTY (the backend
+// turns them into the app's chosen format) instead of driving local selection.
+// Shift always forces local selection — the only way to copy out of such apps.
+let mouseReporting = false;
+let mouseReportButton = 0;
+let mouseReportTabId = 0;
+let lastReportCell: { col: number; row: number } | null = null;
+
+/** Focus the workspace pane under the pointer (no-op outside a workspace). */
+function focusPaneUnder(e: MouseEvent): void {
+  const a = activeWs();
+  if (!a) return;
+  const lp = localPoint(e);
+  const hit = lp ? paneAt(lp.x, lp.y) : null;
+  if (hit && hit.tabId !== a.ws.focusedTabId) {
+    focusWorkspacePane(a.slotId, hit.tabId);
+    selection = null;
+    selectionTick.value++;
+  }
+}
+
+/** Pointer cell + target tab when the app under the pointer wants mouse events
+ *  and Shift isn't held. Null otherwise (→ local selection / menu). */
+function mouseReportTarget(e: MouseEvent): { tabId: number; col: number; row: number } | null {
+  if (e.shiftKey) return null;
+  const at = cellAtPoint(e);
+  if (!at || !at.snap.mouse_tracking) return null;
+  return { tabId: at.snap.tab_id, col: at.col, row: at.viewportRow };
+}
+
+/** Whether a right-click/wheel at this event should be forwarded to the app
+ *  rather than opening Prmpt's menu / scrolling scrollback. */
+export function mouseReportActive(e: MouseEvent): boolean {
+  return mouseReportTarget(e) !== null;
+}
+
+/** Pointer cell + target tab regardless of mouse mode — used by the wheel path,
+ *  which the backend routes (report vs arrow keys vs scroll) on its own. */
+export function pointerCell(e: MouseEvent): { tabId: number; col: number; row: number } | null {
+  const at = cellAtPoint(e);
+  return at ? { tabId: at.snap.tab_id, col: at.col, row: at.viewportRow } : null;
+}
+
+function mouseWire(
+  action: MouseEventWire["action"],
+  button: number,
+  col: number,
+  row: number,
+  e: MouseEvent,
+): MouseEventWire {
+  return {
+    action,
+    button,
+    col,
+    row,
+    shift: e.shiftKey,
+    ctrl: e.ctrlKey,
+    alt: e.altKey,
+    meta: e.metaKey,
+  };
+}
+
 export function onMouseDown(e: MouseEvent, activeKind: string | undefined): void {
-  if (e.button !== 0) return;
   if (activeKind === "home") return;
+  // Forward to an app that enabled mouse tracking (Shift bypasses to local
+  // selection). Runs before the left-button-only guard so middle/right clicks
+  // reach the app too. DOM button ids (0/1/2) match the wire's left/middle/right.
+  const rep = mouseReportTarget(e);
+  if (rep && e.button <= 2) {
+    focusCanvas();
+    focusPaneUnder(e);
+    // Cmd/ctrl+click on a link still opens it instead of reporting.
+    if (IS_MAC ? e.metaKey : e.ctrlKey) {
+      const link = linkAtEvent(e);
+      if (link) {
+        openDetectedUrl(link.url, link.source);
+        e.preventDefault();
+        return;
+      }
+    }
+    mouseReporting = true;
+    mouseReportButton = e.button;
+    mouseReportTabId = rep.tabId;
+    lastReportCell = { col: rep.col, row: rep.row };
+    void writeMouse(rep.tabId, mouseWire("press", e.button, rep.col, rep.row, e));
+    e.preventDefault();
+    return;
+  }
+  if (e.button !== 0) return;
   focusCanvas();
   // In a workspace, clicking a pane focuses it (routes input/selection there)
   // before any selection math runs.
-  const a = activeWs();
-  if (a) {
-    const lp = localPoint(e);
-    const hit = lp ? paneAt(lp.x, lp.y) : null;
-    if (hit && hit.tabId !== a.ws.focusedTabId) {
-      focusWorkspacePane(a.slotId, hit.tabId);
-      selection = null;
-      selectionTick.value++;
-    }
-  }
+  focusPaneUnder(e);
   // Cmd/ctrl+click on a link opens it instead of starting a selection.
   if (IS_MAC ? e.metaKey : e.ctrlKey) {
     const link = linkAtEvent(e);
@@ -756,6 +838,21 @@ export function onMouseDown(e: MouseEvent, activeKind: string | undefined): void
 }
 
 export function onMouseMove(e: MouseEvent): void {
+  if (mouseReporting) {
+    // Forward drag motion to the originating app (button held). Dedup by cell
+    // here too; the backend also dedups via track_last_cell.
+    const at = cellAtPoint(e);
+    if (at && at.snap.tab_id === mouseReportTabId) {
+      if (!lastReportCell || lastReportCell.col !== at.col || lastReportCell.row !== at.viewportRow) {
+        lastReportCell = { col: at.col, row: at.viewportRow };
+        void writeMouse(
+          mouseReportTabId,
+          mouseWire("motion", mouseReportButton, at.col, at.viewportRow, e),
+        );
+      }
+    }
+    return;
+  }
   if (!dragging) return;
   lastDragEvent = e;
   applyDragMove(e);
@@ -763,6 +860,23 @@ export function onMouseMove(e: MouseEvent): void {
 }
 
 export function onMouseUp(): void {
+  if (mouseReporting) {
+    if (lastReportCell) {
+      void writeMouse(mouseReportTabId, {
+        action: "release",
+        button: mouseReportButton,
+        col: lastReportCell.col,
+        row: lastReportCell.row,
+        shift: false,
+        ctrl: false,
+        alt: false,
+        meta: false,
+      });
+    }
+    mouseReporting = false;
+    lastReportCell = null;
+    return;
+  }
   const hadDrag = dragging && pendingAnchor === null;
   dragging = false;
   pendingAnchor = null;

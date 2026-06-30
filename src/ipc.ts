@@ -66,6 +66,10 @@ export interface RenderPayload {
    *  traffic hint so the frontend can skip forwarding key-release and
    *  bare-modifier events the encoder would discard anyway. */
   kitty_flags: number;
+  /** Whether the app has any mouse-tracking mode active. Traffic hint: when
+   *  true (and Shift isn't held) the frontend forwards mouse events to the PTY
+   *  via `write_mouse` and suppresses its own text selection. */
+  mouse_tracking: boolean;
   /** Deduped OSC 8 hyperlink URIs visible this frame. */
   links: string[];
   /** Cell runs covered by those hyperlinks (viewport coordinates). */
@@ -95,6 +99,22 @@ export interface KeyEventWire {
   super_key: boolean;
   caps_lock: boolean;
   num_lock: boolean;
+}
+
+/** A mouse event for the backend's `write_mouse`, which encodes it with
+ *  libghostty-vt's mouse encoder against the app's live tracking mode + output
+ *  format. Position is in viewport-relative cell coordinates. */
+export interface MouseEventWire {
+  action: "press" | "release" | "motion";
+  /** 0 = left, 1 = middle, 2 = right, 3 = wheel-up, 4 = wheel-down,
+   *  255 = none (motion with no button held). */
+  button: number;
+  col: number;
+  row: number;
+  shift: boolean;
+  ctrl: boolean;
+  alt: boolean;
+  meta: boolean;
 }
 
 /** `terminal:notification` — a program rang the bell (BEL) or sent an OSC
@@ -240,11 +260,25 @@ export async function scrollTab(tabId: number, kind: ScrollKind): Promise<void> 
   await invoke("scroll_tab", { tabId, kind });
 }
 
-/** Physical mouse-wheel notch in rows (negative = up). The backend routes it:
- *  arrow keys for an alternate-screen app (nano/less/vim) without mouse tracking,
- *  otherwise a scrollback viewport scroll. */
-export async function wheelScroll(tabId: number, rows: number): Promise<void> {
-  await invoke("wheel_scroll", { tabId, rows });
+/** Physical mouse-wheel notch in rows (negative = up) at the pointer cell
+ *  `(col, row)` (viewport-relative). The backend routes it: button-4/5 mouse
+ *  reports when the app has mouse tracking on, else arrow keys for an
+ *  alternate-screen app (nano/less/vim), else a scrollback viewport scroll. */
+export async function wheelScroll(
+  tabId: number,
+  rows: number,
+  col: number,
+  row: number,
+): Promise<void> {
+  await invoke("wheel_scroll", { tabId, rows, col, row });
+}
+
+/** Forward a mouse press/release/motion to the app running in a tab. The
+ *  backend encodes it against the app's live mouse mode; a no-op when the app
+ *  isn't reporting that event. Only called when an app has mouse tracking on
+ *  and Shift isn't held. */
+export async function writeMouse(tabId: number, ev: MouseEventWire): Promise<void> {
+  await invoke("write_mouse", { tabId, ev });
 }
 
 /** Extract the text of a screen-absolute selection range (inclusive, already

@@ -65,6 +65,12 @@ pub struct RenderPayload {
     /// purely a traffic hint: the frontend skips forwarding key-release and
     /// bare-modifier events the encoder would discard anyway.
     pub kitty_flags: u8,
+    /// Whether the application currently has any mouse-tracking mode active
+    /// (X10 / normal / button / any). Like `kitty_flags`, this is a traffic
+    /// hint: the frontend uses it to decide whether to forward mouse events to
+    /// the PTY (`write_mouse`) and suppress its own text selection, or fall
+    /// back to local selection. Encoding itself happens on the backend.
+    pub mouse_tracking: bool,
     /// Deduped OSC 8 hyperlink URIs visible this frame.
     pub links: Vec<String>,
     /// Cell runs covered by those hyperlinks (viewport coordinates).
@@ -111,6 +117,28 @@ pub struct KeyEventWire {
     pub super_key: bool,
     pub caps_lock: bool,
     pub num_lock: bool,
+}
+
+/// A mouse event from the webview, encoded on the tab thread by libghostty-vt's
+/// mouse encoder against the terminal's live tracking mode / output format
+/// (X10, SGR, urxvt, …). Only forwarded to the PTY when an application has
+/// mouse tracking on; the encoder self-filters events a mode doesn't report.
+/// Position is in viewport-relative cell coordinates (0-based).
+#[derive(Deserialize, Clone, Debug)]
+pub struct MouseEventWire {
+    /// "press" | "release" | "motion".
+    pub action: String,
+    /// Button identity: 0 = left, 1 = middle, 2 = right, 3 = wheel-up (four),
+    /// 4 = wheel-down (five). 255 = none (motion with no button held).
+    pub button: u8,
+    /// Pointer column (cell), viewport-relative.
+    pub col: u16,
+    /// Pointer row (cell), viewport-relative.
+    pub row: u16,
+    pub shift: bool,
+    pub ctrl: bool,
+    pub alt: bool,
+    pub meta: bool,
 }
 
 /// `terminal:notification` — a program rang the bell (BEL) or sent an OSC

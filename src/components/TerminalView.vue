@@ -24,6 +24,8 @@ import {
   onMouseDown,
   onMouseMove,
   onMouseUp,
+  mouseReportActive,
+  pointerCell,
   clearWorkspaceDragPreview,
   commitWorkspaceDrop,
   getActivePanes,
@@ -154,9 +156,12 @@ function onHostWheel(e: WheelEvent) {
   const rows = Math.trunc(wheelAccum / pxPerRow);
   if (rows === 0) return;
   wheelAccum -= rows * pxPerRow;
-  const target = inputTargetTabId();
+  // Route to the pane under the pointer (with its cell, for mouse reporting);
+  // fall back to the focused tab if the pointer isn't over a grid cell.
+  const cell = pointerCell(e);
+  const target = cell?.tabId ?? inputTargetTabId();
   if (target == null) return;
-  void wheelScroll(target, rows);
+  void wheelScroll(target, rows, cell?.col ?? 0, cell?.row ?? 0);
 }
 
 function onHostContextMenu(e: MouseEvent) {
@@ -166,6 +171,10 @@ function onHostContextMenu(e: MouseEvent) {
   // drive the menu ourselves.
   e.preventDefault();
   e.stopPropagation();
+  // When the app has mouse tracking on (and Shift isn't held), the right-click
+  // already went to it via onMouseDown's report path — don't also open our
+  // menu. Shift+right-click still opens it.
+  if (mouseReportActive(e)) return;
   openTerminalContextMenu(e);
 }
 

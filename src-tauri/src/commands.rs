@@ -10,7 +10,10 @@ use crate::{
     config::{Config, TerminalPrefs, Theme, UiPrefs},
     error::{AppError, AppResult},
     git, localfs,
-    protocol::{KeyEventWire, LocalDrive, LocalListing, SftpEntry, TabInfo, WindowBootstrap},
+    protocol::{
+        KeyEventWire, LocalDrive, LocalListing, MouseEventWire, SftpEntry, TabInfo,
+        WindowBootstrap,
+    },
     schedule_refill,
     ssh::{self, SftpConsumers, SharedPool, SshConnectConfig},
     stronghold::{self, StrongholdUnlock},
@@ -172,17 +175,33 @@ pub fn scroll_tab(
     registry.scroll(tab_id, kind.into())
 }
 
-/// Physical mouse-wheel notch in rows (negative = up). Routed on the tab thread:
-/// arrow keys for an alternate-screen app without mouse tracking, else a viewport
-/// scroll. Separate from `scroll_tab` so the scrollbar/keyboard/selection paths
-/// keep pure viewport-scroll semantics.
+/// Physical mouse-wheel notch in rows (negative = up) at the pointer cell
+/// `(col, row)` (viewport-relative). Routed on the tab thread: button-4/5 mouse
+/// reports when the app has mouse tracking on, else arrow keys for an
+/// alternate-screen app, else a viewport scroll. Separate from `scroll_tab` so
+/// the scrollbar/keyboard/selection paths keep pure viewport-scroll semantics.
 #[tauri::command]
 pub fn wheel_scroll(
     registry: State<'_, SharedRegistry>,
     tab_id: u64,
     rows: i32,
+    col: u16,
+    row: u16,
 ) -> AppResult<()> {
-    registry.wheel_scroll(tab_id, rows)
+    registry.wheel_scroll(tab_id, rows, col, row)
+}
+
+/// Forward a mouse press/release/motion to a tab. Encoded on the tab thread
+/// against the app's live tracking mode + output format; a no-op (no bytes) when
+/// the app isn't reporting that event. The frontend only calls this when an app
+/// has mouse tracking on and Shift isn't held (Shift = local selection).
+#[tauri::command]
+pub fn write_mouse(
+    registry: State<'_, SharedRegistry>,
+    tab_id: u64,
+    ev: MouseEventWire,
+) -> AppResult<()> {
+    registry.write_mouse(tab_id, ev)
 }
 
 /// Returns the selected text for a screen-absolute coordinate range so the

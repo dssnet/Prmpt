@@ -15,6 +15,10 @@ use crossbeam_channel::{bounded, select, unbounded, Receiver, Sender};
 use libghostty_vt::{
     error::Error as VtError,
     key::{Action as KeyAction, Encoder as KeyEncoder, Event as KeyEvent, Mods as KeyMods},
+    mouse::{
+        Action as MouseAction, Button as MouseButton, EncoderSize, Encoder as MouseEncoder,
+        Event as MouseEvent, Position as MousePosition,
+    },
     render::{CellIterator, CursorVisualStyle, Dirty, RenderState, RowIterator},
     screen::{CellWide, Screen},
     style::{RgbColor, StyleColor},
@@ -32,7 +36,7 @@ use crate::{
     keymap, osc_notify, platform,
     protocol::{
         CellWire, CursorWire, ExitPayload, ForegroundProcess, KeyEventWire, LinkSpanWire,
-        NotifyPayload, RenderPayload, TabInfo,
+        MouseEventWire, NotifyPayload, RenderPayload, TabInfo,
         CURSOR_STYLE_BAR, CURSOR_STYLE_BLOCK, CURSOR_STYLE_BLOCK_HOLLOW, CURSOR_STYLE_UNDERLINE,
         FLAG_BOLD, FLAG_FAINT, FLAG_INVERSE, FLAG_ITALIC, FLAG_SPACER_TAIL, FLAG_STRIKETHROUGH,
         FLAG_UNDERLINE, FLAG_WIDE,
@@ -93,10 +97,16 @@ pub enum TabCmd {
         cell_height_px: u32,
     },
     Scroll(ScrollKind),
-    /// Physical mouse-wheel notch, in rows (negative = up/away from the user).
-    /// Routed smartly on the tab thread: translated to arrow keys for an
-    /// alternate-screen app with no mouse tracking, otherwise a viewport scroll.
-    Wheel(i32),
+    /// Physical mouse-wheel notch, in rows (negative = up/away from the user),
+    /// at the pointer cell `(col, row)` (viewport-relative). Routed smartly on
+    /// the tab thread: encoded as button-4/5 mouse reports when the app has
+    /// mouse tracking on, else arrow keys for an alternate-screen app, else a
+    /// viewport scroll.
+    Wheel { rows: i32, col: u16, row: u16 },
+    /// A mouse press/release/motion from the webview, encoded against the
+    /// terminal's live tracking mode + format and written to the PTY. Dropped
+    /// (encoder returns no bytes) when the app isn't reporting that event.
+    Mouse(MouseEventWire),
     /// Extract the text of a screen-absolute coordinate range (inclusive) and
     /// send it back on `reply`. Coordinates are `(col, screen_row)` where
     /// `screen_row` is relative to the top of the scrollback — the same
@@ -582,11 +592,20 @@ impl TabRegistry {
         Ok(())
     }
 
-    pub fn wheel_scroll(&self, id: u64, rows: i32) -> AppResult<()> {
+    pub fn wheel_scroll(&self, id: u64, rows: i32, col: u16, row: u16) -> AppResult<()> {
         let guard = self.inner.lock();
         let h = guard.get(&id).ok_or(AppError::UnknownTab(id))?;
         h.cmd_tx
-            .send(TabCmd::Wheel(rows))
+            .send(TabCmd::Wheel { rows, col, row })
+            .map_err(|_| AppError::UnknownTab(id))?;
+        Ok(())
+    }
+
+    pub fn write_mouse(&self, id: u64, ev: MouseEventWire) -> AppResult<()> {
+        let guard = self.inner.lock();
+        let h = guard.get(&id).ok_or(AppError::UnknownTab(id))?;
+        h.cmd_tx
+            .send(TabCmd::Mouse(ev))
             .map_err(|_| AppError::UnknownTab(id))?;
         Ok(())
     }
@@ -688,6 +707,52 @@ impl TabRegistry {
     }
 }
 
+/// Encode one mouse event against the terminal's live tracking mode + output
+/// format and write it to the PTY. Cells are mapped 1:1 by giving the encoder a
+/// 1px cell so the surface-space position equals the cell coordinate. The
+/// encoder self-filters — events a mode doesn't report produce no bytes, which
+/// we simply don't send.
+#[allow(clippy::too_many_arguments)]
+fn encode_and_send_mouse(
+    encoder: &mut MouseEncoder,
+    event: &mut MouseEvent,
+    terminal: &Terminal,
+    write_tx: &Sender<Vec<u8>>,
+    action: MouseAction,
+    button: Option<MouseButton>,
+    mods: KeyMods,
+    col: u16,
+    row: u16,
+    any_button_held: bool,
+) {
+    let cols = u32::from(terminal.cols().unwrap_or(0)).max(1);
+    let rows = u32::from(terminal.rows().unwrap_or(0)).max(1);
+    encoder.set_options_from_terminal(terminal);
+    encoder.set_size(EncoderSize {
+        screen_width: cols,
+        screen_height: rows,
+        cell_width: 1,
+        cell_height: 1,
+        padding_top: 0,
+        padding_bottom: 0,
+        padding_left: 0,
+        padding_right: 0,
+    });
+    encoder.set_any_button_pressed(any_button_held);
+    event.set_action(action);
+    event.set_button(button);
+    event.set_mods(mods);
+    event.set_position(MousePosition {
+        x: f32::from(col) + 0.5,
+        y: f32::from(row) + 0.5,
+    });
+    let mut bytes = Vec::new();
+    if encoder.encode_to_vec(event, &mut bytes).is_ok() && !bytes.is_empty() {
+        // Reliable blocking send, same path as TabCmd::Write.
+        let _ = write_tx.send(bytes);
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_tab_loop(
     tab_id: u64,
@@ -780,6 +845,15 @@ fn run_tab_loop(
     // that state across the IPC boundary.
     let mut key_encoder = KeyEncoder::new()?;
     let mut key_event = KeyEvent::new()?;
+    // Mouse events are likewise encoded here against the terminal's live
+    // tracking mode + output format (SGR / X10 / urxvt). Reused across events;
+    // `set_track_last_cell` dedups motion so a fast drag doesn't flood the PTY.
+    let mut mouse_encoder = MouseEncoder::new()?;
+    mouse_encoder.set_track_last_cell(true);
+    let mut mouse_event = MouseEvent::new()?;
+    // Whether a (non-wheel) button is currently held, so button-event motion
+    // (DEC 1002) is reported during a drag and suppressed otherwise.
+    let mut any_button_held = false;
     let mut osc_scanner = osc_notify::OscNotifyScanner::new();
     let mut last_notify: Option<Instant> = None;
     let mut render_state = RenderState::new()?;
@@ -907,13 +981,39 @@ fn run_tab_loop(
                     terminal.scroll_viewport(sv);
                     pending_emit = true;
                 }
-                Ok(TabCmd::Wheel(rows)) => {
+                Ok(TabCmd::Wheel { rows, col, row }) => {
                     let alt = terminal
                         .active_screen()
                         .map(|s| s == Screen::Alternate)
                         .unwrap_or(false);
                     let tracking = terminal.is_mouse_tracking().unwrap_or(false);
-                    if rows != 0 && alt && !tracking {
+                    if rows != 0 && tracking {
+                        // App is reporting mouse input → encode wheel notches as
+                        // button-4 (up) / button-5 (down) press reports at the
+                        // pointer cell. One report per notch, capped like the
+                        // arrow-key path. A wheel button doesn't latch
+                        // `any_button_held`.
+                        let button = if rows < 0 {
+                            MouseButton::Four
+                        } else {
+                            MouseButton::Five
+                        };
+                        let count = rows.unsigned_abs().min(WHEEL_ARROW_CAP);
+                        for _ in 0..count {
+                            encode_and_send_mouse(
+                                &mut mouse_encoder,
+                                &mut mouse_event,
+                                &terminal,
+                                &write_tx,
+                                MouseAction::Press,
+                                Some(button),
+                                KeyMods::empty(),
+                                col,
+                                row,
+                                any_button_held,
+                            );
+                        }
+                    } else if rows != 0 && alt {
                         // Alternate screen, no mouse reporting → drive the app
                         // like the arrow keys do. input.ts sends ESC[A / ESC[B
                         // (no DECCKM handling), so match that exactly — apps like
@@ -931,6 +1031,58 @@ fn run_tab_loop(
                         terminal.scroll_viewport(ScrollViewport::Delta(rows as isize));
                         pending_emit = true;
                     }
+                }
+                Ok(TabCmd::Mouse(ev)) => {
+                    let action = match ev.action.as_str() {
+                        "press" => MouseAction::Press,
+                        "release" => MouseAction::Release,
+                        _ => MouseAction::Motion,
+                    };
+                    let button = match ev.button {
+                        0 => Some(MouseButton::Left),
+                        1 => Some(MouseButton::Middle),
+                        2 => Some(MouseButton::Right),
+                        3 => Some(MouseButton::Four),
+                        4 => Some(MouseButton::Five),
+                        _ => None,
+                    };
+                    let mut mods = KeyMods::empty();
+                    if ev.shift {
+                        mods |= KeyMods::SHIFT;
+                    }
+                    if ev.ctrl {
+                        mods |= KeyMods::CTRL;
+                    }
+                    if ev.alt {
+                        mods |= KeyMods::ALT;
+                    }
+                    if ev.meta {
+                        mods |= KeyMods::SUPER;
+                    }
+                    // Track button-held state for 1002 (button-event) motion
+                    // reporting. A wheel button (four/five) is momentary and
+                    // doesn't latch.
+                    match action {
+                        MouseAction::Press
+                            if !matches!(button, Some(MouseButton::Four | MouseButton::Five)) =>
+                        {
+                            any_button_held = true;
+                        }
+                        MouseAction::Release => any_button_held = false,
+                        _ => {}
+                    }
+                    encode_and_send_mouse(
+                        &mut mouse_encoder,
+                        &mut mouse_event,
+                        &terminal,
+                        &write_tx,
+                        action,
+                        button,
+                        mods,
+                        ev.col,
+                        ev.row,
+                        any_button_held,
+                    );
                 }
                 Ok(TabCmd::QueryForeground { reply }) => {
                     #[allow(unused_mut)]
@@ -1469,6 +1621,7 @@ fn emit_render<'a>(
         .kitty_keyboard_flags()
         .map(|f| f.bits())
         .unwrap_or(0);
+    let mouse_tracking = terminal.is_mouse_tracking().unwrap_or(false);
 
     let payload = RenderPayload {
         tab_id,
@@ -1483,6 +1636,7 @@ fn emit_render<'a>(
         viewport_top,
         scrollback_total,
         kitty_flags,
+        mouse_tracking,
         links,
         link_spans,
     };

@@ -224,6 +224,7 @@ pub fn run() {
             commands::tab_foreground_process,
             commands::write_input,
             commands::write_key,
+            commands::write_mouse,
             commands::write_paste,
             commands::resize_tab,
             commands::scroll_tab,
