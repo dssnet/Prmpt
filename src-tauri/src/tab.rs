@@ -925,6 +925,13 @@ fn run_tab_loop(
                     }
                 }
                 Ok(TabCmd::Paste(bytes)) => {
+                    // Clipboard text (esp. from web apps like Discord) carries
+                    // `\r\n`/`\n` line breaks, but a terminal's Enter key is
+                    // `\r`. Sending a bare `\n` to a raw-mode app is wrong —
+                    // in nano/pico `\n` (Ctrl+J) is the Justify command, which
+                    // reflows and joins pasted lines. Normalize to `\r` like a
+                    // real terminal does, for both bracketed and raw paste.
+                    let bytes = normalize_paste_newlines(bytes);
                     let bytes = if terminal.mode(Mode::BRACKETED_PASTE).unwrap_or(false) {
                         let body = strip_paste_end_marker(&bytes);
                         let mut wrapped = Vec::with_capacity(body.len() + 12);
@@ -1241,6 +1248,37 @@ fn run_tab_loop(
 
 fn rgb_to_u32(c: RgbColor) -> u32 {
     (u32::from(c.r) << 16) | (u32::from(c.g) << 8) | u32::from(c.b)
+}
+
+/// Convert newlines in pasted text to carriage returns, matching what the
+/// Enter key emits. Clipboard content commonly uses `\r\n` (CRLF) or `\n`
+/// (LF), but terminal apps expect `\r` for a line break; a stray `\n` reaching
+/// a raw-mode app is interpreted as Ctrl+J (e.g. Justify in nano/pico, which
+/// reflows and joins the pasted lines). Collapses `\r\n` → `\r` and lone
+/// `\n` → `\r`, leaving existing `\r` untouched.
+fn normalize_paste_newlines(bytes: Vec<u8>) -> Vec<u8> {
+    if !bytes.contains(&b'\n') {
+        return bytes;
+    }
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\r' if bytes.get(i + 1) == Some(&b'\n') => {
+                out.push(b'\r');
+                i += 2;
+            }
+            b'\n' => {
+                out.push(b'\r');
+                i += 1;
+            }
+            b => {
+                out.push(b);
+                i += 1;
+            }
+        }
+    }
+    out
 }
 
 /// Remove any embedded bracketed-paste end marker (`ESC [201~`) from text
