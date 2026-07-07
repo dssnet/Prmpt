@@ -1,11 +1,19 @@
 import {
+  getHost,
   getKey,
   listPortForwards,
   markHostHasPassword,
   markKeyHasPassphrase,
   type SshHostRow,
 } from "../db";
-import { inspectSshKey, type SshAuthConfig, type SshConnectConfig } from "../ipc";
+import {
+  closeTab,
+  connectSshHost,
+  inspectSshKey,
+  spawnTab,
+  type SshAuthConfig,
+  type SshConnectConfig,
+} from "../ipc";
 import {
   hostPasswordKey,
   keyPassphraseKey,
@@ -20,7 +28,18 @@ import {
   getCellMetrics,
   reflowActive,
 } from "./terminal";
-import { openSftpOnlyHost, spawnSsh, useTabs } from "./tabs";
+import { addRestoredWorkspace, openSftpOnlyHost, spawnSsh, useTabs } from "./tabs";
+import {
+  collectLeaves,
+  collectTerminalLeaves,
+  makeLeaf,
+  makeSplit,
+  type LeafNode,
+  type WorkspaceNode,
+} from "./workspace";
+import { allocPanelLeafId, panelTitle } from "./panels";
+import { getSavedWorkspace, type SavedNode } from "./savedWorkspaces";
+import { showToast } from "./toasts";
 
 export async function resolveAuth(host: SshHostRow): Promise<SshAuthConfig> {
   if (host.auth_method === "agent") return { kind: "agent" };
@@ -146,5 +165,120 @@ export async function connectHost(host: SshHostRow, mode?: ConnectMode): Promise
     cellHeightPx: Math.round(cellHeightPx * dpr),
     config,
   });
+  focusCanvas();
+}
+
+// ---- Saved workspaces ------------------------------------------------------
+// Rehydration of a stored tiling tree (serialization + DB live in
+// state/savedWorkspaces.ts). Each leaf is respawned to a fresh backend:
+// terminals via spawn_tab, ssh panes by reconnecting the host (which may
+// prompt for a password/passphrase), panels as frontend-only leaves. The
+// rebuilt tree is handed to `addRestoredWorkspace` as one new tab.
+
+interface RestoreMetrics {
+  cols: number;
+  rows: number;
+  cellWidthPx: number;
+  cellHeightPx: number;
+}
+
+async function buildLiveNode(
+  node: SavedNode,
+  metrics: RestoreMetrics,
+  spawned: number[],
+): Promise<WorkspaceNode> {
+  if (node.kind === "split") {
+    const a = await buildLiveNode(node.a, metrics, spawned);
+    const b = await buildLiveNode(node.b, metrics, spawned);
+    return makeSplit(node.dir, a, b, node.ratio);
+  }
+  const origin = node.origin;
+  // Frontend-only panel pane — no backend, just a fresh negative leaf id.
+  if (origin.kind === "panel" && origin.panel) {
+    return makeLeaf(allocPanelLeafId(), {
+      kind: "panel",
+      title: origin.title || panelTitle(origin.panel),
+      panel: origin.panel,
+    });
+  }
+  // SSH shell pane — reconnect the host by id (forcing shell + SFTP on so any
+  // saved files panel on it works). A deleted host degrades to a local shell.
+  if (origin.kind === "ssh" && origin.hostId != null) {
+    const host = await getHost(origin.hostId);
+    if (host) {
+      const config = await buildSshConnectConfig(host);
+      config.disable_sftp = false;
+      config.disable_ssh = false;
+      const id = await connectSshHost({ config, ...metrics });
+      spawned.push(id);
+      return makeLeaf(id, origin);
+    }
+    showToast(
+      {
+        host: origin.hostLabel ?? "SSH",
+        title: "Host no longer exists",
+        detail: `"${origin.hostLabel ?? origin.title}" was removed — opened a local shell in its place.`,
+        kind: "error",
+      },
+      6000,
+    );
+    // fall through to a local terminal placeholder
+  }
+  // Local terminal pane (or an ssh leaf whose host is gone). Reopen in the
+  // folder it was saved in when we have one (the backend ignores a stale path).
+  const id = await spawnTab({ ...metrics, cwd: node.cwd });
+  spawned.push(id);
+  return makeLeaf(id, { kind: "terminal", title: origin.title || "Terminal" });
+}
+
+/** Reopen a saved workspace as a new tab, respawning every pane. */
+export async function loadSavedWorkspace(id: number): Promise<void> {
+  const saved = await getSavedWorkspace(id);
+  if (!saved) {
+    showToast(
+      {
+        host: "Workspace",
+        title: "Could not load workspace",
+        detail: "The saved layout is missing or unreadable.",
+        kind: "error",
+      },
+      5000,
+    );
+    return;
+  }
+  const { active } = useTabs();
+  reflowActive(active.value);
+  const { cellWidthPx, cellHeightPx, dpr } = getCellMetrics();
+  const dims = computeDims();
+  const metrics: RestoreMetrics = {
+    cols: dims.cols,
+    rows: dims.rows,
+    cellWidthPx: Math.round(cellWidthPx * dpr),
+    cellHeightPx: Math.round(cellHeightPx * dpr),
+  };
+  const spawned: number[] = [];
+  let root: WorkspaceNode;
+  try {
+    root = await buildLiveNode(saved.root, metrics, spawned);
+  } catch (err) {
+    // A pane failed (e.g. the user cancelled an ssh password prompt). Tear down
+    // whatever backends we already spawned so we don't leak orphaned PTYs.
+    console.error("workspace restore failed:", err);
+    for (const tid of spawned) void closeTab(tid).catch(() => undefined);
+    showToast(
+      {
+        host: "Workspace",
+        title: "Could not open workspace",
+        detail: err instanceof Error ? err.message : "One of its connections failed.",
+        kind: "error",
+      },
+      6000,
+    );
+    return;
+  }
+  const focus: LeafNode | undefined =
+    collectTerminalLeaves(root)[0] ?? collectLeaves(root)[0];
+  if (!focus) return; // a tree always has a leaf; belt-and-suspenders
+  addRestoredWorkspace(saved.label, root, focus.tabId);
   focusCanvas();
 }

@@ -44,7 +44,19 @@ const props = defineProps<{
    *  left border, the panel isn't docked to anything. */
   hideClose?: boolean;
 }>();
-const emit = defineEmits<{ close: []; "update:title": [string] }>();
+const emit = defineEmits<{
+  close: [];
+  "update:title": [string];
+  /** The local browser's folder, persisted onto the workspace leaf's seed so a
+   *  saved workspace reopens the panel here (TerminalView → setPanelLeafSeedPath).
+   *  Only emitted for the local source; a remote (SFTP) folder isn't a local
+   *  seed path. */
+  "update:seedPath": [string];
+}>();
+
+function onLocalCwd(path: string): void {
+  emit("update:seedPath", path);
+}
 
 // ---- cd / insert-path target terminals -------------------------------------
 const terminals = computed(() => {
@@ -71,6 +83,12 @@ const source = computed<Source>({
     cols.value.source.value = v;
   },
 });
+
+// Per-pane key for the local browser's remembered folder, so two local
+// browsers tiled side-by-side (or restored together) don't share one cwd.
+const localLocationKey = computed(() =>
+  props.paneId != null ? `local:pane:${props.paneId}` : "local",
+);
 
 // Saved hosts for the picker. All are SFTP-capable ("Shell only" hosts open
 // the subsystem lazily). Loaded once on mount; an empty list (not yet loaded)
@@ -168,9 +186,11 @@ watch(
         :targets="terminals"
         :default-target-tab-id="defaultTargetTabId"
         :seed-path="seedPath"
+        :location-key="localLocationKey"
         :sources="sources"
         source-value="local"
         @update:source="source = decode($event)"
+        @update:cwd="onLocalCwd"
       >
         <template #actions>
           <button

@@ -100,6 +100,7 @@ pub const MIGRATIONS: &[(i64, &str, &str)] = &[
     (6, "disable_sftp", include_str!("../migrations/0006_disable_sftp.sql")),
     (7, "disable_ssh", include_str!("../migrations/0007_disable_ssh.sql")),
     (8, "sync", include_str!("../migrations/0008_sync.sql")),
+    (9, "workspaces", include_str!("../migrations/0009_workspaces.sql")),
 ];
 
 /// Migrations consumed by `tauri-plugin-sql` at startup, built from
@@ -518,6 +519,7 @@ fn prespawn_tab_for_window(app: &AppHandle, label: &str) {
         shell,
         scrollback_lines,
         config.inner().clone(),
+        None,
     ) {
         Ok(id) => {
             let pending = app.state::<SharedPendingHydration>();

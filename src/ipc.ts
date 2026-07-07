@@ -185,6 +185,8 @@ export async function spawnTab(args: {
   rows: number;
   cellWidthPx: number;
   cellHeightPx: number;
+  /** Optional initial working directory (saved-workspace restore). */
+  cwd?: string;
 }): Promise<number> {
   return await invoke<number>("spawn_tab", {
     args: {
@@ -192,6 +194,7 @@ export async function spawnTab(args: {
       rows: args.rows,
       cell_width_px: args.cellWidthPx,
       cell_height_px: args.cellHeightPx,
+      cwd: args.cwd,
     },
   });
 }

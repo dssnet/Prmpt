@@ -338,6 +338,25 @@ export function openPanelTab(kind: PanelKind): void {
   activeId.value = slotId;
 }
 
+/** Register a fully-built workspace tree (its backends already spawned) as a
+ *  new tab and focus it. Used by the saved-workspace load path
+ *  (`state/connect.ts::loadSavedWorkspace`), which respawns the panes before
+ *  handing the tree here. The slot id is a fresh frontend id (like
+ *  `openPanelTab` / `openSftpOnlyHost`) — independent of the pane backends, so
+ *  a multi-pane restore needs no primary-pane bookkeeping. Returns the slot id. */
+export function addRestoredWorkspace(
+  label: string,
+  root: WorkspaceNode,
+  focusedTabId: number,
+): number {
+  const slotId = allocPanelLeafId();
+  const t: TabState = { id: slotId, kind: "workspace", title: label };
+  tabs.value.push(t);
+  setWorkspace(slotId, { root, focusedTabId });
+  activeId.value = slotId;
+  return slotId;
+}
+
 export async function closeTabAndForget(id: number): Promise<void> {
   if (id === HOME_TAB_ID) return;
   const t = findTab(id);

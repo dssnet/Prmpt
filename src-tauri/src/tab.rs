@@ -349,6 +349,7 @@ impl TabRegistry {
         shell: Option<String>,
         scrollback_lines: usize,
         config: SharedConfig,
+        cwd: Option<String>,
     ) -> AppResult<u64> {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
 
@@ -374,8 +375,18 @@ impl TabRegistry {
         for a in login_args {
             cmd.arg(a);
         }
-        if let Some(home) = platform::home_dir() {
-            cmd.cwd(home);
+        // Prefer a caller-supplied start dir (restoring a saved workspace into
+        // the folder a terminal was in) when it still exists; else fall back to
+        // home — an invalid cwd would make the spawn itself fail.
+        match cwd.filter(|p| std::path::Path::new(p).is_dir()) {
+            Some(dir) => {
+                cmd.cwd(dir);
+            }
+            None => {
+                if let Some(home) = platform::home_dir() {
+                    cmd.cwd(home);
+                }
+            }
         }
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");

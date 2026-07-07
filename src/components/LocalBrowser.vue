@@ -87,6 +87,11 @@ const props = withDefaults(
     canClose?: boolean;
     /** Shown in the header instead of the generic title (docked mode). */
     fixedLabel?: string;
+    /** Key under which this browser's cwd + nav history is remembered across
+     *  remounts (browsers unmount on every tab switch). Per pane, so two local
+     *  browsers tiled side-by-side don't share one folder — mirrors how the
+     *  SFTP browser keys by connection id. */
+    locationKey?: string;
   }>(),
   {
     canClose: false,
@@ -94,9 +99,16 @@ const props = withDefaults(
     targets: () => [],
     defaultTargetTabId: null,
     seedPath: null,
+    locationKey: "local",
   },
 );
-const emit = defineEmits<{ "update:source": [value: string]; close: [] }>();
+const emit = defineEmits<{
+  "update:source": [value: string];
+  /** Current folder, so the host panel can persist it onto the workspace leaf
+   *  (mirrors the git panel) — restoring a saved workspace reopens here. */
+  "update:cwd": [value: string];
+  close: [];
+}>();
 
 const IS_WIN =
   typeof navigator !== "undefined" && /Win/i.test(navigator.platform);
@@ -136,6 +148,10 @@ function closeFilter(): void {
   filterOpen.value = false;
 }
 watch(cwd, closeFilter);
+// Report the folder up so it can be saved onto the workspace leaf.
+watch(cwd, (v) => {
+  if (v) emit("update:cwd", v);
+});
 
 // Hide dot-prefixed (hidden) entries unless the shared toggle is on; then
 // apply the name filter.
@@ -310,11 +326,11 @@ async function load(path: string): Promise<void> {
 }
 
 /** Remember the current location so the next mount (browsers unmount on
- *  every tab switch) resumes it. One shared slot — the local cwd already
- *  persists across target-tab changes while mounted. */
+ *  every tab switch) resumes it. Keyed per pane (`locationKey`) so tiled local
+ *  browsers keep independent folders. */
 function saveLocation(): void {
   if (!cwd.value) return;
-  browserLocations.set("local", {
+  browserLocations.set(props.locationKey, {
     cwd: cwd.value,
     back: [...backStack.value],
     forward: [...forwardStack.value],
@@ -334,13 +350,13 @@ async function init(): Promise<void> {
   }
   // Resume the last visited directory; if it no longer loads (deleted,
   // permissions…) forget it and fall back to the home directory.
-  const mem = browserLocations.get("local");
+  const mem = browserLocations.get(props.locationKey);
   if (mem) {
     backStack.value = [...mem.back];
     forwardStack.value = [...mem.forward];
     await load(mem.cwd);
     if (cwd.value === mem.cwd) return;
-    browserLocations.delete("local");
+    browserLocations.delete(props.locationKey);
     backStack.value = [];
     forwardStack.value = [];
     error.value = null;

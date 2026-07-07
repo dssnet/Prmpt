@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import {
   Asterisk,
   Bell,
@@ -7,7 +7,9 @@ import {
   Columns2,
   GitBranch,
   Globe,
+  LayoutGrid,
   PanelRight,
+  Trash2,
   X,
 } from "lucide-vue-next";
 
@@ -23,6 +25,15 @@ import type { PanelKind } from "../state/panels";
 import { openPanelWindow } from "../ipc";
 import { requestCloseTab } from "../state/closeGuard";
 import { bellTabs } from "../state/notifications";
+import { popupMenu } from "../contextMenu";
+import { loadSavedWorkspace } from "../state/connect";
+import {
+  deleteSavedWorkspace,
+  listSavedWorkspaces,
+  saveWorkspaceLayout,
+  type SavedWorkspaceRow,
+} from "../state/savedWorkspaces";
+import { Button, ConfirmDialog, Input, Modal } from "./ui";
 import {
   collectLeaves,
   getWorkspace,
@@ -428,6 +439,7 @@ const plusMenuEl = ref<HTMLDivElement | null>(null);
 function onPlusContextMenu(e: MouseEvent): void {
   e.preventDefault();
   plusMenuOpen.value = !plusMenuOpen.value;
+  if (plusMenuOpen.value) void refreshSaved();
 }
 
 interface PlusMenuRow {
@@ -438,6 +450,79 @@ const plusMenuRows: PlusMenuRow[] = [
   { kind: "files", text: "File Browser" },
   { kind: "git", text: "Git" },
 ];
+
+// ---- Saved workspaces ------------------------------------------------------
+// Right-click a workspace tab → "Save Workspace…" (name dialog below).
+// Right-click the + → the saved layouts list under the panel rows; click to
+// reopen, trash to delete (with a confirm).
+const savedWorkspaces = ref<SavedWorkspaceRow[]>([]);
+
+async function refreshSaved(): Promise<void> {
+  try {
+    savedWorkspaces.value = await listSavedWorkspaces();
+  } catch (err) {
+    console.error("failed to list saved workspaces:", err);
+  }
+}
+
+function loadWorkspace(w: SavedWorkspaceRow): void {
+  plusMenuOpen.value = false;
+  void loadSavedWorkspace(w.id);
+}
+
+// Delete flow: a small confirm dialog, gated on a pending row.
+const pendingDelete = ref<SavedWorkspaceRow | null>(null);
+function askDelete(w: SavedWorkspaceRow): void {
+  plusMenuOpen.value = false; // the modal's backdrop covers the menu anyway
+  pendingDelete.value = w;
+}
+async function confirmDelete(): Promise<void> {
+  const w = pendingDelete.value;
+  pendingDelete.value = null;
+  if (!w) return;
+  try {
+    await deleteSavedWorkspace(w.id);
+  } catch (err) {
+    console.error("failed to delete saved workspace:", err);
+  }
+  await refreshSaved();
+}
+
+// Save flow: name dialog seeded with the tab's current title.
+const saveDialogOpen = ref(false);
+const saveSlotId = ref<number | null>(null);
+const saveLabel = ref("");
+const saveFormEl = ref<HTMLFormElement | null>(null);
+
+function openSaveDialog(t: TabState): void {
+  saveSlotId.value = t.id;
+  saveLabel.value = labelFor(t);
+  saveDialogOpen.value = true;
+}
+function cancelSave(): void {
+  saveDialogOpen.value = false;
+  saveSlotId.value = null;
+}
+async function submitSave(): Promise<void> {
+  const label = saveLabel.value.trim();
+  const slotId = saveSlotId.value;
+  if (!label || slotId == null) return;
+  try {
+    await saveWorkspaceLayout(slotId, label);
+  } catch (err) {
+    console.error("failed to save workspace:", err);
+  }
+  saveDialogOpen.value = false;
+  saveSlotId.value = null;
+  await refreshSaved();
+}
+
+// Right-clicking a workspace tab offers to save its current layout.
+function onTabContextMenu(t: TabState, e: MouseEvent): void {
+  e.preventDefault();
+  if (t.kind !== "workspace") return;
+  popupMenu([{ text: "Save Workspace…", action: () => openSaveDialog(t) }]);
+}
 
 // Overflow handling: older tabs (those opened first) collapse into a dropdown
 // on the left, between home and the visible strip. The most recent tabs stay
@@ -538,17 +623,85 @@ onMounted(() => {
   }
   document.addEventListener("mousedown", onDocMouseDown);
   document.addEventListener("keydown", onKeyDown);
+  window.addEventListener("resize", onWindowResize);
 });
 
 onBeforeUnmount(() => {
   resizeObs?.disconnect();
   document.removeEventListener("mousedown", onDocMouseDown);
   document.removeEventListener("keydown", onKeyDown);
+  window.removeEventListener("resize", onWindowResize);
 });
 
 watch(overflowTabs, (n) => {
   if (n.length === 0) menuOpen.value = false;
 });
+
+// Focus the name field when the save dialog opens.
+watch(saveDialogOpen, (open) => {
+  if (!open) return;
+  void nextTick(() => {
+    saveFormEl.value?.querySelector("input")?.focus();
+  });
+});
+
+// ---- Dropdown viewport clamping --------------------------------------------
+// The inline dropdowns (overflow list, + menu) hang off a trigger near the
+// right of the bar and can grow tall (many older tabs / saved workspaces).
+// Anchor them with fixed positioning, clamp the left edge into the viewport,
+// and cap the height (scroll the overflow) so they never spill off-screen.
+const DROPDOWN_PAD = 8;
+const plusMenuStyle = ref<Record<string, string>>({});
+const overflowMenuStyle = ref<Record<string, string>>({});
+
+function computeDropdownStyle(
+  trigger: HTMLElement | null,
+  menu: HTMLElement | null,
+): Record<string, string> {
+  if (!trigger || !menu) return { position: "fixed", left: "0px", top: "0px" };
+  const t = trigger.getBoundingClientRect();
+  const top = t.bottom + 4;
+  const left = Math.max(
+    DROPDOWN_PAD,
+    Math.min(t.left, window.innerWidth - menu.offsetWidth - DROPDOWN_PAD),
+  );
+  const maxHeight = Math.max(120, window.innerHeight - top - DROPDOWN_PAD);
+  return {
+    position: "fixed",
+    left: `${Math.round(left)}px`,
+    top: `${Math.round(top)}px`,
+    maxHeight: `${Math.round(maxHeight)}px`,
+    overflowY: "auto",
+  };
+}
+
+function positionPlusMenu(): void {
+  plusMenuStyle.value = computeDropdownStyle(plusWrapEl.value, plusMenuEl.value);
+}
+function positionOverflowMenu(): void {
+  overflowMenuStyle.value = computeDropdownStyle(triggerEl.value, menuEl.value);
+}
+
+watch(plusMenuOpen, (open) => {
+  if (!open) return;
+  plusMenuStyle.value = { position: "fixed", left: "0px", top: "0px" };
+  void nextTick(positionPlusMenu);
+});
+watch(menuOpen, (open) => {
+  if (!open) return;
+  overflowMenuStyle.value = { position: "fixed", left: "0px", top: "0px" };
+  void nextTick(positionOverflowMenu);
+});
+// The + menu's height changes when the saved-workspace list loads in async.
+watch(savedWorkspaces, () => {
+  if (plusMenuOpen.value) void nextTick(positionPlusMenu);
+});
+
+// A viewport change invalidates the fixed anchors — just dismiss.
+function onWindowResize(): void {
+  plusMenuOpen.value = false;
+  menuOpen.value = false;
+}
 </script>
 
 <template>
@@ -591,7 +744,8 @@ watch(overflowTabs, (n) => {
         <div
           v-if="menuOpen"
           ref="menuEl"
-          class="overflow-panel absolute left-0 top-full mt-1 min-w-45 max-w-70 z-50 rounded-lg bg-surface-1 ring-1 ring-border-strong shadow-[0_8px_24px_rgba(0,0,0,0.35)] p-1 text-xs"
+          :style="overflowMenuStyle"
+          class="overflow-panel min-w-45 max-w-70 z-50 rounded-lg bg-surface-1 ring-1 ring-border-strong shadow-[0_8px_24px_rgba(0,0,0,0.35)] p-1 text-xs"
         >
           <button
             v-for="t in overflowTabs"
@@ -652,6 +806,7 @@ watch(overflowTabs, (n) => {
           @click="onTabClick(t)"
           @mousedown="onTabMouseDown(t, $event)"
           @mousedown.middle.prevent="onMiddleClose(t)"
+          @contextmenu="onTabContextMenu(t, $event)"
         >
           <Globe
             v-if="tabIsSsh(t)"
@@ -693,7 +848,8 @@ watch(overflowTabs, (n) => {
         <div
           v-if="plusMenuOpen"
           ref="plusMenuEl"
-          class="overflow-panel absolute left-0 top-full mt-1 min-w-44 z-50 rounded-lg bg-surface-1 ring-1 ring-border-strong shadow-[0_8px_24px_rgba(0,0,0,0.35)] p-1 text-xs"
+          :style="plusMenuStyle"
+          class="overflow-panel min-w-44 max-w-70 z-50 rounded-lg bg-surface-1 ring-1 ring-border-strong shadow-[0_8px_24px_rgba(0,0,0,0.35)] p-1 text-xs"
         >
           <button
             v-for="row in plusMenuRows"
@@ -710,6 +866,29 @@ watch(overflowTabs, (n) => {
             />
             <span class="flex-1">{{ row.text }}</span>
           </button>
+          <template v-if="savedWorkspaces.length > 0">
+            <div class="my-1 h-px bg-border-strong/60" />
+            <button
+              v-for="w in savedWorkspaces"
+              :key="w.id"
+              type="button"
+              :title="`Open saved workspace “${w.label}”`"
+              class="group w-full flex items-center gap-2 px-2 py-1 rounded-md text-left cursor-pointer text-fg-muted hover:bg-surface-2 hover:text-fg"
+              @click="loadWorkspace(w)"
+            >
+              <LayoutGrid :size="13" class="flex-none text-fg-subtle" />
+              <span class="flex-1 overflow-hidden text-ellipsis whitespace-nowrap">
+                {{ w.label }}
+              </span>
+              <span
+                class="flex-none w-5 h-5 inline-flex items-center justify-center rounded-md text-fg-subtle opacity-0 group-hover:opacity-100 hover:bg-surface-3 hover:text-danger"
+                title="Delete saved workspace"
+                @click.stop="askDelete(w)"
+              >
+                <Trash2 :size="12" :stroke-width="2.25" />
+              </span>
+            </button>
+          </template>
         </div>
       </Transition>
     </div>
@@ -727,6 +906,41 @@ watch(overflowTabs, (n) => {
       {{ ghost.label }}
     </div>
   </Teleport>
+  <Modal v-if="saveDialogOpen">
+    <form
+      ref="saveFormEl"
+      class="flex flex-col gap-3.5"
+      @submit.prevent="submitSave"
+    >
+      <h2 class="m-0 text-base font-semibold text-fg">Save Workspace</h2>
+      <p class="m-0 text-sm text-fg-muted leading-relaxed">
+        Store this tab's panes and layout so you can reopen it from the
+        <span class="text-fg">+</span> menu later.
+      </p>
+      <Input v-model="saveLabel" placeholder="Workspace name" />
+      <div class="flex justify-end gap-2 mt-1">
+        <Button variant="secondary" type="button" @click="cancelSave">
+          Cancel
+        </Button>
+        <Button variant="primary" type="submit" :disabled="!saveLabel.trim()">
+          Save
+        </Button>
+      </div>
+    </form>
+  </Modal>
+  <ConfirmDialog
+    :open="!!pendingDelete"
+    title="Delete Workspace"
+    :message="
+      pendingDelete
+        ? `Delete the saved workspace “${pendingDelete.label}”? This can't be undone.`
+        : ''
+    "
+    confirm-label="Delete"
+    tone="danger"
+    @confirm="confirmDelete"
+    @cancel="pendingDelete = null"
+  />
 </template>
 
 <style scoped>

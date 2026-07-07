@@ -37,11 +37,15 @@ function onBarDown(e: MouseEvent): void {
    for the pane beneath. The pill is hit-testable only once revealed
    (visibility gates pointer events), so it never steals clicks from the first
    terminal row. */
+/* Span the full pane width (not just the pill) so the pill, centered inside,
+   is bounded by the pane: a narrow pane clamps it (`.pane-pill` max-width:100%)
+   instead of letting it overflow into an adjacent panel — which sits above at a
+   higher z-index and would cover it — or past the window edge. */
 .pane-hover {
   position: absolute;
   top: 0;
-  left: 50%;
-  transform: translateX(-50%);
+  left: 0;
+  right: 0;
   z-index: 20;
   display: flex;
   justify-content: center;
@@ -77,7 +81,15 @@ function onBarDown(e: MouseEvent): void {
   align-items: center;
   gap: 6px;
   height: 24px;
-  max-width: 240px;
+  /* Never wider than the pane (minus the hover container's padding), so it
+     stays clear of neighbours and the window edge; capped at 240px otherwise.
+     `min-width: 0` lets it actually shrink to that cap (a flex item's default
+     min-width is its content, which would otherwise burst the max-width on a
+     narrow pane); `overflow: hidden` is the backstop that keeps the buttons /
+     title inside the rounded pill rather than spilling out. */
+  max-width: min(240px, 100%);
+  min-width: 0;
+  overflow: hidden;
   padding: 0 4px 0 12px;
   box-sizing: border-box;
   border-radius: 9999px;
@@ -126,6 +138,9 @@ function onBarDown(e: MouseEvent): void {
 }
 .pane-title {
   flex: 1;
+  /* Allow the title to shrink below its content so it ellipsizes instead of
+     shoving the action buttons out of the pill. */
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;

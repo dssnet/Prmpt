@@ -32,6 +32,10 @@ pub struct SpawnArgs {
     pub rows: u16,
     pub cell_width_px: u32,
     pub cell_height_px: u32,
+    /// Optional initial working directory (restoring a saved workspace's
+    /// terminal into the folder it was in). Ignored if it no longer exists.
+    #[serde(default)]
+    pub cwd: Option<String>,
 }
 
 #[tauri::command]
@@ -70,6 +74,7 @@ pub fn spawn_tab(
             shell,
             scrollback_lines,
             config.inner().clone(),
+            args.cwd,
         )
     }
 }
