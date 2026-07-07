@@ -34,6 +34,16 @@ pub struct TerminalPrefs {
     pub scrollback_lines: usize,
 }
 
+/// Which view a freshly-opened window with no tabs to restore lands on: a new
+/// terminal (the historical default) or the Home tab (hosts / keys / groups).
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum StartupView {
+    #[default]
+    Terminal,
+    Home,
+}
+
 /// UI behavior preferences (settings pane / file-browser menus). Window-layout
 /// state (panel visibility, widths, ratios) deliberately stays in the
 /// webview's localStorage — it's per-machine ephemera, not configuration.
@@ -66,6 +76,9 @@ pub struct UiPrefs {
     /// and the dialog opens on demand. A manual "Check for updates" always
     /// opens the dialog regardless.
     pub auto_open_update_dialog: bool,
+    /// What a freshly-opened window lands on when it has no tabs to restore:
+    /// a new terminal or the Home tab. See `StartupView`.
+    pub startup_view: StartupView,
 }
 
 impl Default for UiPrefs {
@@ -80,6 +93,7 @@ impl Default for UiPrefs {
             show_changed_date: false,
             show_created_date: false,
             auto_open_update_dialog: true,
+            startup_view: StartupView::Terminal,
         }
     }
 }

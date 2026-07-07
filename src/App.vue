@@ -42,6 +42,7 @@ import {
   dropTabIntoTarget,
   handleExit,
   handleRender,
+  HOME_TAB_ID,
   hydrateTabs,
   isSshReconnecting,
   isSshShellTab,
@@ -82,6 +83,7 @@ import {
   windowCloseMessage,
 } from "./state/closeGuard";
 import { notify, notifyBell } from "./state/notifications";
+import { startupView } from "./state/uiPrefs";
 import {
   ACTIONS,
   bindingFor,
@@ -195,7 +197,12 @@ async function autoSpawnInitialTab(): Promise<void> {
   if (tabs.value.some((t) => t.kind !== "home")) return;
   autoSpawnInFlight = true;
   try {
+    // Always boot a terminal so the window is never left empty. The
+    // startup-view preference only decides what's *shown*: with "home", hand
+    // the view to the always-present Home tab, leaving the fresh terminal
+    // running in the background (a click on its tab picks it up).
     await spawnNewTab();
+    if (startupView.value === "home") setActive(HOME_TAB_ID);
   } finally {
     autoSpawnInFlight = false;
   }
@@ -704,7 +711,11 @@ onMounted(async () => {
     if (boot.tabs.length > 0) {
       hydrateTabs(boot.tabs);
       reflowActive(active.value);
-      focusCanvas();
+      // Startup-view preference: the prespawned launch terminal (forked on the
+      // backend before this frontend booted) stays live in the background, but
+      // "home" lands the view on the Home tab instead of the terminal.
+      if (startupView.value === "home") setActive(HOME_TAB_ID);
+      else focusCanvas();
     } else {
       await autoSpawnInitialTab();
     }

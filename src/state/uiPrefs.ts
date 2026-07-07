@@ -6,7 +6,7 @@
  */
 import { ref } from "vue";
 
-import { setUiPrefs, type UiPrefs } from "../ipc";
+import { setUiPrefs, type StartupView, type UiPrefs } from "../ipc";
 
 /** Toast popups when a file operation finishes on a background tab. */
 export const toastsEnabled = ref(true);
@@ -43,6 +43,11 @@ export const showCreatedDate = ref(false);
  *  opens on demand. Consulted in `state/update.ts::runUpdateCheck`. */
 export const autoOpenUpdateDialog = ref(true);
 
+/** Which view a freshly-opened window with no tabs to restore lands on: a new
+ *  terminal ("terminal", the historical default) or the Home tab ("home").
+ *  Consulted in `App.vue::autoSpawnInitialTab`. */
+export const startupView = ref<StartupView>("terminal");
+
 /** Seed from the loaded config (called once at startup, before mount). Values
  *  left over in localStorage from when these prefs lived there are adopted
  *  into the config once, then removed. */
@@ -58,6 +63,7 @@ export function initUiPrefs(ui: UiPrefs): void {
   showChangedDate.value = ui.show_changed_date;
   showCreatedDate.value = ui.show_created_date;
   autoOpenUpdateDialog.value = ui.auto_open_update_dialog;
+  startupView.value = ui.startup_view;
   if (lsToasts !== null || lsHidden !== null) {
     localStorage.removeItem("prmpt.toastsEnabled");
     localStorage.removeItem("prmpt.showHiddenFiles");
@@ -76,6 +82,7 @@ function persist(): Promise<void> {
     show_changed_date: showChangedDate.value,
     show_created_date: showCreatedDate.value,
     auto_open_update_dialog: autoOpenUpdateDialog.value,
+    startup_view: startupView.value,
   });
 }
 
@@ -121,6 +128,11 @@ export function setShowCreatedDate(v: boolean): void {
 
 export function setAutoOpenUpdateDialog(v: boolean): void {
   autoOpenUpdateDialog.value = v;
+  void persist();
+}
+
+export function setStartupView(v: StartupView): void {
+  startupView.value = v;
   void persist();
 }
 

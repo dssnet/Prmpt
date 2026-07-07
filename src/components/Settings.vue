@@ -46,13 +46,16 @@ import {
   setShowCreatedDate,
   setShowHiddenFiles,
   setShowSize,
+  setStartupView,
   setToastsEnabled,
   showChangedDate,
   showCreatedDate,
   showHiddenFiles,
   showSize,
+  startupView,
   toastsEnabled,
 } from "../state/uiPrefs";
+import type { StartupView } from "../ipc";
 import {
   lastSyncAt,
   lastSyncError,
@@ -178,6 +181,7 @@ async function resetTerminal() {
       scrollback_lines: d.scrollback_lines,
     };
     setConfirmCloseRunning(d.ui.confirm_close_running);
+    setStartupView(d.ui.startup_view);
     termStatus.value = { tone: "ok", text: "Reset to defaults." };
   } catch (e) {
     termStatus.value = { tone: "err", text: `Reset failed: ${errText(e)}` };
@@ -571,6 +575,24 @@ function openImport() {
                 :model-value="confirmCloseRunning"
                 @update:model-value="setConfirmCloseRunning"
               />
+            </div>
+            <div class="setting-row">
+              <div class="setting-info">
+                <div class="setting-title">Open on startup</div>
+                <div class="setting-hint">
+                  Which view a new window opens to. With Home (hosts, keys and
+                  groups), a terminal still starts in the background, so the
+                  window is never empty.
+                </div>
+              </div>
+              <select
+                :value="startupView"
+                class="w-40 shrink-0 bg-surface-1 border border-border text-fg rounded-md px-2 py-1.5 text-sm cursor-pointer focus:outline-none focus:border-border-strong"
+                @change="setStartupView(($event.target as HTMLSelectElement).value as StartupView)"
+              >
+                <option value="terminal">New terminal</option>
+                <option value="home">Home</option>
+              </select>
             </div>
             <div class="mt-2">
               <Button variant="secondary" size="sm" @click="resetTerminal">

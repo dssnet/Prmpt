@@ -159,7 +159,12 @@ export interface UiPrefs {
   show_changed_date: boolean;
   show_created_date: boolean;
   auto_open_update_dialog: boolean;
+  /** What a freshly-opened window with no tabs to restore lands on. */
+  startup_view: StartupView;
 }
+
+/** Which view a freshly-opened window lands on: a new terminal or Home. */
+export type StartupView = "terminal" | "home";
 
 export const FLAG_BOLD = 1 << 0;
 export const FLAG_ITALIC = 1 << 1;
