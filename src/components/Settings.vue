@@ -3,6 +3,7 @@ import {
   Archive,
   ArrowLeft,
   Bell,
+  Cloud,
   FolderOpen,
   Keyboard,
   Palette,
@@ -52,6 +53,17 @@ import {
   showSize,
   toastsEnabled,
 } from "../state/uiPrefs";
+import {
+  lastSyncAt,
+  lastSyncError,
+  loadSyncSettings,
+  saveSyncSettings,
+  syncBusy,
+  syncEnabled,
+  syncNow,
+  testSyncConnection,
+  type SyncSettingsForm,
+} from "../state/sync";
 import { runUpdateCheck, useUpdate } from "../state/update";
 import FontStackInput from "./FontStackInput.vue";
 import { Button, ConfirmDialog, Input, Modal, Switch } from "./ui";
@@ -67,6 +79,7 @@ type Section =
   | "shortcuts"
   | "filebrowser"
   | "notifications"
+  | "sync"
   | "updates"
   | "backup";
 const section = ref<Section>("appearance");
@@ -76,6 +89,7 @@ const SECTIONS = [
   { id: "shortcuts", label: "Shortcuts", icon: Keyboard },
   { id: "filebrowser", label: "File Browser", icon: FolderOpen },
   { id: "notifications", label: "Notifications", icon: Bell },
+  { id: "sync", label: "Sync", icon: Cloud },
   { id: "updates", label: "Updates", icon: RefreshCw },
   { id: "backup", label: "Backup", icon: Archive },
 ] as const;
@@ -254,6 +268,72 @@ function classFor(active: boolean): string {
     ? `${cardClass} !border-accent shadow-[inset_0_0_0_1px_var(--color-accent)]`
     : cardClass;
 }
+
+// ---- Sync (WebDAV) ----
+
+// Credentials are saved explicitly (no autosave — half-typed passwords
+// must never hit the keychain or trigger a sync against a wrong server).
+const sync = ref<SyncSettingsForm | null>(null);
+const syncFormStatus = ref<{ tone: "ok" | "err"; text: string } | null>(null);
+const syncTestBusy = ref(false);
+
+void loadSyncSettings().then((s) => {
+  sync.value = s;
+});
+
+async function saveSyncForm() {
+  const s = sync.value;
+  if (!s) return;
+  syncFormStatus.value = null;
+  try {
+    // Runs the first sync before resolving when enabling.
+    await saveSyncSettings({ ...s });
+    if (!s.enabled) {
+      syncFormStatus.value = { tone: "ok", text: "Saved. Sync is off." };
+    } else if (lastSyncError.value) {
+      syncFormStatus.value = {
+        tone: "err",
+        text: `Saved, but sync failed: ${lastSyncError.value}`,
+      };
+    } else {
+      syncFormStatus.value = { tone: "ok", text: "Saved and synced." };
+    }
+  } catch (e) {
+    syncFormStatus.value = { tone: "err", text: errText(e) };
+  }
+}
+
+async function syncNowClicked() {
+  syncFormStatus.value = null;
+  await syncNow(); // never throws — the result lands in lastSyncError
+  syncFormStatus.value = lastSyncError.value
+    ? { tone: "err", text: `Sync failed: ${lastSyncError.value}` }
+    : { tone: "ok", text: "Sync complete." };
+}
+
+async function testSyncForm() {
+  const s = sync.value;
+  if (!s) return;
+  syncFormStatus.value = null;
+  syncTestBusy.value = true;
+  try {
+    await testSyncConnection(s);
+    syncFormStatus.value = { tone: "ok", text: "Connection OK — WebDAV folder is reachable." };
+  } catch (e) {
+    syncFormStatus.value = { tone: "err", text: errText(e) };
+  } finally {
+    syncTestBusy.value = false;
+  }
+}
+
+const lastSyncText = computed(() => {
+  if (lastSyncError.value) return `Last sync failed: ${lastSyncError.value}`;
+  if (!lastSyncAt.value) return "Not synced yet.";
+  const d = new Date(lastSyncAt.value);
+  return Number.isNaN(d.getTime())
+    ? "Not synced yet."
+    : `Last synced ${d.toLocaleString()}.`;
+});
 
 // ---- Backup & Restore ----
 
@@ -725,6 +805,122 @@ function openImport() {
           </div>
         </template>
 
+        <!-- Sync -->
+        <template v-else-if="section === 'sync'">
+          <header>
+            <h2 class="m-0 text-base font-medium tracking-wide">Sync</h2>
+            <p class="m-0 mt-1 text-xs text-fg-muted leading-snug">
+              Keep hosts, keys and groups in sync across devices through a
+              WebDAV folder (Nextcloud, ownCloud, …). Point every device at
+              the same folder with the same encryption passphrase and changes
+              merge automatically. Everything is encrypted with the
+              passphrase before upload — the server never sees your
+              credentials.
+            </p>
+          </header>
+          <div v-if="sync" class="flex flex-col">
+            <div class="setting-row">
+              <div class="setting-info">
+                <div class="setting-title">Enable sync</div>
+                <div class="setting-hint">
+                  Syncs on launch, after changes, and periodically while the
+                  app is in use.
+                </div>
+              </div>
+              <Switch v-model="sync.enabled" />
+            </div>
+            <div class="setting-stack">
+              <div class="setting-title">WebDAV folder URL</div>
+              <div class="setting-hint">
+                An existing folder on your WebDAV server, e.g.
+                https://cloud.example.com/remote.php/dav/files/you/prmpt/
+              </div>
+              <Input
+                v-model="sync.url"
+                class="mt-1.5"
+                :spellcheck="false"
+                placeholder="https://…"
+              />
+            </div>
+            <div class="setting-stack">
+              <div class="grid grid-cols-2 gap-3">
+                <div>
+                  <div class="setting-title">Username</div>
+                  <Input v-model="sync.username" class="mt-1.5" :spellcheck="false" />
+                </div>
+                <div>
+                  <div class="setting-title">Password</div>
+                  <Input
+                    v-model="sync.password"
+                    type="password"
+                    autocomplete="new-password"
+                    class="mt-1.5"
+                  />
+                </div>
+              </div>
+              <div class="setting-hint mt-1.5">
+                WebDAV account credentials (use an app password if your server
+                offers them). Stored in this device's encrypted store.
+              </div>
+            </div>
+            <div class="setting-stack">
+              <div class="setting-title">Encryption passphrase</div>
+              <div class="setting-hint">
+                Encrypts the synced data end-to-end — SSH passwords and keys
+                travel inside it. Must match on every device; it is never
+                sent to the server.
+              </div>
+              <Input
+                v-model="sync.passphrase"
+                type="password"
+                autocomplete="new-password"
+                class="mt-1.5"
+              />
+            </div>
+            <div class="setting-row">
+              <div class="setting-info">
+                <div class="setting-title">Sync interval</div>
+                <div class="setting-hint">Minutes between background syncs.</div>
+              </div>
+              <div class="w-24 shrink-0">
+                <Input v-model="sync.intervalMinutes" type="number" :min="1" />
+              </div>
+            </div>
+            <div class="mt-2 flex items-center gap-3">
+              <Button :disabled="syncTestBusy || syncBusy" @click="saveSyncForm">
+                Save
+              </Button>
+              <Button
+                variant="secondary"
+                :disabled="syncTestBusy || !sync.url.trim()"
+                @click="testSyncForm"
+              >
+                {{ syncTestBusy ? "Testing…" : "Test connection" }}
+              </Button>
+              <Button
+                variant="secondary"
+                :disabled="syncBusy || !syncEnabled"
+                @click="syncNowClicked"
+              >
+                {{ syncBusy ? "Syncing…" : "Sync now" }}
+              </Button>
+            </div>
+            <p
+              v-if="syncFormStatus"
+              class="m-0 mt-2 text-xs"
+              :class="syncFormStatus.tone === 'err' ? 'text-danger' : 'text-fg-muted'"
+            >
+              {{ syncFormStatus.text }}
+            </p>
+            <p
+              class="m-0 mt-2 text-xs"
+              :class="lastSyncError ? 'text-danger' : 'text-fg-subtle'"
+            >
+              {{ lastSyncText }}
+            </p>
+          </div>
+        </template>
+
         <!-- Backup & Restore -->
         <template v-else-if="section === 'backup'">
           <header>
@@ -832,6 +1028,18 @@ function openImport() {
     color-mix(in srgb, var(--border, rgba(255, 255, 255, 0.08)) 60%, transparent);
 }
 .setting-row:last-child {
+  border-bottom: none;
+}
+/* Stacked variant: title + hint with a full-width control underneath —
+   for inputs (URLs, credentials) too wide for the side-by-side row. */
+.setting-stack {
+  display: flex;
+  flex-direction: column;
+  padding: 10px 0;
+  border-bottom: 1px solid
+    color-mix(in srgb, var(--border, rgba(255, 255, 255, 0.08)) 60%, transparent);
+}
+.setting-stack:last-child {
   border-bottom: none;
 }
 .setting-info {

@@ -41,6 +41,7 @@ Tauri backend (Rust)                                        ▼
 | `src/renderer/glyph-atlas.ts` | Glyph atlas + color-glyph detection |
 | `src/renderer/shaders.ts` | GLSL |
 | `src/ipc.ts`, `src/input.ts`, `src/tabs.ts` | IPC bindings, keymap, tab bar |
+| `src/state/sync.ts` + `src-tauri/src/sync.rs` | WebDAV sync: TS merge engine + Rust transport/crypto. See "Sync (WebDAV)" below. |
 | `src/state/panels.ts` | Generic panel-pane system: workspace leaves are terminals (backend PTY, positive id) **or** frontend panels (files/git/…, negative id). Panels are *self-contained* — each picks what it operates on (server / folder / cd-target terminal) from its own controls; `PanelDesc` carries only open-time *seeds*. A pane opens fresh beside the terminal it was launched from (pill button / Cmd+B/+G → `openPanelFromTerminal`, which seeds cwd/server) and lives until closed; it no longer follows or is pruned by any one terminal, but the workspace's last terminal closing still closes it. New panel type = kind here + component in `TerminalView.vue`'s `PANEL_VIEWS` + an `openPanelPane("<kind>", …)` opener; tiling/dividers/focus/drag/close are shared. |
 | `src/assets/fonts/NotoMonoNerdFontMono-Regular.ttf` | Bundled primary mono font, patched with Powerline + Nerd Font icons (SIL OFL 1.1; Nerd Fonts patches are MIT). License at `NerdFonts-OFL.txt`. |
 
@@ -54,6 +55,8 @@ bun run build                     # type-check + bundle frontend
 # Launching the GUI: USER does this, not the agent:
 bun tauri dev
 ```
+
+`PRMPT_DATA_DIR=/some/dir` points an instance at an isolated data dir (config, DB, stronghold snapshot all follow — `paths.rs` honors it). That's how a second instance runs side by side, e.g. for testing WebDAV sync locally: start `bun tauri dev` normally, then launch `PRMPT_DATA_DIR=/tmp/prmpt-b src-tauri/target/debug/prmpt` — the second (debug) instance reuses the first one's Vite dev server.
 
 ## Toolchain requirements (verified working as of writing)
 
@@ -82,6 +85,17 @@ Events backend → frontend:
 - `terminal:notification` → `NotifyPayload { tab_id, source: "bell"|"osc", title?, body? }`. BEL or OSC 9/777 (how Claude Code signals task completion — Prmpt sets `TERM_PROGRAM=ghostty` so its `auto` channel emits OSC 777). Throttled to 1/s per tab on the backend. Frontend routes it through `src/state/notifications.ts::notify()` — the single dispatch for terminal notifications AND file-transfer completions: chime always (Settings → Notifications); history entry, toast + tab-bar bell badge only when away (window unfocused / tab not active) — events the user watched happen don't enter the notification center. New "finished in the background" signals should call `notify()`, not `showToast` directly. Exception: `source: "bell"` routes to `notifyBell()` instead — a softer one-note blip (same sound toggle) + away-badge only, never logged to the notification center or toasted (shells ring BEL on tab autocomplete, which would flood the history).
 
 Commands frontend → backend: `spawn_tab`, `close_tab`, `write_input` (raw bytes — LocalBrowser command injection etc.), `write_key` (keyboard events, backend-encoded), `write_mouse` (mouse press/release/motion, backend-encoded), `write_paste` (bracketed-paste aware; raw `write_input` would bypass mode 2004), `resize_tab`, `list_tabs`, `get_config`, `forget_tab`. Argument naming: snake_case in Rust, camelCase in JS for top-level args; struct args keep their internal snake_case field names (e.g. `cell_width_px`).
+
+## Sync (WebDAV)
+
+Hosts / keys / groups (incl. port forwards and their Stronghold secrets) sync across installs through **one age-encrypted document** (`prmpt-sync.age`) in a user-supplied WebDAV collection. Split of labor: `src-tauri/src/sync.rs` is transport + crypto only (`sync_webdav_test|pull|push`; optimistic concurrency via ETag `If-Match` / `If-None-Match: *` — a 412 surfaces as the `SYNC_CONFLICT` sentinel and the frontend re-pulls, re-merges, retries). The engine — snapshot, merge, apply, scheduling — is `src/state/sync.ts`. Merge is per-record last-write-wins on `updated_at` with tombstones (`sync_tombstones` table); records are keyed by `sync_id` UUIDs (migration 0008; `db.ts` assigns them on insert, the engine backfills NULLs from older binaries). Invariants:
+
+- The engine's DB writes go through `dbHandle()` raw SQL, preserving remote `updated_at`/`created_at`/`sync_id` verbatim. **Never route them through the db.ts CRUD helpers** — those stamp fresh timestamps, write tombstones, and fire the mutation hook (→ infinite push loop).
+- Every new user-facing mutation in `db.ts` must call `notifyMutation()`; deletes of synced rows must `recordTombstone()` first. A new synced table/column means extending the doc format in `state/sync.ts` — bump `DOC_FORMAT` (older clients refuse newer docs, never clobber them).
+- Port forwards have no `sync_id`: they're embedded in their host's record, so any forward write must bump the host's `updated_at` (`touchHost`).
+- Device-local state stays out of the document: group `open` flags, `broken` markers, the hide-PIN, config.toml.
+- The E2E passphrase is mandatory — the doc carries plaintext SSH secrets inside the age layer, and `sync_webdav_push` refuses to upload without one. WebDAV password + passphrase live in Stronghold (`sync:webdav:password`, `sync:e2e:passphrase`); URL/username/enabled/interval/ETag-cursor live in the `sync_meta` table.
+- Sync triggers: startup (label `"main"` only, so reserve-pool windows don't multiply traffic), 2 s-debounced after db.ts mutations, window focus (5 s throttle), an interval that only fires while the window has focus, the `online` event (best-effort — unreliable on WebKit), and exponential-backoff retries after failures (15 s → 5 min cap, focus-independent). Offline edits are pending-counter tracked (`mutationCount`/`pushedCount`): a count is only marked pushed when the whole cycle succeeded, so edits made while the server is unreachable keep retrying until they land — don't "simplify" this back to a boolean dirty flag.
 
 ## Renderer notes
 

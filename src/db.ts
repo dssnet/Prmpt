@@ -140,8 +140,57 @@ function ensure(): Database {
   return db;
 }
 
+/** Raw database handle for the sync engine (`state/sync.ts`), which needs
+ *  writes that preserve remote timestamps/sync ids — semantics the CRUD
+ *  helpers here deliberately don't offer. */
+export function dbHandle(): Database {
+  return ensure();
+}
+
 function nowIso(): string {
   return new Date().toISOString();
+}
+
+// ---------- sync bookkeeping ----------
+
+/** Notified after any user-driven data mutation (save/delete of hosts,
+ *  keys, groups, forwards — not UI state like a group's expanded flag).
+ *  The sync engine hooks this to schedule a debounced push. The engine's
+ *  own writes go through `dbHandle()` directly, so applying remote
+ *  changes never re-triggers it. */
+let mutationListener: (() => void) | null = null;
+
+export function setDbMutationListener(cb: (() => void) | null): void {
+  mutationListener = cb;
+}
+
+function notifyMutation(): void {
+  mutationListener?.();
+}
+
+function newSyncId(): string {
+  return crypto.randomUUID();
+}
+
+/** Record a deletion so sync can propagate it (deletes must outlive the
+ *  row — a device that still has the old copy would otherwise resurrect
+ *  it on the next merge). */
+async function recordTombstone(
+  kind: "host" | "key" | "group",
+  table: string,
+  id: number,
+): Promise<void> {
+  const rows = await ensure().select<{ sync_id: string | null }[]>(
+    `SELECT sync_id FROM ${table} WHERE id = $1`,
+    [id],
+  );
+  const syncId = rows[0]?.sync_id;
+  if (!syncId) return; // row unknown or never got a sync id — nothing to bury
+  await ensure().execute(
+    `INSERT OR REPLACE INTO sync_tombstones (kind, sync_id, deleted_at)
+     VALUES ($1, $2, $3)`,
+    [kind, syncId, nowIso()],
+  );
 }
 
 // ---------- hosts ----------
@@ -190,8 +239,8 @@ export async function saveHost(input: SshHostInput): Promise<number> {
       `INSERT INTO ssh_hosts
          (label, hostname, port, username, auth_method,
           has_password, key_id, group_id, disable_sftp, disable_ssh,
-          broken, created_at, updated_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 0, $11, $12)`,
+          broken, sync_id, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 0, $11, $12, $13)`,
       [
         input.label,
         input.hostname,
@@ -203,10 +252,12 @@ export async function saveHost(input: SshHostInput): Promise<number> {
         input.group_id ?? null,
         input.disable_sftp ? 1 : 0,
         input.disable_ssh ? 1 : 0,
+        newSyncId(),
         now,
         now,
       ],
     );
+    notifyMutation();
     return res.lastInsertId ?? 0;
   }
   await ensure().execute(
@@ -231,6 +282,7 @@ export async function saveHost(input: SshHostInput): Promise<number> {
       input.id,
     ],
   );
+  notifyMutation();
   return input.id;
 }
 
@@ -266,6 +318,7 @@ export async function clearHostPasswordFlag(id: number): Promise<void> {
     `UPDATE ssh_hosts SET has_password = 0, broken = 0, updated_at = $1 WHERE id = $2`,
     [nowIso(), id],
   );
+  notifyMutation();
 }
 
 export async function markHostHasPassword(id: number, value: boolean): Promise<void> {
@@ -273,11 +326,14 @@ export async function markHostHasPassword(id: number, value: boolean): Promise<v
     `UPDATE ssh_hosts SET has_password = $1, broken = 0, updated_at = $2 WHERE id = $3`,
     [value ? 1 : 0, nowIso(), id],
   );
+  notifyMutation();
 }
 
 export async function deleteHost(id: number): Promise<void> {
+  await recordTombstone("host", "ssh_hosts", id);
   await ensure().execute(`DELETE FROM ssh_port_forwards WHERE host_id = $1`, [id]);
   await ensure().execute(`DELETE FROM ssh_hosts WHERE id = $1`, [id]);
+  notifyMutation();
 }
 
 export async function recordHostFingerprint(
@@ -289,6 +345,7 @@ export async function recordHostFingerprint(
     `UPDATE ssh_hosts SET host_fp_sha256 = $1, host_key_alg = $2, updated_at = $3 WHERE id = $4`,
     [fingerprint, algorithm, nowIso(), id],
   );
+  notifyMutation();
 }
 
 export async function resetHostFingerprint(id: number): Promise<void> {
@@ -296,6 +353,7 @@ export async function resetHostFingerprint(id: number): Promise<void> {
     `UPDATE ssh_hosts SET host_fp_sha256 = NULL, host_key_alg = NULL, updated_at = $1 WHERE id = $2`,
     [nowIso(), id],
   );
+  notifyMutation();
 }
 
 // ---------- groups ----------
@@ -327,22 +385,25 @@ export async function setGroupHidden(id: number, hidden: boolean): Promise<void>
     nowIso(),
     id,
   ]);
+  notifyMutation();
 }
 
 export async function saveGroup(input: SshGroupInput): Promise<number> {
   const now = nowIso();
   if (input.id == null) {
     const res = await ensure().execute(
-      `INSERT INTO ssh_groups (label, parent_id, created_at, updated_at)
-       VALUES ($1, $2, $3, $4)`,
-      [input.label, input.parent_id ?? null, now, now],
+      `INSERT INTO ssh_groups (label, parent_id, sync_id, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5)`,
+      [input.label, input.parent_id ?? null, newSyncId(), now, now],
     );
+    notifyMutation();
     return res.lastInsertId ?? 0;
   }
   await ensure().execute(
     `UPDATE ssh_groups SET label = $1, parent_id = $2, updated_at = $3 WHERE id = $4`,
     [input.label, input.parent_id ?? null, now, input.id],
   );
+  notifyMutation();
   return input.id;
 }
 
@@ -359,6 +420,7 @@ export async function deleteGroup(id: number): Promise<void> {
   if (rows.length === 0) return;
   const parent = rows[0].parent_id;
   const now = nowIso();
+  await recordTombstone("group", "ssh_groups", id);
   await ensure().execute(
     `UPDATE ssh_groups SET parent_id = $1, updated_at = $2 WHERE parent_id = $3`,
     [parent, now, id],
@@ -368,6 +430,7 @@ export async function deleteGroup(id: number): Promise<void> {
     [parent, now, id],
   );
   await ensure().execute(`DELETE FROM ssh_groups WHERE id = $1`, [id]);
+  notifyMutation();
 }
 
 // ---------- keys ----------
@@ -394,6 +457,7 @@ export async function markKeyHasPassphrase(id: number, value: boolean): Promise<
     `UPDATE ssh_keys SET has_passphrase = $1, broken = 0, updated_at = $2 WHERE id = $3`,
     [value ? 1 : 0, nowIso(), id],
   );
+  notifyMutation();
 }
 
 function keyFromRow(r: RawKeyRow): SshKeyRow {
@@ -404,10 +468,11 @@ export async function saveKey(input: SshKeyInput): Promise<number> {
   const now = nowIso();
   if (input.id == null) {
     const res = await ensure().execute(
-      `INSERT INTO ssh_keys (label, has_passphrase, public_key, broken, created_at, updated_at)
-       VALUES ($1, $2, $3, 0, $4, $5)`,
-      [input.label, input.has_passphrase ? 1 : 0, input.public_key ?? null, now, now],
+      `INSERT INTO ssh_keys (label, has_passphrase, public_key, broken, sync_id, created_at, updated_at)
+       VALUES ($1, $2, $3, 0, $4, $5, $6)`,
+      [input.label, input.has_passphrase ? 1 : 0, input.public_key ?? null, newSyncId(), now, now],
     );
+    notifyMutation();
     return res.lastInsertId ?? 0;
   }
   await ensure().execute(
@@ -417,14 +482,21 @@ export async function saveKey(input: SshKeyInput): Promise<number> {
      WHERE id = $5`,
     [input.label, input.has_passphrase ? 1 : 0, input.public_key ?? null, now, input.id],
   );
+  notifyMutation();
   return input.id;
 }
 
 export async function deleteKey(id: number): Promise<void> {
+  await recordTombstone("key", "ssh_keys", id);
   // Manually unlink hosts — the FK ON DELETE SET NULL only fires when
   // PRAGMA foreign_keys = ON, which the SQL plugin doesn't enable.
-  await ensure().execute(`UPDATE ssh_hosts SET key_id = NULL WHERE key_id = $1`, [id]);
+  // Bump the unlinked hosts' updated_at so the detachment syncs.
+  await ensure().execute(
+    `UPDATE ssh_hosts SET key_id = NULL, updated_at = $1 WHERE key_id = $2`,
+    [nowIso(), id],
+  );
   await ensure().execute(`DELETE FROM ssh_keys WHERE id = $1`, [id]);
+  notifyMutation();
 }
 
 // ---------- port forwards ----------
@@ -436,6 +508,16 @@ export async function listPortForwards(hostId: number): Promise<SshPortForwardRo
     [hostId],
   );
   return rows.map((r) => ({ ...r, enabled: !!r.enabled }));
+}
+
+/** Port forwards sync as part of their host's record, so every forward
+ *  change must bump the host's updated_at — otherwise the edit never wins
+ *  a merge against another device's copy of the host. */
+async function touchHost(hostId: number): Promise<void> {
+  await ensure().execute(`UPDATE ssh_hosts SET updated_at = $1 WHERE id = $2`, [
+    nowIso(),
+    hostId,
+  ]);
 }
 
 export async function savePortForward(fw: SshPortForwardRow): Promise<number> {
@@ -456,6 +538,8 @@ export async function savePortForward(fw: SshPortForwardRow): Promise<number> {
         now,
       ],
     );
+    await touchHost(fw.host_id);
+    notifyMutation();
     return res.lastInsertId ?? 0;
   }
   await ensure().execute(
@@ -473,11 +557,19 @@ export async function savePortForward(fw: SshPortForwardRow): Promise<number> {
       fw.id,
     ],
   );
+  await touchHost(fw.host_id);
+  notifyMutation();
   return fw.id;
 }
 
 export async function deletePortForward(id: number): Promise<void> {
+  await ensure().execute(
+    `UPDATE ssh_hosts SET updated_at = $1
+     WHERE id = (SELECT host_id FROM ssh_port_forwards WHERE id = $2)`,
+    [nowIso(), id],
+  );
   await ensure().execute(`DELETE FROM ssh_port_forwards WHERE id = $1`, [id]);
+  notifyMutation();
 }
 
 // ---------- broken sweep ----------

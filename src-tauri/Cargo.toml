@@ -80,6 +80,12 @@ tauri-plugin-dialog = "2"
 # newer — build). Pinned to the same 0.8 line `tauri-plugin-sql` pulls so
 # cargo dedupes sqlx-sqlite / libsqlite3-sys.
 sqlx = { version = "0.8", default-features = false, features = ["sqlite", "runtime-tokio"] }
+# WebDAV sync transport (src/sync.rs). Already in the tree via
+# tauri-plugin-updater — `rustls-no-provider` mirrors the updater's TLS
+# feature selection exactly (rustls + platform certificate verifier, crypto
+# provider supplied by the rustls crate the updater pins), so this adds no
+# new crates to the build.
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider"] }
 # SHA-384 of each migration's SQL — the exact checksum formula sqlx records
 # in `_sqlx_migrations`. Already in the tree transitively; declared direct
 # for the `db_compat` reconcile path.

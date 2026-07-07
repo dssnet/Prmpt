@@ -100,3 +100,14 @@ export function keyPassphraseKey(keyId: number): string {
 export function hidePinKey(): string {
   return "app:hide-pin";
 }
+
+/** WebDAV account password for sync (device-local, never in the sync doc). */
+export function syncWebdavPasswordKey(): string {
+  return "sync:webdav:password";
+}
+
+/** End-to-end passphrase the sync document is age-encrypted with. All
+ *  devices sharing a WebDAV location must use the same one. */
+export function syncPassphraseKey(): string {
+  return "sync:e2e:passphrase";
+}

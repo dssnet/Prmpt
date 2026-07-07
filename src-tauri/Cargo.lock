@@ -4451,6 +4451,7 @@ dependencies = [
  "parking_lot",
  "portable-pty",
  "rand",
+ "reqwest",
  "russh",
  "russh-keys",
  "russh-sftp",

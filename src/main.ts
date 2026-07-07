@@ -10,6 +10,7 @@ import { openSecrets } from "./secrets";
 import { initTheme } from "./state/theme";
 import { initUiPrefs } from "./state/uiPrefs";
 import { initKeybindings } from "./state/keybindings";
+import { initSync } from "./state/sync";
 import { initWindowFocus } from "./state/windowFocus";
 import nerdFontUrl from "./assets/fonts/NotoMonoNerdFontMono-Regular.ttf?url";
 
@@ -116,6 +117,9 @@ async function init() {
   initUiPrefs(config.ui);
   initKeybindings(config.keybindings);
   void initWindowFocus();
+  // WebDAV sync (needs the DB, which openDb() above has opened). Fire and
+  // forget — a slow or unreachable server must not delay the first paint.
+  void initSync();
 
   // Always append the bundled Nerd Font so icons / Powerline glyphs are
   // available regardless of what's in the user's config. The user's chosen

@@ -1,10 +1,11 @@
 <script setup lang="ts">
 import { AlertTriangle, Check, Copy, Plus, Trash2 } from "lucide-vue-next";
-import { onMounted, ref } from "vue";
+import { onMounted, ref, watch } from "vue";
 
 import { useDomScroll } from "../composables/useDomScroll";
 import { deleteKey, listKeys, type SshKeyRow } from "../db";
 import { deleteSecret, keyPassphraseKey, keyPrivateKey } from "../secrets";
+import { syncDataVersion } from "../state/sync";
 import { Button, ConfirmDialog, EmptyState, PageHeader, Scrollbar } from "./ui";
 
 const emit = defineEmits<{ back: []; addKey: []; editKey: [k: SshKeyRow] }>();
@@ -27,6 +28,8 @@ async function refresh() {
 }
 
 onMounted(refresh);
+// WebDAV sync applied remote changes — reload from the DB.
+watch(syncDataVersion, () => void refresh());
 defineExpose({ refresh });
 
 const deleteTarget = ref<SshKeyRow | null>(null);

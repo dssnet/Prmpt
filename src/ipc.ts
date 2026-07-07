@@ -984,3 +984,62 @@ export async function importBackup(
     passphrase: passphrase ?? null,
   });
 }
+
+// ---- WebDAV sync transport ----
+
+/** Connection half of the sync settings — the merge engine and document
+ *  format live in `state/sync.ts`; the backend only speaks HTTP + age. */
+export interface WebdavParams {
+  url: string;
+  username: string;
+  password: string;
+}
+
+export interface SyncPullResult {
+  /** Remote unchanged since the etag we sent (HTTP 304); `data` absent. */
+  not_modified: boolean;
+  /** Decrypted document JSON; null when no document exists yet. */
+  data: string | null;
+  etag: string | null;
+}
+
+/** Sentinel error string from `sync_webdav_push` when another device pushed
+ *  between our pull and push (HTTP 412) — re-pull, re-merge, retry.
+ *  Mirrors `sync::ERR_CONFLICT`. */
+export const SYNC_CONFLICT = "SYNC_CONFLICT";
+
+/** PROPFIND the collection to validate URL + credentials. */
+export async function syncWebdavTest(params: WebdavParams): Promise<void> {
+  await invoke("sync_webdav_test", { params });
+}
+
+/** Fetch + decrypt the remote sync document. `cachedEtag` turns the
+ *  no-change poll into a cheap 304. */
+export async function syncWebdavPull(
+  params: WebdavParams,
+  passphrase: string,
+  cachedEtag: string | null,
+): Promise<SyncPullResult> {
+  return await invoke<SyncPullResult>("sync_webdav_pull", {
+    params,
+    passphrase,
+    cachedEtag,
+  });
+}
+
+/** Encrypt + upload the sync document. `baseEtag` is the revision this
+ *  push merged against (If-Match); null means "create, must not exist".
+ *  Resolves to the new revision's etag when the server reports one. */
+export async function syncWebdavPush(
+  params: WebdavParams,
+  passphrase: string,
+  data: string,
+  baseEtag: string | null,
+): Promise<string | null> {
+  return await invoke<string | null>("sync_webdav_push", {
+    params,
+    passphrase,
+    data,
+    baseEtag,
+  });
+}

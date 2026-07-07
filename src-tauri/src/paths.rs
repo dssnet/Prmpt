@@ -11,6 +11,20 @@ use crate::error::{AppError, AppResult};
 pub const APP_DIR_NAME: &str = "Prmpt";
 
 pub fn app_data_dir() -> AppResult<PathBuf> {
+    // Escape hatch for running a second, isolated instance side by side
+    // (e.g. testing WebDAV sync between two "devices" on one machine):
+    //   PRMPT_DATA_DIR=/tmp/prmpt-b ./prmpt
+    // Everything that persists (config.toml, prmpt.db, prmpt.stronghold,
+    // data_version) follows, because every consumer resolves through here.
+    // The Stronghold boot key is the one shared bit — it lives in the OS
+    // keyring under a fixed service name — which is exactly right: each
+    // instance decrypts its own snapshot file with the same key.
+    if let Ok(dir) = std::env::var("PRMPT_DATA_DIR") {
+        let dir = dir.trim();
+        if !dir.is_empty() {
+            return Ok(PathBuf::from(dir));
+        }
+    }
     let base = BaseDirs::new()
         .ok_or_else(|| AppError::Config("cannot resolve base dirs".into()))?;
     Ok(base.config_dir().join(APP_DIR_NAME))

@@ -17,6 +17,7 @@ mod secret_store;
 mod secure_store;
 mod ssh;
 mod stronghold;
+mod sync;
 mod tab;
 mod window_pool;
 
@@ -98,6 +99,7 @@ pub const MIGRATIONS: &[(i64, &str, &str)] = &[
     (5, "group_flags", include_str!("../migrations/0005_group_flags.sql")),
     (6, "disable_sftp", include_str!("../migrations/0006_disable_sftp.sql")),
     (7, "disable_ssh", include_str!("../migrations/0007_disable_ssh.sql")),
+    (8, "sync", include_str!("../migrations/0008_sync.sql")),
 ];
 
 /// Migrations consumed by `tauri-plugin-sql` at startup, built from
@@ -288,6 +290,9 @@ pub fn run() {
             commands::prepare_for_update,
             backup::export_backup,
             backup::import_backup,
+            sync::sync_webdav_test,
+            sync::sync_webdav_pull,
+            sync::sync_webdav_push,
         ]);
 
     // The updater plugin is desktop-only (mobile distributes via the

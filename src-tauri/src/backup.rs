@@ -178,7 +178,8 @@ pub fn export_backup(
     Ok(())
 }
 
-fn encrypt(plaintext: &[u8], passphrase: &str) -> AppResult<Vec<u8>> {
+/// Also used by `sync.rs` to seal the WebDAV sync document.
+pub(crate) fn encrypt(plaintext: &[u8], passphrase: &str) -> AppResult<Vec<u8>> {
     let encryptor =
         age::Encryptor::with_user_passphrase(age::secrecy::Secret::new(passphrase.to_owned()));
     let mut out = Vec::new();
@@ -194,7 +195,8 @@ fn encrypt(plaintext: &[u8], passphrase: &str) -> AppResult<Vec<u8>> {
     Ok(out)
 }
 
-fn decrypt(ciphertext: &[u8], passphrase: &str) -> AppResult<Vec<u8>> {
+/// Also used by `sync.rs` to open the WebDAV sync document.
+pub(crate) fn decrypt(ciphertext: &[u8], passphrase: &str) -> AppResult<Vec<u8>> {
     let decryptor = match age::Decryptor::new(ciphertext)
         .map_err(|e| AppError::Crypto(format!("age open: {e}")))?
     {

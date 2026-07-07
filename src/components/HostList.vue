@@ -17,7 +17,7 @@ import {
   Terminal,
   Trash2,
 } from "lucide-vue-next";
-import { computed, onBeforeUnmount, onMounted, ref } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 
 import { useDomScroll } from "../composables/useDomScroll";
 import {
@@ -41,8 +41,10 @@ import {
   saveSecret,
 } from "../secrets";
 import { connectHost, defaultConnectMode, type ConnectMode } from "../state/connect";
+import { syncDataVersion } from "../state/sync";
 import GroupTree from "./GroupTree.vue";
 import HidePinDialogs from "./HidePinDialogs.vue";
+import SyncStatusIcon from "./SyncStatusIcon.vue";
 import {
   ActionMenu,
   Badge,
@@ -182,6 +184,8 @@ onMounted(async () => {
   if (Number.isFinite(saved)) sidebarPct.value = clampPct(saved);
   await refresh();
 });
+// WebDAV sync applied remote changes — reload from the DB.
+watch(syncDataVersion, () => void refresh());
 defineExpose({ refresh });
 
 async function onConnect(h: SshHostRow, mode?: ConnectMode) {
@@ -505,18 +509,19 @@ async function confirmDeleteGroup() {
         </div>
       </div>
 
-      <!-- Footer: settings -->
-      <div class="flex-none border-t border-border p-2">
+      <!-- Footer: settings + sync status -->
+      <div class="flex-none border-t border-border p-2 flex items-center gap-1">
         <button
           type="button"
           title="Theme settings"
           aria-label="Open settings"
-          class="w-full flex items-center gap-1.5 px-1.5 py-1.5 rounded-md text-fg-muted hover:text-fg hover:bg-surface-2 cursor-pointer transition-colors duration-150"
+          class="flex-1 min-w-0 flex items-center gap-1.5 px-1.5 py-1.5 rounded-md text-fg-muted hover:text-fg hover:bg-surface-2 cursor-pointer transition-colors duration-150"
           @click="emit('openSettings')"
         >
           <Settings :size="15" class="shrink-0" />
           <span class="text-sm">Settings</span>
         </button>
+        <SyncStatusIcon />
       </div>
     </aside>
 
