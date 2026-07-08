@@ -9,6 +9,7 @@ import {
   Globe,
   LayoutGrid,
   PanelRight,
+  Save,
   Trash2,
   X,
 } from "lucide-vue-next";
@@ -517,11 +518,16 @@ async function submitSave(): Promise<void> {
   await refreshSaved();
 }
 
-// Right-clicking a workspace tab offers to save its current layout.
+// Right-clicking a workspace tab offers to save its current layout or close
+// the tab (same guarded path as the × button).
 function onTabContextMenu(t: TabState, e: MouseEvent): void {
   e.preventDefault();
   if (t.kind !== "workspace") return;
-  popupMenu([{ text: "Save Workspace…", action: () => openSaveDialog(t) }]);
+  popupMenu([
+    { text: "Save Workspace…", icon: Save, action: () => openSaveDialog(t) },
+    null,
+    { text: "Close", icon: X, action: () => void requestCloseTab(t) },
+  ]);
 }
 
 // Overflow handling: older tabs (those opened first) collapse into a dropdown
@@ -740,19 +746,20 @@ function onWindowResize(): void {
         <span class="tabular-nums">{{ overflowTabs.length }}</span>
         <Bell v-if="bellInOverflow" :size="10" class="flex-none text-accent" />
       </button>
-      <Transition name="overflow-panel">
+      <Transition name="pop">
         <div
           v-if="menuOpen"
           ref="menuEl"
           :style="overflowMenuStyle"
-          class="overflow-panel min-w-45 max-w-70 z-50 rounded-lg bg-surface-1 ring-1 ring-border-strong shadow-[0_8px_24px_rgba(0,0,0,0.35)] p-1 text-xs"
+          class="pop-panel origin-top-left min-w-45 max-w-70 z-50 p-1 text-xs"
         >
           <button
-            v-for="t in overflowTabs"
+            v-for="(t, ti) in overflowTabs"
             :key="t.id"
             type="button"
+            :style="{ '--i': ti }"
             :class="[
-              'group w-full flex items-center gap-1.5 px-2 py-1 rounded-md text-left cursor-pointer',
+              'group pop-item w-full flex items-center gap-1.5 px-2 py-1 rounded-md text-left cursor-pointer',
               active?.id === t.id
                 ? 'bg-surface-2 text-fg'
                 : 'text-fg-muted hover:bg-surface-2 hover:text-fg',
@@ -844,19 +851,20 @@ function onWindowResize(): void {
       >
         +
       </div>
-      <Transition name="overflow-panel">
+      <Transition name="pop">
         <div
           v-if="plusMenuOpen"
           ref="plusMenuEl"
           :style="plusMenuStyle"
-          class="overflow-panel min-w-44 max-w-70 z-50 rounded-lg bg-surface-1 ring-1 ring-border-strong shadow-[0_8px_24px_rgba(0,0,0,0.35)] p-1 text-xs"
+          class="pop-panel origin-top-left min-w-44 max-w-70 z-50 p-1 text-xs"
         >
           <button
-            v-for="row in plusMenuRows"
+            v-for="(row, ri) in plusMenuRows"
             :key="row.kind"
             type="button"
             :title="`Open ${row.text} — drag onto the terminal to split, or out for a new window`"
-            class="w-full flex items-center gap-2 px-2 py-1 rounded-md text-left cursor-pointer text-fg-muted hover:bg-surface-2 hover:text-fg"
+            :style="{ '--i': ri }"
+            class="pop-item w-full flex items-center gap-2 px-2 py-1 rounded-md text-left cursor-pointer text-fg-muted hover:bg-surface-2 hover:text-fg"
             @mousedown="onSpawnMouseDown(row.kind, $event)"
           >
             <component
@@ -869,11 +877,12 @@ function onWindowResize(): void {
           <template v-if="savedWorkspaces.length > 0">
             <div class="my-1 h-px bg-border-strong/60" />
             <button
-              v-for="w in savedWorkspaces"
+              v-for="(w, wi) in savedWorkspaces"
               :key="w.id"
               type="button"
               :title="`Open saved workspace “${w.label}”`"
-              class="group w-full flex items-center gap-2 px-2 py-1 rounded-md text-left cursor-pointer text-fg-muted hover:bg-surface-2 hover:text-fg"
+              :style="{ '--i': plusMenuRows.length + wi }"
+              class="group pop-item w-full flex items-center gap-2 px-2 py-1 rounded-md text-left cursor-pointer text-fg-muted hover:bg-surface-2 hover:text-fg"
               @click="loadWorkspace(w)"
             >
               <LayoutGrid :size="13" class="flex-none text-fg-subtle" />
@@ -964,30 +973,13 @@ function onWindowResize(): void {
 </style>
 
 <style scoped>
-/* Overflow dropdown: chevron rotation + panel pop. */
+/* Overflow dropdown: chevron rotation. Panel look/motion come from the
+   shared `.pop-panel` recipe + `pop` transition in styles.css. */
 .overflow-chevron {
   transition: transform 200ms cubic-bezier(0.34, 1.5, 0.6, 1);
 }
 .overflow-chevron.is-open {
   transform: rotate(180deg);
-}
-.overflow-panel {
-  transform-origin: top left;
-}
-.overflow-panel-enter-active {
-  transition:
-    transform 200ms cubic-bezier(0.34, 1.5, 0.6, 1),
-    opacity 160ms ease-out;
-}
-.overflow-panel-leave-active {
-  transition:
-    transform 120ms ease-in,
-    opacity 100ms ease-in;
-}
-.overflow-panel-enter-from,
-.overflow-panel-leave-to {
-  opacity: 0;
-  transform: scale(0.97) translateY(-6px);
 }
 
 /* Enter: pop in from the right with a slight overshoot. */

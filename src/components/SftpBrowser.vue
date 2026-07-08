@@ -7,8 +7,12 @@ import {
   ArrowRight,
   ChevronRight,
   Download,
+  Eye,
+  EyeOff,
   File as FileIcon,
   Folder,
+  FolderPlus,
+  FolderUp,
   Link2,
   LoaderCircle,
   MoreHorizontal,
@@ -573,21 +577,24 @@ function onRowMouseDown(ev: MouseEvent, e: SftpEntry): void {
 // ---- native menus ----
 function openToolbarMenu(): void {
   void popupMenu([
-    { text: "New folder", action: startNewFolder },
-    { text: "Upload files…", action: () => void upload() },
-    { text: "Upload folder…", action: () => void uploadFolder() },
+    { text: "New folder", icon: FolderPlus, action: startNewFolder },
+    { text: "Upload files…", icon: Upload, action: () => void upload() },
+    { text: "Upload folder…", icon: FolderUp, action: () => void uploadFolder() },
     null,
     {
       text: showHiddenFiles.value ? "Hide hidden files" : "Show hidden files",
+      icon: showHiddenFiles.value ? EyeOff : Eye,
       action: toggleHiddenFiles,
     },
     {
       text: showSize.value ? "Hide size" : "Show size",
+      icon: showSize.value ? EyeOff : Eye,
       action: toggleSize,
     },
     // No created-date item: the SFTP protocol doesn't report creation time.
     {
       text: showChangedDate.value ? "Hide changed date" : "Show changed date",
+      icon: showChangedDate.value ? EyeOff : Eye,
       action: toggleChangedDate,
     },
   ]);
@@ -604,11 +611,13 @@ function openRowMenu(e: SftpEntry): void {
       ? visibleEntries.value.filter((x) => selected.value.has(x.path))
       : [e];
   void popupMenu([
-    { text: "Download", action: () => void download(e) },
-    { text: "Rename", action: () => startRename(e) },
+    { text: "Download", icon: Download, action: () => void download(e) },
+    { text: "Rename", icon: Pencil, action: () => startRename(e) },
     null,
     {
       text: group.length > 1 ? `Delete ${group.length} items` : "Delete",
+      icon: Trash2,
+      danger: true,
       action: () => {
         pendingDelete.value = group;
       },

@@ -162,38 +162,59 @@ const submenuItems = computed(() => {
 
 <template>
   <Teleport to="body">
-    <template v-if="floatingMenu">
+    <Transition name="pop">
       <div
+        v-if="floatingMenu"
         ref="rootEl"
-        class="fm-panel"
+        class="fm-panel pop-panel origin-top-left"
         :style="{ left: `${pos.x}px`, top: `${pos.y}px` }"
         @contextmenu.prevent
       >
         <template v-for="(it, idx) in items" :key="idx">
-          <div v-if="it === null" class="fm-sep" />
+          <div v-if="it === null" class="my-1 h-px bg-border-strong/60" />
+          <!-- Same row recipe as the tab-bar menus (TabBar.vue) — keep the
+               two in sync so context menus and dropdowns look identical. -->
           <button
             v-else
             type="button"
-            class="fm-item"
-            :class="{
-              'fm-danger': it.danger,
-              'fm-disabled': it.disabled,
-              'fm-open': openSubIdx === idx,
-            }"
+            class="pop-item w-full flex items-center gap-2 px-2 py-1 rounded-md text-left text-xs whitespace-nowrap"
+            :class="
+              it.disabled
+                ? 'text-fg-subtle opacity-50 cursor-default'
+                : it.danger
+                  ? 'text-danger hover:bg-danger/20 cursor-pointer'
+                  : openSubIdx === idx
+                    ? 'bg-surface-2 text-fg cursor-pointer'
+                    : 'text-fg-muted hover:bg-surface-2 hover:text-fg cursor-pointer'
+            "
+            :style="{ '--i': idx }"
             :disabled="it.disabled"
             @mouseenter="onItemEnter(it, idx, $event.currentTarget as HTMLElement)"
             @click="runItem(it)"
           >
-            <component :is="it.icon" v-if="it.icon" :size="14" class="fm-icon" />
-            <span class="fm-text">{{ it.text }}</span>
-            <span v-if="it.submenu && it.submenu.length" class="fm-caret">›</span>
+            <component
+              :is="it.icon"
+              v-if="it.icon"
+              :size="13"
+              class="flex-none"
+              :class="it.danger && !it.disabled ? '' : 'text-fg-subtle'"
+            />
+            <span class="flex-1 overflow-hidden text-ellipsis">{{ it.text }}</span>
+            <span
+              v-if="it.submenu && it.submenu.length"
+              class="flex-none text-sm leading-none text-fg-subtle"
+              >›</span
+            >
           </button>
         </template>
       </div>
+    </Transition>
+    <Transition name="pop">
       <div
         v-if="subPos && submenuItems.length"
         ref="subEl"
-        class="fm-panel fm-submenu"
+        class="fm-panel pop-panel"
+        :class="subPos.flip ? 'origin-top-right' : 'origin-top-left'"
         :style="{ left: `${subPos.x}px`, top: `${subPos.y}px` }"
         @contextmenu.prevent
       >
@@ -201,21 +222,30 @@ const submenuItems = computed(() => {
           v-for="(sit, si) in submenuItems"
           :key="si"
           type="button"
-          class="fm-item"
-          :class="{ 'fm-disabled': sit.disabled }"
+          class="pop-item w-full flex items-center gap-2 px-2 py-1 rounded-md text-left text-xs whitespace-nowrap"
+          :class="
+            sit.disabled
+              ? 'text-fg-subtle opacity-50 cursor-default'
+              : 'text-fg-muted hover:bg-surface-2 hover:text-fg cursor-pointer'
+          "
+          :style="{ '--i': si }"
           :disabled="sit.disabled"
           @mouseenter="onSubItemEnter(sit)"
           @click="runItem(sit)"
         >
-          <component :is="sit.icon" v-if="sit.icon" :size="14" class="fm-icon" />
-          <span class="fm-text">{{ sit.text }}</span>
+          <component :is="sit.icon" v-if="sit.icon" :size="13" class="flex-none text-fg-subtle" />
+          <span class="flex-1 overflow-hidden text-ellipsis">{{ sit.text }}</span>
         </button>
       </div>
-    </template>
+    </Transition>
   </Teleport>
 </template>
 
 <style scoped>
+/* Look and enter/leave motion come from the shared `.pop-panel` recipe +
+   `pop` transition in styles.css; row styling is Tailwind utilities in the
+   template (same classes as the tab-bar menus). Only menu-specific layout
+   lives here. */
 .fm-panel {
   position: fixed;
   z-index: 9999;
@@ -224,63 +254,6 @@ const submenuItems = computed(() => {
   padding: 4px;
   display: flex;
   flex-direction: column;
-  background: var(--surface-1, #1e1e2e);
-  border: 1px solid var(--border-strong, rgba(255, 255, 255, 0.18));
-  border-radius: 10px;
-  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45);
   user-select: none;
-}
-.fm-item {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  width: 100%;
-  padding: 5px 9px;
-  border-radius: 6px;
-  font-size: 13px;
-  text-align: left;
-  color: var(--fg-muted, #cdd6f4);
-  cursor: default;
-  white-space: nowrap;
-}
-.fm-item:hover:not(.fm-disabled),
-.fm-item.fm-open {
-  background: color-mix(in srgb, var(--accent, #89b4fa) 22%, transparent);
-  color: var(--fg, #e6e6e6);
-}
-.fm-icon {
-  flex: none;
-  color: var(--fg-subtle, #9399b2);
-}
-.fm-item:hover:not(.fm-disabled) .fm-icon,
-.fm-item.fm-open .fm-icon {
-  color: inherit;
-}
-.fm-text {
-  flex: 1;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.fm-caret {
-  flex: none;
-  color: var(--fg-subtle, #9399b2);
-  font-size: 14px;
-  line-height: 1;
-}
-.fm-danger {
-  color: var(--color-danger, #f38ba8);
-}
-.fm-danger:hover:not(.fm-disabled) {
-  background: color-mix(in srgb, var(--color-danger, #f38ba8) 22%, transparent);
-  color: var(--color-danger, #f38ba8);
-}
-.fm-disabled {
-  opacity: 0.4;
-  cursor: default;
-}
-.fm-sep {
-  height: 1px;
-  margin: 4px 6px;
-  background: var(--border, #313244);
 }
 </style>

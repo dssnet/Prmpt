@@ -63,42 +63,16 @@ onBeforeUnmount(() => {
         <MoreHorizontal :size="14" />
       </button>
     </slot>
-    <Transition name="dropdown-panel">
+    <!-- Look/motion from the shared `.pop-panel` recipe + `pop` transition
+         in styles.css. -->
+    <Transition name="pop">
       <div
         v-if="open"
         role="menu"
-        class="dropdown-panel absolute right-0 top-[calc(100%+4px)] z-50 min-w-36 bg-surface-1 border border-border-strong rounded-lg p-1 shadow-[0_8px_24px_rgba(0,0,0,0.35)] flex flex-col"
+        class="pop-panel origin-top-right absolute right-0 top-[calc(100%+4px)] z-50 min-w-36 p-1 flex flex-col"
       >
         <slot :close="close" />
       </div>
     </Transition>
   </div>
 </template>
-
-<style scoped>
-.dropdown-panel {
-  transform-origin: top right;
-}
-.dropdown-panel-enter-active {
-  transition:
-    transform 200ms cubic-bezier(0.34, 1.5, 0.6, 1),
-    opacity 160ms ease-out;
-}
-.dropdown-panel-leave-active {
-  transition:
-    transform 120ms ease-in,
-    opacity 100ms ease-in;
-}
-.dropdown-panel-enter-from,
-.dropdown-panel-leave-to {
-  opacity: 0;
-  transform: scale(0.97) translateY(-6px);
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .dropdown-panel-enter-active,
-  .dropdown-panel-leave-active {
-    transition: none;
-  }
-}
-</style>

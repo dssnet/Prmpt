@@ -160,7 +160,7 @@ onBeforeUnmount(() => {
          open; outside scroll / resize closes it instead of letting it
          drift (see onAnyScroll). -->
     <Teleport to="body">
-      <Transition name="dropdown-panel">
+      <Transition name="pop">
         <ul
           v-if="open"
           ref="listEl"
@@ -170,7 +170,7 @@ onBeforeUnmount(() => {
             top: `${panelRect.top}px`,
             width: `${panelRect.width}px`,
           }"
-          class="dropdown-panel fixed z-50 max-h-60 overflow-y-auto bg-surface-1 border border-border-strong rounded-lg p-1 shadow-[0_8px_24px_rgba(0,0,0,0.35)]"
+          class="pop-panel origin-top fixed z-50 max-h-60 overflow-y-auto p-1"
         >
         <li
           v-for="(opt, i) in options"
@@ -178,7 +178,7 @@ onBeforeUnmount(() => {
           role="option"
           :aria-selected="String(opt.value) === String(modelValue)"
           :aria-disabled="opt.disabled || undefined"
-          class="dropdown-option cursor-pointer rounded-md flex items-center gap-1.5"
+          class="dropdown-option pop-item cursor-pointer rounded-md flex items-center gap-1.5"
           :style="{ '--i': i }"
           :class="[
             size === 'sm' ? 'pl-1 pr-2 py-1 text-xs' : 'pl-1.5 pr-2.5 py-1.5 text-sm',
@@ -218,54 +218,20 @@ onBeforeUnmount(() => {
   transform: rotate(180deg);
 }
 
-/* Panel: subtle scale + slide + fade. Origin at top so it grows out of the
-   button rather than from its own center. */
-.dropdown-panel {
-  transform-origin: top center;
-}
-.dropdown-panel-enter-active {
-  transition:
-    transform 200ms cubic-bezier(0.34, 1.5, 0.6, 1),
-    opacity 160ms ease-out;
-}
-.dropdown-panel-leave-active {
-  transition:
-    transform 120ms ease-in,
-    opacity 100ms ease-in;
-}
-.dropdown-panel-enter-from,
-.dropdown-panel-leave-to {
-  opacity: 0;
-  transform: scale(0.97) translateY(-6px);
-}
-
-/* Options cascade in with a small per-index delay. */
+/* Panel look/motion and the option cascade come from the shared `.pop-panel`
+   / `pop` / `.pop-item` recipe in styles.css. */
 .dropdown-option {
-  opacity: 0;
-  transform: translateY(-4px);
-  animation: dropdown-opt-in 220ms cubic-bezier(0.25, 0.9, 0.3, 1) forwards;
-  animation-delay: calc(var(--i, 0) * 22ms);
   transition: transform 180ms cubic-bezier(0.34, 1.5, 0.6, 1);
 }
 .dropdown-option:not([aria-disabled="true"]):hover {
   transform: scale(1.02);
 }
-@keyframes dropdown-opt-in {
-  to {
-    opacity: 1;
-    transform: none;
-  }
-}
 
 @media (prefers-reduced-motion: reduce) {
   .chevron,
-  .dropdown-panel-enter-active,
-  .dropdown-panel-leave-active,
   .dropdown-option {
     transition: none;
-    animation: none !important;
     transform: none !important;
-    opacity: 1 !important;
   }
 }
 </style>

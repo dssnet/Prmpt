@@ -1,9 +1,13 @@
+import type { Component } from "vue";
+
 import { openFloatingMenu, type FloatingMenuEntry } from "./state/floatingMenu";
 
 export interface CtxItem {
   text: string;
   action: () => void;
   enabled?: boolean;
+  /** Optional leading icon (a lucide-vue-next component). */
+  icon?: Component;
   /** Tint the item as destructive (e.g. Delete). */
   danger?: boolean;
 }
@@ -32,6 +36,7 @@ export function popupMenu(items: (CtxItem | null)[]): void {
       ? null
       : {
           text: it.text,
+          icon: it.icon,
           action: it.action,
           disabled: it.enabled === false,
           danger: it.danger,

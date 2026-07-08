@@ -5,8 +5,13 @@ import {
   ArrowRight,
   ChevronRight,
   Download,
+  ExternalLink,
+  Eye,
+  EyeOff,
   File as FileIcon,
   Folder,
+  FolderOpen,
+  FolderPlus,
   HardDrive,
   Link2,
   LoaderCircle,
@@ -14,6 +19,9 @@ import {
   Pencil,
   RefreshCw,
   Search,
+  SquareTerminal,
+  TextCursorInput,
+  Trash2,
   X,
 } from "lucide-vue-next";
 
@@ -653,22 +661,26 @@ watch(
 // ---- native menus ----
 function openToolbarMenu(): void {
   void popupMenu([
-    { text: "New folder", action: startNewFolder },
+    { text: "New folder", icon: FolderPlus, action: startNewFolder },
     null,
     {
       text: showHiddenFiles.value ? "Hide hidden files" : "Show hidden files",
+      icon: showHiddenFiles.value ? EyeOff : Eye,
       action: toggleHiddenFiles,
     },
     {
       text: showSize.value ? "Hide size" : "Show size",
+      icon: showSize.value ? EyeOff : Eye,
       action: toggleSize,
     },
     {
       text: showChangedDate.value ? "Hide changed date" : "Show changed date",
+      icon: showChangedDate.value ? EyeOff : Eye,
       action: toggleChangedDate,
     },
     {
       text: showCreatedDate.value ? "Hide created date" : "Show created date",
+      icon: showCreatedDate.value ? EyeOff : Eye,
       action: toggleCreatedDate,
     },
   ]);
@@ -711,21 +723,24 @@ function openRowMenu(ev: MouseEvent, e: LocalEntry): void {
   const cdItem = e.is_dir
     ? terminalMenuItem("cd here in terminal", (id) => cdInto(e, id))
     : null;
+  if (cdItem) cdItem.icon = SquareTerminal;
   const insertItem = terminalMenuItem("Insert path into terminal", (id) =>
     insertPath(e, id),
   );
+  if (insertItem) insertItem.icon = TextCursorInput;
   const items: FloatingMenuEntry[] = [
-    { text: "Open", action: () => void openInOs(e) },
-    { text: "Reveal in file manager", action: () => void reveal(e) },
+    { text: "Open", icon: ExternalLink, action: () => void openInOs(e) },
+    { text: "Reveal in file manager", icon: FolderOpen, action: () => void reveal(e) },
   ];
   const termItems = [cdItem, insertItem].filter(Boolean) as FloatingMenuItem[];
   if (termItems.length) items.push(null, ...termItems);
   items.push(
     null,
-    { text: "Rename", action: () => startRename(e) },
+    { text: "Rename", icon: Pencil, action: () => startRename(e) },
     null,
     {
       text: group.length > 1 ? `Delete ${group.length} items` : "Delete",
+      icon: Trash2,
       danger: true,
       action: () => {
         pendingDelete.value = group;

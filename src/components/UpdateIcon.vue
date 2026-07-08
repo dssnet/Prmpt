@@ -29,7 +29,10 @@ const title = computed(() =>
     class="update-icon relative flex-none flex items-center justify-center w-6 h-6 rounded-full cursor-pointer transition-colors duration-100"
     @click="openUpdateModal"
   >
-    <Download :size="13" />
+    <!-- Even size: 13px in the 24px circle leaves 5.5px margins, and WebKit
+         pixel-snaps the fractional offset so the glyph paints 1px off-center
+         at 1x. 14px → 5px margins, integral, crisp. -->
+    <Download :size="14" />
   </button>
 </template>
 

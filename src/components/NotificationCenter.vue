@@ -112,7 +112,9 @@ onBeforeUnmount(() => {
         class="inline-flex"
         :class="{ 'bell-ring': ringTick > 0 }"
       >
-        <Bell :size="13" />
+        <!-- Even size — see UpdateIcon.vue: odd sizes pixel-snap off-center
+             in WebKit inside the 24px circle. -->
+        <Bell :size="14" />
       </span>
       <span
         v-if="unreadCount > 0"
@@ -121,11 +123,11 @@ onBeforeUnmount(() => {
         {{ unreadCount > 9 ? "9+" : unreadCount }}
       </span>
     </button>
-    <Transition name="overflow-panel">
+    <Transition name="pop">
       <div
         v-if="open"
         ref="panelEl"
-        class="notif-panel absolute right-0 top-full mt-1 w-72 z-50 rounded-lg bg-surface-1 ring-1 ring-border-strong shadow-[0_8px_24px_rgba(0,0,0,0.35)] text-xs"
+        class="pop-panel origin-top-right absolute right-0 top-full mt-1 w-72 z-50 text-xs"
       >
         <div
           class="flex items-center justify-between px-2.5 py-1.5 border-b border-border"
@@ -186,9 +188,6 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
-.notif-panel {
-  transform-origin: top right;
-}
 /* Same origin pill as the toast's .toast-host — keep the two in sync. */
 .notif-host {
   max-width: 110px;
@@ -206,20 +205,5 @@ onBeforeUnmount(() => {
   color: var(--danger, #f38ba8);
   background: color-mix(in srgb, var(--danger, #f38ba8) 14%, transparent);
   border-color: color-mix(in srgb, var(--danger, #f38ba8) 35%, transparent);
-}
-.overflow-panel-enter-active {
-  transition:
-    transform 200ms cubic-bezier(0.34, 1.5, 0.6, 1),
-    opacity 160ms ease-out;
-}
-.overflow-panel-leave-active {
-  transition:
-    transform 120ms ease-in,
-    opacity 100ms ease-in;
-}
-.overflow-panel-enter-from,
-.overflow-panel-leave-to {
-  opacity: 0;
-  transform: scale(0.97) translateY(-6px);
 }
 </style>

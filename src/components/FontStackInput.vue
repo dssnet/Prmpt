@@ -145,9 +145,10 @@ function submitQuery(): void {
       </button>
     </div>
 
+    <Transition name="pop">
     <div
       v-if="open"
-      class="absolute right-0 top-full mt-1 w-60 z-50 rounded-lg bg-surface-1 ring-1 ring-border-strong shadow-[0_8px_24px_rgba(0,0,0,0.35)] p-1.5 flex flex-col gap-1"
+      class="pop-panel origin-top-right absolute right-0 top-full mt-1 w-60 z-50 p-1.5 flex flex-col gap-1"
     >
       <input
         v-model="query"
@@ -177,5 +178,6 @@ function submitQuery(): void {
         </div>
       </div>
     </div>
+    </Transition>
   </div>
 </template>
