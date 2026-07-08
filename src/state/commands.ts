@@ -12,6 +12,7 @@ import {
   AppWindow,
   ArrowRightLeft,
   Columns2,
+  FolderOpen,
   FolderTree,
   GitBranch,
   Home,
@@ -22,9 +23,10 @@ import {
   SquareTerminal,
   X,
 } from "lucide-vue-next";
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
 
 import { listHosts, type SshHostRow } from "../db";
-import { openNewWindow, openPanelWindow } from "../ipc";
+import { openNewWindow, openPanelWindow, terminalCwd } from "../ipc";
 import { connectHost, defaultConnectMode, type ConnectMode } from "./connect";
 import {
   registerCommandSource,
@@ -63,19 +65,117 @@ function metricArgs() {
   };
 }
 
-async function newTerminalTab(): Promise<void> {
-  await spawnTerminal(metricArgs());
+async function newTerminalTab(cwd?: string): Promise<void> {
+  await spawnTerminal({ ...metricArgs(), cwd });
   focusCanvas();
 }
 
-async function splitActive(dir: "h" | "v"): Promise<void> {
+async function splitActive(dir: "h" | "v", cwd?: string): Promise<void> {
   const a = active.value;
   if (!a || a.kind === "home") return;
   const targetSlot = a.id;
   const targetPane = inputTargetTabId() ?? a.id;
-  const newId = await spawnTerminal(metricArgs());
+  const newId = await spawnTerminal({ ...metricArgs(), cwd });
   dropTabIntoTarget(newId, targetSlot, targetPane, dir, false);
   focusCanvas();
+}
+
+// ---- "New Terminal…" (placement → starting-folder two-step flow) -----------
+
+type TerminalPlacement = "tab" | "right" | "down";
+
+/** Resolve the starting cwd for a folder choice. `undefined` = spawn default
+ *  (home); `null` = the user cancelled the folder picker (abort the spawn).
+ *  "same" falls back to the default when the focused pane's cwd isn't
+ *  knowable (SSH panes, dead shells, Windows). */
+async function resolveSpawnCwd(
+  choice: "same" | "home" | "pick",
+): Promise<string | undefined | null> {
+  if (choice === "same") {
+    const target = inputTargetTabId() ?? active.value?.id;
+    if (target == null) return undefined;
+    return (await terminalCwd(target).catch(() => null)) ?? undefined;
+  }
+  if (choice === "pick") {
+    const dir = await openDialog({ directory: true, title: "Starting folder" });
+    return typeof dir === "string" ? dir : null;
+  }
+  return undefined;
+}
+
+function terminalFolderCommands(placement: TerminalPlacement): Command[] {
+  const run = (choice: "same" | "home" | "pick") =>
+    void (async () => {
+      const cwd = await resolveSpawnCwd(choice);
+      if (cwd === null) return;
+      if (placement === "tab") await newTerminalTab(cwd);
+      else await splitActive(placement === "right" ? "h" : "v", cwd);
+    })();
+  const out: Command[] = [];
+  if (isInteractive()) {
+    out.push({
+      id: `terminal.new.${placement}.same`,
+      title: "Same Folder",
+      subtitle: "The focused terminal's directory",
+      icon: SquareTerminal,
+      keywords: "cwd duplicate here current",
+      perform: () => run("same"),
+    });
+  }
+  out.push(
+    {
+      id: `terminal.new.${placement}.home`,
+      title: "Home Directory",
+      subtitle: "The default starting folder",
+      icon: Home,
+      keywords: "default",
+      perform: () => run("home"),
+    },
+    {
+      id: `terminal.new.${placement}.pick`,
+      title: "Choose Folder…",
+      subtitle: "Pick any directory",
+      icon: FolderOpen,
+      keywords: "browse other custom",
+      perform: () => run("pick"),
+    },
+  );
+  return out;
+}
+
+function terminalPlacementCommands(): Command[] {
+  const out: Command[] = [];
+  if (isInteractive()) {
+    out.push(
+      {
+        id: "terminal.new.right",
+        title: "Split Right",
+        subtitle: "Beside the focused pane",
+        icon: Columns2,
+        keywords: "workspace pane vertical",
+        childPlaceholder: "Starting folder…",
+        children: () => terminalFolderCommands("right"),
+      },
+      {
+        id: "terminal.new.down",
+        title: "Split Down",
+        subtitle: "Below the focused pane",
+        icon: Rows2,
+        keywords: "workspace pane horizontal",
+        childPlaceholder: "Starting folder…",
+        children: () => terminalFolderCommands("down"),
+      },
+    );
+  }
+  out.push({
+    id: "terminal.new.tab",
+    title: "New Tab",
+    subtitle: "A separate terminal tab",
+    icon: Plus,
+    childPlaceholder: "Starting folder…",
+    children: () => terminalFolderCommands("tab"),
+  });
+  return out;
 }
 
 function isInteractive(): boolean {
@@ -142,6 +242,16 @@ function rootCommands(): Command[] {
       keywords: "shell spawn",
       shortcut: commandShortcut("tab.new"),
       perform: () => void newTerminalTab(),
+    },
+    {
+      id: "terminal.new",
+      title: "New Terminal…",
+      subtitle: "Choose placement and starting folder",
+      section: "Create",
+      icon: SquareTerminal,
+      keywords: "shell spawn split pane folder directory cwd same here",
+      childPlaceholder: "Open the terminal where?",
+      children: () => terminalPlacementCommands(),
     },
     {
       id: "window.new",

@@ -248,6 +248,8 @@ export async function spawnTerminal(args: {
   rows: number;
   cellWidthPx: number;
   cellHeightPx: number;
+  /** Optional initial working directory (e.g. "same folder" spawns). */
+  cwd?: string;
 }): Promise<number> {
   const id = await spawnTab(args);
   const t: TabState = { id, kind: "workspace", title: "Terminal" };
