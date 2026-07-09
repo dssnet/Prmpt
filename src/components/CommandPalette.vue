@@ -87,6 +87,14 @@ const rows = computed<Row[]>(() => {
   return out;
 });
 
+// Items in display order (rows minus headers). Keyboard nav, Enter and the
+// selection highlight all index into this — `visibleItems` is source order,
+// which the grouped view reorders, so indexing it by `row.index` would
+// activate a different command than the highlighted one.
+const orderedItems = computed<Command[]>(() =>
+  rows.value.flatMap((r) => (r.kind === "item" ? [r.cmd] : [])),
+);
+
 function focusInput(): void {
   void nextTick(() => inputEl.value?.focus());
 }
@@ -159,9 +167,22 @@ async function activate(cmd: Command): Promise<void> {
 }
 
 function move(delta: number): void {
-  const n = visibleItems.value.length;
+  const n = orderedItems.value.length;
   if (n === 0) return;
   selected.value = (selected.value + delta + n) % n;
+}
+
+// Hover only moves the selection when the pointer physically moved. Scrolling
+// (keyboard scrollIntoView) slides rows under a stationary cursor, and the
+// engine re-evaluates hover with a synthetic mousemove — without this guard
+// that snaps the selection back to the row under the mouse on every ArrowDown.
+let pointerX = -1;
+let pointerY = -1;
+function onRowHover(e: MouseEvent, index: number): void {
+  if (e.clientX === pointerX && e.clientY === pointerY) return;
+  pointerX = e.clientX;
+  pointerY = e.clientY;
+  selected.value = index;
 }
 
 function onKeydown(e: KeyboardEvent): void {
@@ -176,7 +197,7 @@ function onKeydown(e: KeyboardEvent): void {
       break;
     case "Enter": {
       e.preventDefault();
-      const cmd = visibleItems.value[selected.value];
+      const cmd = orderedItems.value[selected.value];
       if (cmd) void activate(cmd);
       break;
     }
@@ -205,16 +226,24 @@ function onKeydown(e: KeyboardEvent): void {
 }
 
 // Reset/clamp selection when the visible set changes (typing, page nav).
-watch(visibleItems, () => {
-  if (selected.value >= visibleItems.value.length) selected.value = 0;
+watch(orderedItems, () => {
+  if (selected.value >= orderedItems.value.length) selected.value = 0;
 });
 
-// Keep the highlighted row in view.
+// Keep the highlighted row in view. When the row sits directly under a section
+// header (first item of its section), pull the header in too so arrowing up
+// doesn't leave it hidden just above the fold.
 watch(selected, () =>
   nextTick(() => {
-    listEl.value
-      ?.querySelector<HTMLElement>(`[data-idx="${selected.value}"]`)
-      ?.scrollIntoView({ block: "nearest" });
+    const el = listEl.value?.querySelector<HTMLElement>(
+      `[data-idx="${selected.value}"]`,
+    );
+    if (!el) return;
+    el.scrollIntoView({ block: "nearest" });
+    const prev = el.previousElementSibling;
+    if (prev && !prev.hasAttribute("data-idx")) {
+      prev.scrollIntoView({ block: "nearest" });
+    }
   }),
 );
 
@@ -285,7 +314,7 @@ watch(paletteOpen, (open) => {
                     ? 'bg-accent/22 text-fg'
                     : 'text-fg-muted'
                 "
-                @mousemove="selected = row.index"
+                @mousemove="onRowHover($event, row.index)"
                 @click="activate(row.cmd)"
               >
                 <component
