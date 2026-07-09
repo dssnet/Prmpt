@@ -7,7 +7,10 @@
  *  - Reset PIN — forgot/change recovery: set a new PIN without the old one and
  *                unlock. The PIN is a soft, UI-only concealment (plaintext in the
  *                Stronghold snapshot), so there's nothing to protect by requiring
- *                the old PIN here.
+ *                the old PIN here. The same dialog doubles as first-time setup on
+ *                a device where hidden groups arrived via sync but the PIN didn't
+ *                (it's device-local by design) — `openSetupPin()` opens it with
+ *                copy for that case.
  *
  * This component owns all secret interaction (`hidePinKey`) and the modal form
  * state. `locked` / `pinSet` are two-way bound to the parent, which still owns
@@ -101,20 +104,33 @@ async function submitEnterPin() {
   }
 }
 
-// ---------- Reset / change PIN (forgot) ----------
+// ---------- Reset / change PIN (forgot), or first-time setup after sync ----------
 const resetPinOpen = ref(false);
+// "change" replaces an existing PIN; "setup" is a device that has hidden groups
+// (synced from elsewhere) but no local PIN yet — same action, different copy.
+const resetPinMode = ref<"change" | "setup">("change");
 const resetPinValue = ref("");
 const resetPinConfirm = ref("");
 const resetPinError = ref<string | null>(null);
 const resetPinEl = ref<HTMLElement | null>(null);
 
-function openResetPin() {
+function openResetDialog(mode: "change" | "setup") {
   enterPinOpen.value = false;
+  resetPinMode.value = mode;
   resetPinValue.value = "";
   resetPinConfirm.value = "";
   resetPinError.value = null;
   resetPinOpen.value = true;
   focusInput(resetPinEl);
+}
+
+function openResetPin() {
+  openResetDialog("change");
+}
+
+// Hidden groups exist (via sync) but this device has no PIN: set one and unlock.
+function openSetupPin() {
+  openResetDialog("setup");
 }
 
 function cancelResetPin() {
@@ -156,7 +172,7 @@ onMounted(async () => {
   }
 });
 
-defineExpose({ openSetPin, openUnlock });
+defineExpose({ openSetPin, openUnlock, openSetupPin });
 </script>
 
 <template>
@@ -226,12 +242,22 @@ defineExpose({ openSetPin, openUnlock });
     </form>
   </Modal>
 
-  <!-- Set a new PIN (forgot / change — no old PIN required) -->
+  <!-- Set a new PIN (forgot / change — no old PIN required), or first-time
+       setup on a device where hidden groups synced in but the PIN didn't -->
   <Modal v-if="resetPinOpen">
-    <h2 class="m-0 text-base font-semibold text-fg">Set a new PIN</h2>
+    <h2 class="m-0 text-base font-semibold text-fg">
+      {{ resetPinMode === "setup" ? "Set a PIN for this device" : "Set a new PIN" }}
+    </h2>
     <p class="m-0 text-sm text-fg-muted leading-relaxed">
-      This replaces your current PIN. Hidden groups stay hidden — you'll use the
-      new PIN to reveal them. Keep it somewhere safe.
+      <template v-if="resetPinMode === 'setup'">
+        Hidden groups synced to this device, but the PIN is per-device and
+        doesn't sync. Set a PIN here to reveal them now and lock them again
+        later.
+      </template>
+      <template v-else>
+        This replaces your current PIN. Hidden groups stay hidden — you'll use
+        the new PIN to reveal them. Keep it somewhere safe.
+      </template>
     </p>
     <form class="flex flex-col gap-3.5" @submit.prevent="submitResetPin">
       <div ref="resetPinEl">
@@ -253,7 +279,9 @@ defineExpose({ openSetPin, openUnlock });
       </p>
       <div class="flex justify-end gap-2">
         <Button variant="secondary" @click="cancelResetPin">Cancel</Button>
-        <Button type="submit">Save new PIN</Button>
+        <Button type="submit">
+          {{ resetPinMode === "setup" ? "Set PIN & reveal" : "Save new PIN" }}
+        </Button>
       </div>
     </form>
   </Modal>

@@ -74,8 +74,10 @@ const selectedGroupId = ref<number | null>(null);
 const expanded = ref<Set<number>>(new Set());
 
 // Hidden-group lock. `locked` starts true every session so hidden groups stay
-// concealed until the PIN is entered; `pinSet` controls whether the lock
-// affordance is shown at all (it appears once the user has set a PIN).
+// concealed until the PIN is entered. The lock affordance shows once a PIN is
+// set — or when hidden groups exist without one (they sync from other devices;
+// the PIN is device-local and doesn't), so they're reachable via PIN setup
+// instead of silently unreachable.
 const locked = ref(true);
 const pinSet = ref(false);
 
@@ -138,6 +140,8 @@ onBeforeUnmount(onSidebarDragEnd);
 const concealed = computed(() =>
   locked.value ? concealedGroupIds(groups.value) : new Set<number>(),
 );
+
+const hasHiddenGroups = computed(() => groups.value.some((g) => g.hidden));
 
 const groupTree = computed(() =>
   buildGroupTree(groups.value.filter((g) => !concealed.value.has(g.id))),
@@ -335,7 +339,13 @@ async function onPinCreated() {
 
 function onLockClick() {
   if (locked.value) {
-    pinDialogs.value?.openUnlock();
+    // Hidden groups without a local PIN (synced from another device — the PIN
+    // itself is device-local): set a PIN here first, which also unlocks.
+    if (!pinSet.value) {
+      pinDialogs.value?.openSetupPin();
+    } else {
+      pinDialogs.value?.openUnlock();
+    }
   } else {
     // Re-lock: conceal hidden groups again and drop a now-hidden selection.
     locked.value = true;
@@ -461,9 +471,15 @@ async function confirmDeleteGroup() {
           <span class="flex-1 min-w-0 truncate text-sm font-medium">All hosts</span>
         </div>
         <button
-          v-if="pinSet"
+          v-if="pinSet || hasHiddenGroups"
           type="button"
-          :title="locked ? 'Locked — click to reveal hidden groups' : 'Unlocked — click to hide again'"
+          :title="
+            locked
+              ? pinSet
+                ? 'Locked — click to reveal hidden groups'
+                : 'Hidden groups synced from another device — set a PIN to reveal them'
+              : 'Unlocked — click to hide again'
+          "
           :aria-label="locked ? 'Unlock hidden groups' : 'Lock hidden groups'"
           class="shrink-0 grid place-items-center w-7 h-7 rounded-md cursor-pointer transition-colors duration-150"
           :class="
