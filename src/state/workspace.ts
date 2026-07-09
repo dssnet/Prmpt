@@ -111,13 +111,14 @@ export function findLeafByTabId(
   return findLeafByTabId(node.a, tabId) ?? findLeafByTabId(node.b, tabId);
 }
 
-/** Replace the leaf for `targetTabId` with a split that also holds a new leaf
- *  for `newTabId`. `placeNewFirst` puts the new pane on the left/top. `ratio`
- *  is the fraction kept by the first child (default even split). */
+/** Replace the leaf for `targetTabId` with a split that also holds `newNode`
+ *  (a single leaf or a whole subtree, e.g. a merged-in workspace's root).
+ *  `placeNewFirst` puts the new pane on the left/top. `ratio` is the fraction
+ *  kept by the first child (default even split). */
 export function splitLeaf(
   root: WorkspaceNode,
   targetTabId: number,
-  newLeaf: LeafNode,
+  newNode: WorkspaceNode,
   dir: SplitDir,
   placeNewFirst: boolean,
   ratio = 0.5,
@@ -125,11 +126,11 @@ export function splitLeaf(
   if (root.kind === "leaf") {
     if (root.tabId !== targetTabId) return root;
     return placeNewFirst
-      ? makeSplit(dir, newLeaf, root, 1 - ratio)
-      : makeSplit(dir, root, newLeaf, ratio);
+      ? makeSplit(dir, newNode, root, 1 - ratio)
+      : makeSplit(dir, root, newNode, ratio);
   }
-  const a = splitLeaf(root.a, targetTabId, newLeaf, dir, placeNewFirst, ratio);
-  const b = splitLeaf(root.b, targetTabId, newLeaf, dir, placeNewFirst, ratio);
+  const a = splitLeaf(root.a, targetTabId, newNode, dir, placeNewFirst, ratio);
+  const b = splitLeaf(root.b, targetTabId, newNode, dir, placeNewFirst, ratio);
   if (a === root.a && b === root.b) return root;
   return { ...root, a, b };
 }

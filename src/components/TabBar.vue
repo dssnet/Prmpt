@@ -130,8 +130,10 @@ interface DragState {
   startScreenX: number;
   startScreenY: number;
   active: boolean;
-  // Workspace tabs can be reordered but not torn off / split (v1 limit).
-  reorderOnly: boolean;
+  // Multi-pane workspace tabs can be reordered and merged into another
+  // workspace, but not torn off (tear-off moves one backend tab id across
+  // windows; it can't carry a tree yet).
+  noTearOff: boolean;
   // The tab's own DOM node (stable across reorder — keyed by id), the grab
   // point within it, and its width, so it can ride under the cursor.
   el: HTMLElement;
@@ -264,10 +266,9 @@ function onTabMouseDown(t: TabState, e: MouseEvent): void {
     startScreenX: e.screenX,
     startScreenY: e.screenY,
     active: false,
-    // A single-pane tab (terminal or an SFTP-only file browser) can be grafted
-    // into another workspace or torn off; a multi-pane workspace can only
-    // reorder for now (its panes move individually, not as a tab — later phase).
-    reorderOnly: tabPaneCount(t) > 1,
+    // Any tab can be grafted into another workspace (multi-pane trees merge
+    // whole); only single-pane tabs can tear off into another window.
+    noTearOff: tabPaneCount(t) > 1,
     el,
     grabOffsetX: e.clientX - r.left,
     width: r.width,
@@ -300,7 +301,6 @@ function onDragMove(e: MouseEvent): void {
   // the bar recomputes from scratch.
   stopPin(false);
   lastReorderBeforeId = undefined;
-  if (drag.reorderOnly) return; // workspace tabs only reorder (v1)
   // Outside the bar: original ghost + workspace-drop affordance.
   ghost.value = { x: e.clientX, y: e.clientY, label: drag.label };
   updateWorkspaceDragPreview(e.clientX, e.clientY, drag.tabId);
@@ -321,8 +321,6 @@ function onDragUp(e: MouseEvent): void {
 
   // Released inside the bar → it was a reorder, already applied live.
   if (inBar) return;
-  // Workspace tabs can't tear off / split in v1.
-  if (d.reorderOnly) return;
 
   // Released over this window's terminal area → workspace split/merge.
   if (pointOverTerminal(e.clientX, e.clientY)) {
@@ -330,6 +328,7 @@ function onDragUp(e: MouseEvent): void {
     return;
   }
   // Otherwise, far enough → tear off into a new / other window.
+  if (d.noTearOff) return; // multi-pane trees can't cross windows yet
   const dx = e.screenX - d.startScreenX;
   const dy = e.screenY - d.startScreenY;
   if (dx * dx + dy * dy < DRAG_OUT_THRESHOLD * DRAG_OUT_THRESHOLD) return;

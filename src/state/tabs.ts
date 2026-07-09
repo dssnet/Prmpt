@@ -397,9 +397,11 @@ function consumeTabIntoWorkspace(id: number): void {
 }
 
 /** Drop `draggedTabId` (a whole tab) onto a pane in the target workspace,
- *  splitting the hit pane. Both are workspaces now; the dragged tab's single
- *  pane is grafted in and its tab removed. Multi-pane drags are a later phase.
- *  Returns the target slot id, or null if the drop was a no-op. */
+ *  splitting the hit pane. Both are workspaces now; the dragged tab's whole
+ *  tree — single pane or multi-pane — is grafted in as a subtree and its tab
+ *  removed. Node/pane ids are globally unique, so the subtree moves as-is and
+ *  panel panes keep their state (keyed by pane id). Returns the target slot
+ *  id, or null if the drop was a no-op. */
 export function dropTabIntoTarget(
   draggedTabId: number,
   targetSlotId: number,
@@ -416,17 +418,17 @@ export function dropTabIntoTarget(
   const dws = getWorkspace(draggedTabId);
   const tws = getWorkspace(targetSlotId);
   if (!dws || !tws) return null;
-  const draggedLeaves = collectLeaves(dws.root);
-  if (draggedLeaves.length !== 1) return null; // single-pane drags only, for now
-  const src = draggedLeaves[0];
   const root = splitLeaf(
     tws.root,
     targetPaneTabId,
-    makeLeaf(src.tabId, src.origin),
+    dws.root,
     dir,
     placeDraggedFirst,
   );
-  setWorkspace(targetSlotId, { root, focusedTabId: src.tabId });
+  // Target pane not found → tree unchanged; grafting nothing while consuming
+  // the dragged tab would orphan its panes, so treat as a no-op.
+  if (root === tws.root) return null;
+  setWorkspace(targetSlotId, { root, focusedTabId: dws.focusedTabId });
   consumeTabIntoWorkspace(draggedTabId);
   activeId.value = targetSlotId;
   return targetSlotId;

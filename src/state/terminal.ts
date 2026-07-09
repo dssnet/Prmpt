@@ -1053,9 +1053,12 @@ export function resolveDropAt(
     targetPaneTabId = activeTab.id;
   }
 
-  // Dropping a tab onto its own pane is a no-op (see dropTabIntoTarget);
-  // suppress the preview so the active tab dragged over itself shows nothing.
-  if (draggedId != null && draggedId === targetPaneTabId) return null;
+  // Dropping a tab onto its own pane — or a workspace tab onto any pane of
+  // itself — is a no-op (see dropTabIntoTarget); suppress the preview so the
+  // active tab dragged over itself shows nothing.
+  if (draggedId != null && (draggedId === targetPaneTabId || draggedId === slotId)) {
+    return null;
+  }
 
   // Normalised position within the target pane. The cursor's nearest edge
   // picks the split axis (tiling-WM style); the half it sits in picks the
