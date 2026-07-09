@@ -260,6 +260,12 @@ pub struct TabHandle {
     /// working directory from the OS (follows `cd` without shell
     /// integration). `None` for SSH tabs.
     pub shell_pid: Option<u32>,
+    /// Latest cwd the shell itself reported via OSC 7 / OSC 9;9 (shell
+    /// integration), written by the tab thread and pre-validated to an
+    /// existing local directory. Preferred over the OS pid query in
+    /// [`TabRegistry::local_cwd`] — it stays exact for shells whose process
+    /// cwd never follows `cd` (pwsh).
+    pub osc_cwd: Arc<Mutex<Option<String>>>,
 }
 
 pub struct TabRegistry {
@@ -306,6 +312,7 @@ impl TabRegistry {
         disable_ssh: bool,
     ) -> AppResult<()> {
         let (cmd_tx, cmd_rx) = unbounded::<TabCmd>();
+        let osc_cwd = Arc::new(Mutex::new(None));
         self.start_tab_thread(
             id,
             app,
@@ -319,6 +326,7 @@ impl TabRegistry {
             rows,
             scrollback_lines,
             config,
+            osc_cwd.clone(),
         )?;
         self.inner.lock().insert(
             id,
@@ -331,6 +339,7 @@ impl TabRegistry {
                 disable_sftp,
                 disable_ssh,
                 shell_pid: None,
+                osc_cwd,
             },
         );
         self.windows.lock().insert(id, owner_window);
@@ -454,6 +463,7 @@ impl TabRegistry {
             })
             .map_err(|e| AppError::Other(format!("spawn reader thread: {e}")))?;
 
+        let osc_cwd = Arc::new(Mutex::new(None));
         self.start_tab_thread(
             id,
             app,
@@ -469,6 +479,7 @@ impl TabRegistry {
             rows,
             scrollback_lines,
             config,
+            osc_cwd.clone(),
         )?;
         self.inner.lock().insert(
             id,
@@ -481,6 +492,7 @@ impl TabRegistry {
                 disable_sftp: false,
                 disable_ssh: false,
                 shell_pid,
+                osc_cwd,
             },
         );
         self.windows.lock().insert(id, owner_window);
@@ -500,6 +512,7 @@ impl TabRegistry {
         rows: u16,
         scrollback_lines: usize,
         config: SharedConfig,
+        osc_cwd: Arc<Mutex<Option<String>>>,
     ) -> AppResult<()> {
         let app_for_tab = app.clone();
         let registry_for_tab: Arc<Self> = self.clone();
@@ -519,6 +532,7 @@ impl TabRegistry {
                     rows,
                     scrollback_lines,
                     config,
+                    osc_cwd,
                 ) {
                     Ok(status) => status,
                     Err(e) => {
@@ -657,11 +671,23 @@ impl TabRegistry {
         reply_rx.recv_timeout(Duration::from_secs(1)).ok().flatten()
     }
 
-    /// PID of a local tab's shell child (`None` for SSH/unknown tabs). The
-    /// git panel resolves it to the shell's working directory via
-    /// `platform::process_cwd`.
-    pub fn shell_pid(&self, id: u64) -> Option<u32> {
-        self.inner.lock().get(&id).and_then(|h| h.shell_pid)
+    /// Best guess at a local tab's shell working directory: the shell's own
+    /// OSC 7 / OSC 9;9 report when integration provided one (exact even for
+    /// pwsh, whose process cwd never follows `cd`), else the OS query on
+    /// the shell pid. `None` for SSH tabs and when neither source knows.
+    pub fn local_cwd(&self, id: u64) -> Option<String> {
+        let (osc_cwd, shell_pid) = {
+            let guard = self.inner.lock();
+            let h = guard.get(&id)?;
+            if h.kind != TabKind::Local {
+                return None;
+            }
+            let osc_cwd = h.osc_cwd.lock().clone();
+            (osc_cwd, h.shell_pid)
+        };
+        osc_cwd.or_else(|| {
+            crate::platform::process_cwd(shell_pid?).map(|p| p.to_string_lossy().into_owned())
+        })
     }
 
     pub fn close(&self, id: u64) -> AppResult<()> {
@@ -776,6 +802,7 @@ fn run_tab_loop(
     rows: u16,
     scrollback_lines: usize,
     config: SharedConfig,
+    osc_cwd: Arc<Mutex<Option<String>>>,
 ) -> AppResult<i32> {
     // Build a unified writer + a small backend handle for resize/shutdown.
     enum Backend {
@@ -1142,9 +1169,21 @@ fn run_tab_loop(
             recv(pty_rx) -> msg => match msg {
                 Ok(PtyEvent::Data(bytes)) => {
                     // Observe-only: the scanner extracts OSC 9/777
-                    // notification payloads (which the engine's Rust API
-                    // doesn't expose); vt_write still gets every byte.
-                    let notes = osc_scanner.scan(&bytes);
+                    // notification payloads and OSC 7 / OSC 9;9 cwd reports
+                    // (which the engine's Rust API doesn't expose);
+                    // vt_write still gets every byte.
+                    let scanned = osc_scanner.scan(&bytes);
+                    if let Some(dir) = scanned.cwd {
+                        // Adopt only directories that exist on this
+                        // machine: an OSC 7 relayed by a manual `ssh`
+                        // session names a remote path, which must not leak
+                        // into local cwd consumers (git panel,
+                        // saved-workspace snapshots).
+                        if std::path::Path::new(&dir).is_dir() {
+                            *osc_cwd.lock() = Some(dir);
+                        }
+                    }
+                    let notes = scanned.notifications;
                     terminal.vt_write(&bytes);
                     pending_emit = true;
                     let bell = bell_pending.take();

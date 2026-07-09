@@ -928,14 +928,16 @@ pub fn local_open(path: String) -> AppResult<()> {
 // file browser above: shelling out to git blocks, and non-`async` handlers
 // run on a worker thread instead of stalling the async runtime.
 
-/// Working directory of a local tab's shell process, queried from the OS so
-/// the git panel follows `cd` without shell integration. `None` for SSH
-/// tabs, dead shells, and platforms without a cwd query (Windows) — callers
+/// Working directory of a local tab's shell, so the git panel and
+/// saved-workspace snapshots follow `cd`. Prefers the shell's own OSC 7 /
+/// OSC 9;9 report (shell integration), else queries the OS for the shell
+/// process's cwd — exact on macOS/Linux; on Windows the PEB read is exact
+/// for cmd.exe but stuck at the spawn directory for pwsh (which never
+/// updates its process cwd). `None` for SSH tabs and dead shells — callers
 /// fall back to the file browser's directory.
 #[tauri::command]
 pub fn terminal_cwd(registry: State<'_, SharedRegistry>, tab_id: u64) -> Option<String> {
-    let pid = registry.shell_pid(tab_id)?;
-    crate::platform::process_cwd(pid).map(|p| p.to_string_lossy().into_owned())
+    registry.local_cwd(tab_id)
 }
 
 #[tauri::command]

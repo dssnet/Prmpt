@@ -331,6 +331,18 @@ mod tests {
         assert_ne!(resolved, r"C:\Windows\System32\cmd.exe");
     }
 
+    /// Validates the hand-declared PEB offsets on Windows against ground
+    /// truth: our own process.
+    #[cfg(all(windows, target_pointer_width = "64"))]
+    #[test]
+    fn process_cwd_resolves_own_process() {
+        let cwd = process_cwd(std::process::id()).expect("own cwd should resolve");
+        assert_eq!(
+            cwd.canonicalize().unwrap(),
+            std::env::current_dir().unwrap().canonicalize().unwrap()
+        );
+    }
+
     /// Validates the hand-declared `proc_vnodepathinfo` layout on macOS (and
     /// the procfs path on Linux) against ground truth: our own process.
     #[cfg(unix)]
@@ -435,9 +447,152 @@ pub fn process_cwd(pid: u32) -> Option<PathBuf> {
     std::fs::read_link(format!("/proc/{pid}/cwd")).ok()
 }
 
-/// Windows has no stable public API for another process's cwd (it lives in
-/// the PEB) — callers fall back to the file browser's directory.
-#[cfg(not(unix))]
+/// Windows keeps another process's cwd in its PEB (there is no public API),
+/// so this reads it out the way Process Explorer does:
+/// `NtQueryInformationProcess(ProcessBasicInformation)` for the PEB address
+/// — the winternl.h-documented use of that call — then two
+/// `ReadProcessMemory` hops: PEB → `ProcessParameters` →
+/// `CurrentDirectory.DosPath`. The hand-declared offsets are the 64-bit PEB
+/// layout (stable since XP, identical on x64 and ARM64), so this arm is
+/// 64-bit-only and skips WoW64 (32-bit) shells — their live cwd is in their
+/// 32-bit PEB, and the 64-bit copy read here is frozen at spawn time.
+///
+/// Caveat: PowerShell never updates the process cwd on `Set-Location`
+/// (runspaces share it — PowerShell/PowerShell#17149), so for pwsh this
+/// returns the spawn directory. cmd.exe tracks `cd` exactly. Shells with
+/// OSC 7 / OSC 9;9 integration bypass this via the tab's `osc_cwd`.
+#[cfg(all(windows, target_pointer_width = "64"))]
+pub fn process_cwd(pid: u32) -> Option<PathBuf> {
+    use std::ffi::c_void;
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn OpenProcess(access: u32, inherit: i32, pid: u32) -> *mut c_void;
+        fn CloseHandle(handle: *mut c_void) -> i32;
+        fn ReadProcessMemory(
+            process: *mut c_void,
+            base: *const c_void,
+            buf: *mut c_void,
+            size: usize,
+            read: *mut usize,
+        ) -> i32;
+        fn IsWow64Process(process: *mut c_void, wow64: *mut i32) -> i32;
+    }
+    // ntdll.lib ships with both the Windows SDK and mingw; linking it
+    // directly avoids growing the `windows` crate feature set for one call.
+    #[link(name = "ntdll")]
+    extern "system" {
+        fn NtQueryInformationProcess(
+            process: *mut c_void,
+            class: u32,
+            info: *mut c_void,
+            len: u32,
+            ret_len: *mut u32,
+        ) -> i32;
+    }
+
+    const PROCESS_QUERY_INFORMATION: u32 = 0x0400;
+    const PROCESS_VM_READ: u32 = 0x0010;
+    /// winternl.h `ProcessBasicInformation`.
+    const PROCESS_BASIC_INFORMATION_CLASS: u32 = 0;
+    /// 64-bit PEB: offset of the `ProcessParameters` pointer.
+    const PEB_PROCESS_PARAMETERS: usize = 0x20;
+    /// 64-bit `RTL_USER_PROCESS_PARAMETERS`: offset of
+    /// `CurrentDirectory.DosPath` (a `UNICODE_STRING`, first member of the
+    /// `CURDIR` there).
+    const PARAMS_CURRENT_DIRECTORY: usize = 0x38;
+
+    /// Layout-compatible subset of winternl.h `PROCESS_BASIC_INFORMATION`
+    /// (repr(C) inserts the same post-`i32` padding as the real struct).
+    #[repr(C)]
+    struct BasicInfo {
+        _exit_status: i32,
+        peb: *mut c_void,
+        _affinity_mask: usize,
+        _base_priority: i32,
+        _pid: usize,
+        _parent_pid: usize,
+    }
+    /// `UNICODE_STRING`. `length` is in bytes and excludes any NUL.
+    #[repr(C)]
+    struct UnicodeString {
+        length: u16,
+        _maximum_length: u16,
+        buffer: *mut u16,
+    }
+
+    unsafe {
+        let process = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, 0, pid);
+        if process.is_null() {
+            return None;
+        }
+        let read = |base: usize, out: *mut c_void, len: usize| -> bool {
+            let mut got = 0usize;
+            ReadProcessMemory(process, base as *const c_void, out, len, &mut got) != 0
+                && got == len
+        };
+        let result = (|| {
+            let mut wow64 = 0i32;
+            if IsWow64Process(process, &mut wow64) == 0 || wow64 != 0 {
+                return None;
+            }
+            let mut info: BasicInfo = std::mem::zeroed();
+            let status = NtQueryInformationProcess(
+                process,
+                PROCESS_BASIC_INFORMATION_CLASS,
+                &mut info as *mut _ as *mut c_void,
+                std::mem::size_of::<BasicInfo>() as u32,
+                std::ptr::null_mut(),
+            );
+            if status != 0 || info.peb.is_null() {
+                return None;
+            }
+            let mut params: usize = 0;
+            if !read(
+                info.peb as usize + PEB_PROCESS_PARAMETERS,
+                &mut params as *mut _ as *mut c_void,
+                std::mem::size_of::<usize>(),
+            ) || params == 0
+            {
+                return None;
+            }
+            let mut dos_path: UnicodeString = std::mem::zeroed();
+            if !read(
+                params + PARAMS_CURRENT_DIRECTORY,
+                &mut dos_path as *mut _ as *mut c_void,
+                std::mem::size_of::<UnicodeString>(),
+            ) {
+                return None;
+            }
+            let units = (dos_path.length as usize) / 2;
+            if units == 0 || dos_path.buffer.is_null() {
+                return None;
+            }
+            let mut wide = vec![0u16; units];
+            if !read(
+                dos_path.buffer as usize,
+                wide.as_mut_ptr() as *mut c_void,
+                units * 2,
+            ) {
+                return None;
+            }
+            // DosPath always carries a trailing backslash; strip it except
+            // on drive roots, where `C:\` is the canonical form.
+            let mut path = &wide[..];
+            if path.len() > 3 && path.last() == Some(&u16::from(b'\\')) {
+                path = &path[..path.len() - 1];
+            }
+            use std::os::windows::ffi::OsStringExt;
+            Some(PathBuf::from(std::ffi::OsString::from_wide(path)))
+        })();
+        CloseHandle(process);
+        result
+    }
+}
+
+/// Fallback for targets with neither a cwd query nor the 64-bit PEB layout
+/// above — callers fall back to the file browser's directory.
+#[cfg(all(not(unix), not(all(windows, target_pointer_width = "64"))))]
 pub fn process_cwd(_pid: u32) -> Option<PathBuf> {
     None
 }
