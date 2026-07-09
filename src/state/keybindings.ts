@@ -226,6 +226,13 @@ export const ACTIONS: ActionMeta[] = [
     hint: "New terminal below the focused pane",
     default: mod("d", { shift: true }),
   },
+  {
+    id: "layout.split.auto",
+    label: "New Terminal in Workspace",
+    section: "Layout",
+    hint: "Split the focused pane along its longer side",
+    default: mod("Enter"),
+  },
 
   { id: "panel.files", label: "Open File Browser", section: "Panels", default: mod("b") },
   { id: "panel.git", label: "Open Git Panel", section: "Panels", default: mod("g") },

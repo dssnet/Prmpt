@@ -61,6 +61,7 @@ import {
 } from "./state/tabs";
 import {
   applyTerminalBg,
+  autoSplitDir,
   clearSelection,
   copyCurrentSelection,
   computeDims,
@@ -362,11 +363,14 @@ function scrollActive(
   if (target != null) void scrollTab(target, { kind });
 }
 
-async function splitActive(dir: "h" | "v"): Promise<void> {
+async function splitActive(dir: "h" | "v" | "auto"): Promise<void> {
   const a = active.value;
   if (!a || a.kind === "home") return;
   const targetSlot = a.id;
   const targetPane = inputTargetTabId() ?? a.id;
+  // Resolve "auto" against the pane being split *before* spawning — the spawn
+  // reshuffles focus, and the direction should reflect the pane's current shape.
+  const resolvedDir = dir === "auto" ? autoSplitDir(targetPane) : dir;
   const { cellWidthPx, cellHeightPx, dpr } = getCellMetrics();
   const dims = computeDims();
   const newId = await spawnTerminal({
@@ -375,7 +379,7 @@ async function splitActive(dir: "h" | "v"): Promise<void> {
     cellWidthPx: Math.round(cellWidthPx * dpr),
     cellHeightPx: Math.round(cellHeightPx * dpr),
   });
-  dropTabIntoTarget(newId, targetSlot, targetPane, dir, false);
+  dropTabIntoTarget(newId, targetSlot, targetPane, resolvedDir, false);
   focusCanvas();
 }
 
@@ -408,6 +412,7 @@ const actionHandlers: Record<string, ActionHandler> = {
   // this converts it into a workspace in place.
   "layout.split.right": { when: isInteractiveTab, run: () => void splitActive("h") },
   "layout.split.down": { when: isInteractiveTab, run: () => void splitActive("v") },
+  "layout.split.auto": { when: isInteractiveTab, run: () => void splitActive("auto") },
   "panel.files": { when: isInteractiveTab, run: () => void openPanelOnActive("files") },
   "panel.git": {
     when: () => active.value?.kind === "workspace",

@@ -12,6 +12,7 @@ import {
   AppWindow,
   ArrowRightLeft,
   Columns2,
+  Grid2x2,
   FolderOpen,
   FolderTree,
   GitBranch,
@@ -35,6 +36,7 @@ import {
 import { commandShortcut } from "./keybindings";
 import { requestCloseTab, requestClosePane } from "./closeGuard";
 import {
+  autoSplitDir,
   computeDims,
   focusCanvas,
   getCellMetrics,
@@ -70,13 +72,15 @@ async function newTerminalTab(cwd?: string): Promise<void> {
   focusCanvas();
 }
 
-async function splitActive(dir: "h" | "v", cwd?: string): Promise<void> {
+async function splitActive(dir: "h" | "v" | "auto", cwd?: string): Promise<void> {
   const a = active.value;
   if (!a || a.kind === "home") return;
   const targetSlot = a.id;
   const targetPane = inputTargetTabId() ?? a.id;
+  // Resolve "auto" before the spawn reshuffles focus (mirrors App.vue).
+  const resolvedDir = dir === "auto" ? autoSplitDir(targetPane) : dir;
   const newId = await spawnTerminal({ ...metricArgs(), cwd });
-  dropTabIntoTarget(newId, targetSlot, targetPane, dir, false);
+  dropTabIntoTarget(newId, targetSlot, targetPane, resolvedDir, false);
   focusCanvas();
 }
 
@@ -339,6 +343,17 @@ function rootCommands(): Command[] {
       shortcut: commandShortcut("layout.split.down"),
       when: isInteractive,
       perform: () => void splitActive("v"),
+    },
+    {
+      id: "layout.split.auto",
+      title: "New Terminal in Workspace",
+      subtitle: "Split the focused pane along its longer side",
+      section: "Layout",
+      icon: Grid2x2,
+      keywords: "auto split pane add terminal workspace",
+      shortcut: commandShortcut("layout.split.auto"),
+      when: isInteractive,
+      perform: () => void splitActive("auto"),
     },
 
     // SSH

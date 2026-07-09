@@ -181,6 +181,15 @@ export function computeDims(): { cols: number; rows: number; w: number; h: numbe
   return { cols, rows, w: rect.width, h: rect.height };
 }
 
+/** Split direction that leaves the halves of `tabId`'s pane closest to square:
+ *  a wide pane splits side-by-side, a tall one top-and-bottom. Falls back to
+ *  "h" when the pane hasn't rendered a snapshot yet. */
+export function autoSplitDir(tabId: number): "h" | "v" {
+  const snap = snapshotFor(tabId);
+  if (!snap) return "h";
+  return snap.rows * cellHeightPx > snap.cols * cellWidthPx ? "v" : "h";
+}
+
 /** Lay out the active workspace into the full host rect: terminal leaves get
  *  canvas rects (and their backend tabs new cols/rows); panel leaves get DOM
  *  overlay rects. Caches both for the draw path / hit-testing / overlays. */
