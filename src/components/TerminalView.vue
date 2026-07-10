@@ -165,12 +165,18 @@ function onHostWheel(e: WheelEvent) {
 }
 
 function onHostContextMenu(e: MouseEvent) {
+  // Text fields slotted into the host (HomeView) never reach this handler —
+  // App.vue's capture-phase listener already opened the input menu for them.
   // Suppress WKWebView's native menu and open ours directly. We can't rely on
   // bubbling to App.vue's window-level contextmenu listener — stopping
   // propagation here is needed to keep the event from other host handlers, so
   // drive the menu ourselves.
   e.preventDefault();
   e.stopPropagation();
+  // On the home tab there's no terminal under the click — Copy/Paste would
+  // target a PTY that isn't even visible. Suppress the menu entirely there
+  // (home's own controls and inputs bring their own menus).
+  if (active.value?.kind === "home") return;
   // When the app has mouse tracking on (and Shift isn't held), the right-click
   // already went to it via onMouseDown's report path — don't also open our
   // menu. Shift+right-click still opens it.

@@ -1,5 +1,4 @@
 <script setup lang="ts">
-import { readText as readClipboardText } from "@tauri-apps/plugin-clipboard-manager";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import type { UnlistenFn } from "@tauri-apps/api/event";
 import { onMounted, onBeforeUnmount, ref } from "vue";
@@ -74,6 +73,13 @@ import {
   reflowActive,
   selectAll,
 } from "./state/terminal";
+import {
+  copyFromInput,
+  focusedEditable,
+  pasteIntoInput,
+  selectAllInInput,
+} from "./lib/editable";
+import { openInputContextMenu } from "./state/inputContextMenu";
 import { openTerminalContextMenu } from "./state/terminalContextMenu";
 import {
   cancelPendingClose,
@@ -289,73 +295,6 @@ async function handleDragOut(
   }
 }
 
-type EditableInput = HTMLInputElement | HTMLTextAreaElement;
-
-// Resolve an editable text field from a candidate element. Pass an event's
-// `target` to test where a keystroke *originated* rather than the live
-// `document.activeElement`: an input's own Enter handler may tear itself down
-// (navigate / close) before the event bubbles to the window listener, leaving
-// `activeElement` on <body> — so a target-blind check would wrongly forward the
-// Enter to the PTY. Defaults to `activeElement` when no candidate is given.
-function focusedEditable(candidate?: EventTarget | null): EditableInput | null {
-  const el = (candidate as Element | null) ?? document.activeElement;
-  if (el instanceof HTMLTextAreaElement) return el;
-  if (el instanceof HTMLInputElement) {
-    // Bail on inputs that don't carry editable text (checkbox/radio/buttons).
-    const t = el.type;
-    if (
-      t === "text" ||
-      t === "password" ||
-      t === "search" ||
-      t === "email" ||
-      t === "url" ||
-      t === "tel" ||
-      t === "number"
-    ) {
-      return el;
-    }
-  }
-  return null;
-}
-
-async function copyFromInput(el: EditableInput): Promise<void> {
-  const start = el.selectionStart ?? 0;
-  const end = el.selectionEnd ?? 0;
-  if (end <= start) return;
-  // type=number / type=password don't expose selectionStart usefully — fall
-  // back to the whole value if the range is empty but the field has text.
-  const text = el.value.substring(start, end);
-  if (!text) return;
-  try {
-    await navigator.clipboard.writeText(text);
-  } catch (err) {
-    console.error("clipboard write failed:", err);
-  }
-}
-
-async function pasteIntoInput(el: EditableInput): Promise<void> {
-  let text: string;
-  try {
-    text = await readClipboardText();
-  } catch (err) {
-    console.error("clipboard read failed:", err);
-    return;
-  }
-  if (!text) return;
-  const start = el.selectionStart ?? el.value.length;
-  const end = el.selectionEnd ?? el.value.length;
-  el.value = el.value.substring(0, start) + text + el.value.substring(end);
-  const cursor = start + text.length;
-  try {
-    el.setSelectionRange(cursor, cursor);
-  } catch {
-    /* type=number rejects setSelectionRange */
-  }
-  // Vue's v-model listens on `input`; without this dispatch the reactive
-  // state would stay stale even though the DOM value updated.
-  el.dispatchEvent(new Event("input", { bubbles: true }));
-}
-
 function scrollActive(
   kind: "line_up" | "line_down" | "page_up" | "page_down" | "top" | "bottom",
 ) {
@@ -546,6 +485,18 @@ function onPaste(e: ClipboardEvent) {
   void writePaste(target, text);
 }
 
+// Capture-phase: editable text fields get their own Cut/Copy/Paste
+// FloatingMenu everywhere in the app. Capture (not bubble) so it wins even
+// inside panel panes and browser rows, which stop contextmenu propagation
+// before the window-level bubble handler below would run.
+function onEditableContextMenu(e: MouseEvent) {
+  const el = focusedEditable(e.target);
+  if (!el) return;
+  e.preventDefault();
+  e.stopPropagation();
+  openInputContextMenu(e, el);
+}
+
 function onContextMenu(e: MouseEvent) {
   // Belt-and-suspenders: cancel WKWebView's default context menu app-wide.
   // Inside #terminal-host we open our own FloatingMenu; outside it (e.g.
@@ -560,6 +511,7 @@ onMounted(async () => {
   window.addEventListener("keydown", onKeyDown);
   window.addEventListener("keyup", onKeyUp);
   window.addEventListener("paste", onPaste);
+  window.addEventListener("contextmenu", onEditableContextMenu, true);
   window.addEventListener("contextmenu", onContextMenu);
 
   unlisteners.push(await onRender((p) => {
@@ -621,15 +573,8 @@ onMounted(async () => {
   }));
   unlisteners.push(await onMenuSelectAll(() => {
     const el = focusedEditable();
-    if (el) {
-      try {
-        el.select();
-      } catch {
-        /* some input types refuse select() */
-      }
-    } else {
-      selectAll();
-    }
+    if (el) selectAllInInput(el);
+    else selectAll();
   }));
   // OSC notification (e.g. Claude Code finishing a task), routed through
   // the centralized dispatch: chime always (if enabled), toast + tab-bar
@@ -746,6 +691,7 @@ onBeforeUnmount(() => {
   window.removeEventListener("keydown", onKeyDown);
   window.removeEventListener("keyup", onKeyUp);
   window.removeEventListener("paste", onPaste);
+  window.removeEventListener("contextmenu", onEditableContextMenu, true);
   window.removeEventListener("contextmenu", onContextMenu);
   if (updateTimer !== undefined) clearInterval(updateTimer);
   for (const fn of unlisteners) {
