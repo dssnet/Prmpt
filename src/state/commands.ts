@@ -44,6 +44,7 @@ import {
 } from "./terminal";
 import {
   dropTabIntoTarget,
+  firstTerminalLeafId,
   HOME_TAB_ID,
   openPanelOnActive,
   openPanelTab,
@@ -76,11 +77,17 @@ async function splitActive(dir: "h" | "v" | "auto", cwd?: string): Promise<void>
   const a = active.value;
   if (!a || a.kind === "home") return;
   const targetSlot = a.id;
-  const targetPane = inputTargetTabId() ?? a.id;
+  // Focused pane, or the first terminal when a panel has focus; a panel-only
+  // workspace has neither and the fresh terminal stays its own tab
+  // (mirrors App.vue).
+  const targetPane = inputTargetTabId() ?? firstTerminalLeafId(a.id);
   // Resolve "auto" before the spawn reshuffles focus (mirrors App.vue).
-  const resolvedDir = dir === "auto" ? autoSplitDir(targetPane) : dir;
+  const resolvedDir =
+    dir === "auto" ? (targetPane != null ? autoSplitDir(targetPane) : "h") : dir;
   const newId = await spawnTerminal({ ...metricArgs(), cwd });
-  dropTabIntoTarget(newId, targetSlot, targetPane, resolvedDir, false);
+  if (targetPane != null) {
+    dropTabIntoTarget(newId, targetSlot, targetPane, resolvedDir, false);
+  }
   focusCanvas();
 }
 
@@ -96,7 +103,11 @@ async function resolveSpawnCwd(
   choice: "same" | "home" | "pick",
 ): Promise<string | undefined | null> {
   if (choice === "same") {
-    const target = inputTargetTabId() ?? active.value?.id;
+    // Focused pane, or the first terminal when a panel has focus — the slot
+    // id names no backend, so it can't answer terminal_cwd.
+    const a = active.value;
+    const target =
+      inputTargetTabId() ?? (a != null ? firstTerminalLeafId(a.id) : null);
     if (target == null) return undefined;
     return (await terminalCwd(target).catch(() => null)) ?? undefined;
   }

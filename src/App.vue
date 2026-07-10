@@ -37,8 +37,10 @@ import {
 import {
   attachTab as attachTabLocal,
   clearSshReconnecting,
-  closeTabAndForget,
+  closeWorkspacePane,
   dropTabIntoTarget,
+  firstTerminalLeafId,
+  soleTerminalBackendId,
   handleExit,
   handleRender,
   HOME_TAB_ID,
@@ -272,6 +274,12 @@ async function handleDragOut(
   screenX: number,
   screenY: number,
 ): Promise<void> {
+  // `tabId` is the frontend slot id; the backend tear-off/attach commands key
+  // on the backend PTY id, which lives on the tab's sole terminal leaf
+  // (TabBar only allows tearing off single-pane tabs; panel-only tabs have no
+  // backend to move).
+  const backendId = soleTerminalBackendId(tabId);
+  if (backendId == null) return;
   // Cursor in CSS pixels (matches Tauri logical units). If it's over another
   // of our windows, attach to it; otherwise tear off into a new window sized
   // like the source. innerWidth/innerHeight rather than outer* — WKWebView
@@ -279,11 +287,11 @@ async function handleDragOut(
   try {
     const target = await windowAtScreenPoint(screenX, screenY, myLabel);
     if (target) {
-      await attachTab(tabId, target);
+      await attachTab(backendId, target);
     } else {
       const width = Math.max(400, window.innerWidth);
       const height = Math.max(300, window.innerHeight);
-      await tearOffTab({ tabId, screenX, screenY, width, height });
+      await tearOffTab({ tabId: backendId, screenX, screenY, width, height });
     }
     removeTabLocal(tabId);
     // Tearing off the last terminal closes the source window — same rule as
@@ -306,10 +314,14 @@ async function splitActive(dir: "h" | "v" | "auto"): Promise<void> {
   const a = active.value;
   if (!a || a.kind === "home") return;
   const targetSlot = a.id;
-  const targetPane = inputTargetTabId() ?? a.id;
+  // Focused pane, or the first terminal when a panel has focus (the slot id
+  // is not a pane and can't anchor a split). A panel-only workspace has
+  // neither — the fresh terminal then just stays its own tab.
+  const targetPane = inputTargetTabId() ?? firstTerminalLeafId(a.id);
   // Resolve "auto" against the pane being split *before* spawning — the spawn
   // reshuffles focus, and the direction should reflect the pane's current shape.
-  const resolvedDir = dir === "auto" ? autoSplitDir(targetPane) : dir;
+  const resolvedDir =
+    dir === "auto" ? (targetPane != null ? autoSplitDir(targetPane) : "h") : dir;
   const { cellWidthPx, cellHeightPx, dpr } = getCellMetrics();
   const dims = computeDims();
   const newId = await spawnTerminal({
@@ -318,7 +330,9 @@ async function splitActive(dir: "h" | "v" | "auto"): Promise<void> {
     cellWidthPx: Math.round(cellWidthPx * dpr),
     cellHeightPx: Math.round(cellHeightPx * dpr),
   });
-  dropTabIntoTarget(newId, targetSlot, targetPane, resolvedDir, false);
+  if (targetPane != null) {
+    dropTabIntoTarget(newId, targetSlot, targetPane, resolvedDir, false);
+  }
   focusCanvas();
 }
 
@@ -409,7 +423,9 @@ function onKeyDown(e: KeyboardEvent) {
     const target = inputTargetTabId();
     if (target != null && isSshReconnecting(target)) {
       e.preventDefault();
-      void closeTabAndForget(target);
+      // Close the reconnecting pane's backend; the exit event prunes its leaf
+      // (closing the whole tab when it was the last pane).
+      void closeWorkspacePane(target);
       return;
     }
   }

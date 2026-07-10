@@ -42,7 +42,9 @@ export interface PanelDesc {
 
 let panelIdSeq = -1;
 
-/** Allocate a leaf id for a new panel pane (negative, never reused). */
+/** Allocate a frontend id (negative, never reused): panel pane leaves AND
+ *  workspace slot ids (every tab — see state/tabs.ts) draw from this one
+ *  counter, which is what keeps leaf ids and slot ids globally unique. */
 export function allocPanelLeafId(): number {
   return panelIdSeq--;
 }

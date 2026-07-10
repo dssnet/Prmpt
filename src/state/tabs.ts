@@ -42,7 +42,14 @@ export const HOME_TAB_ID = 0;
 // full-bleed — see terminal.ts). Terminals and frontend panels (files/git) are
 // both just panes; a terminal is special only in that the shared canvas draws
 // its body. The connection metadata below rides on the workspace tab when the
-// tab hosts an SSH connection (the workspace slot id == the backend ssh tab id).
+// tab hosts an SSH connection.
+//
+// Identity: a tab's id (the "slot id") is a frontend-allocated synthetic id
+// (negative, from the shared `allocPanelLeafId` counter) — it never names a
+// backend PTY. Backend tab ids live only on workspace *leaves*; translate with
+// `workspaceOfLeaf` / `owningTabId`. (One exception: an SFTP-only workspace's
+// pooled ssh connection is registered on the backend under its negative slot
+// id, so its exit arrives addressed to the slot — see `handleExit`.)
 export type TabKind = "home" | "workspace";
 
 export interface TabState {
@@ -191,6 +198,26 @@ export function isWorkspaceTab(t: TabState | null | undefined): boolean {
   return !!t && t.kind === "workspace";
 }
 
+/** The backend id of a single-pane tab's terminal leaf, or null when the tab
+ *  is multi-pane or panel-only. Tear-off moves exactly one backend tab across
+ *  windows, so this is the id `tear_off_tab` / `attach_tab` need. */
+export function soleTerminalBackendId(slotId: number): number | null {
+  const ws = getWorkspace(slotId);
+  if (!ws) return null;
+  const leaves = collectLeaves(ws.root);
+  if (leaves.length !== 1 || isPanelLeaf(leaves[0])) return null;
+  return leaves[0].tabId;
+}
+
+/** First terminal leaf of a tab — the anchor/cwd fallback when the focused
+ *  pane is a panel (`inputTargetTabId()` returns null there). Null for
+ *  panel-only workspaces. */
+export function firstTerminalLeafId(slotId: number): number | null {
+  const ws = getWorkspace(slotId);
+  if (!ws) return null;
+  return collectTerminalLeaves(ws.root)[0]?.tabId ?? null;
+}
+
 function findTab(id: number): TabState | undefined {
   return tabs.value.find((t) => t.id === id);
 }
@@ -235,7 +262,7 @@ function seedWorkspace(t: TabState, base: LeafNode): void {
       makePanelLeaf({
         kind: "files",
         seedHostId: t.hostId,
-        seedTargetTabId: t.id,
+        seedTargetTabId: base.tabId,
       }),
       PANEL_SPLIT_RATIO.files,
     );
@@ -243,6 +270,8 @@ function seedWorkspace(t: TabState, base: LeafNode): void {
   setWorkspace(t.id, { root, focusedTabId: base.tabId });
 }
 
+/** Returns the new tab's slot id (a frontend id — the backend PTY id lives
+ *  on the workspace leaf). */
 export async function spawnTerminal(args: {
   cols: number;
   rows: number;
@@ -251,14 +280,15 @@ export async function spawnTerminal(args: {
   /** Optional initial working directory (e.g. "same folder" spawns). */
   cwd?: string;
 }): Promise<number> {
-  const id = await spawnTab(args);
-  const t: TabState = { id, kind: "workspace", title: "Terminal" };
+  const backendId = await spawnTab(args);
+  const t: TabState = { id: allocPanelLeafId(), kind: "workspace", title: "Terminal" };
   tabs.value.push(t);
-  seedWorkspace(t, makeLeaf(id, { kind: "terminal", title: "Terminal" }));
-  activeId.value = id;
-  return id;
+  seedWorkspace(t, makeLeaf(backendId, { kind: "terminal", title: "Terminal" }));
+  activeId.value = t.id;
+  return t.id;
 }
 
+/** Returns the new tab's slot id (like `spawnTerminal`). */
 export async function spawnSsh(args: {
   hostId: number;
   hostLabel: string;
@@ -268,7 +298,7 @@ export async function spawnSsh(args: {
   cellHeightPx: number;
   config: import("../ipc").SshConnectConfig;
 }): Promise<number> {
-  const id = await connectSshHost({
+  const backendId = await connectSshHost({
     config: args.config,
     cols: args.cols,
     rows: args.rows,
@@ -276,7 +306,7 @@ export async function spawnSsh(args: {
     cellHeightPx: args.cellHeightPx,
   });
   const t: TabState = {
-    id,
+    id: allocPanelLeafId(),
     kind: "workspace",
     title: args.hostLabel,
     hostLabel: args.hostLabel,
@@ -284,14 +314,14 @@ export async function spawnSsh(args: {
     disableSftp: args.config.disable_sftp,
   };
   tabs.value.push(t);
-  seedWorkspace(t, sshTerminalLeaf(t));
-  activeId.value = id;
-  return id;
+  seedWorkspace(t, sshTerminalLeaf(t, backendId));
+  activeId.value = t.id;
+  return t.id;
 }
 
 /** The shell terminal leaf for an SSH connection workspace (owns its PTY). */
-function sshTerminalLeaf(t: TabState): LeafNode {
-  return makeLeaf(t.id, {
+function sshTerminalLeaf(t: TabState, backendId: number): LeafNode {
+  return makeLeaf(backendId, {
     kind: "ssh",
     title: t.title,
     hostLabel: t.hostLabel,
@@ -548,11 +578,12 @@ export function handleExit(p: ExitPayload): void {
     return;
   }
 
+  // Defensive fallback: an exit addressed to a slot id (a backend connection
+  // registered under a frontend id, e.g. a panel-only workspace's pooled ssh
+  // connection) or to an id nothing owns anymore (late exit after tear-off) —
+  // tear down whatever state still lingers.
   const idx = tabs.value.findIndex((t) => t.id === p.tab_id);
   if (idx >= 0) {
-    // A panel-only SFTP workspace's backend connection exits under the slot id
-    // (it has no PTY leaf for workspaceOfLeaf to match above), so tear down
-    // its lingering workspace state here too.
     if (tabs.value[idx].kind === "workspace") deleteWorkspace(p.tab_id);
     tabs.value.splice(idx, 1);
   }
@@ -605,11 +636,11 @@ export function detachWorkspaceLeaf(slotId: number, tabId: number): void {
   if (!ws) return;
   const leaf = findLeafByTabId(ws.root, tabId);
   if (!leaf) return;
-  if (tabId === slotId || collectLeaves(ws.root).length <= 1) return;
+  if (collectLeaves(ws.root).length <= 1) return;
   const origin = leaf.origin;
   applyWorkspaceRemoval(slotId, tabId, removeLeaf(ws.root, tabId));
   const t: TabState = {
-    id: tabId,
+    id: allocPanelLeafId(),
     kind: "workspace",
     title: snapshots.get(tabId)?.title || origin.title,
     hostLabel: origin.hostLabel,
@@ -617,8 +648,8 @@ export function detachWorkspaceLeaf(slotId: number, tabId: number): void {
     disableSftp: origin.disableSftp,
   };
   tabs.value.push(t);
-  setWorkspace(tabId, { root: makeLeaf(tabId, origin), focusedTabId: tabId });
-  activeId.value = tabId;
+  setWorkspace(t.id, { root: makeLeaf(tabId, origin), focusedTabId: tabId });
+  activeId.value = t.id;
 }
 
 /** Close a single pane (its backend PTY). The exit event then prunes the
@@ -632,28 +663,27 @@ export async function closeWorkspacePane(tabId: number): Promise<void> {
 }
 
 export function handleRender(payload: RenderPayload): void {
+  // Renders are addressed to backend PTY ids, which only exist as workspace
+  // leaves; a render for a leaf no tab owns (already closed / torn off) is
+  // dropped.
   const wsId = workspaceOfLeaf(payload.tab_id);
-  const t = tabs.value.find((x) => x.id === payload.tab_id);
-  // A workspace leaf has no TabState of its own (it was consumed), but its
-  // snapshot must still be cached so the pane can render.
-  if (!t && wsId === undefined) return;
+  if (wsId === undefined) return;
   snapshots.set(payload.tab_id, payload);
 
   // The tab label tracks its focused pane; derive it from the one helper
   // (terminal snapshot title or panel leaf title) so there's a single source
   // of truth rather than this path and the panel/focus paths each copying.
-  if (wsId !== undefined) syncWorkspaceTabTitle(wsId);
+  syncWorkspaceTabTitle(wsId);
 
-  if (payload.tab_id === activeId.value || wsId === activeId.value) {
-    renderSeq.value++;
-  }
+  if (wsId === activeId.value) renderSeq.value++;
 }
 
 /** Build a workspace tab (+ its initial pane tree) from backend tab info, for
- *  window-restore hydration and tear-off attach. Returns the tab, or null if
- *  it's home / already present. */
+ *  window-restore hydration and tear-off attach. `info.id` is the *backend*
+ *  tab id — it becomes the workspace leaf; the tab gets a fresh slot id.
+ *  Returns the tab, or null if it's home / already present as a pane. */
 function hydrateOne(info: TabHydrateInfo): TabState | null {
-  if (info.id === HOME_TAB_ID || tabs.value.some((t) => t.id === info.id)) {
+  if (info.id === HOME_TAB_ID || workspaceOfLeaf(info.id) !== undefined) {
     return null;
   }
   const isSsh = info.kind === "ssh";
@@ -661,7 +691,7 @@ function hydrateOne(info: TabHydrateInfo): TabState | null {
     ? info.host_label ?? `SSH ${info.id}`
     : `Terminal ${info.id}`;
   const t: TabState = {
-    id: info.id,
+    id: allocPanelLeafId(),
     kind: "workspace",
     title: fallbackTitle,
     hostId: info.host_id ?? undefined,
@@ -672,8 +702,8 @@ function hydrateOne(info: TabHydrateInfo): TabState | null {
   seedWorkspace(
     t,
     isSsh
-      ? sshTerminalLeaf(t)
-      : makeLeaf(t.id, { kind: "terminal", title: fallbackTitle }),
+      ? sshTerminalLeaf(t, info.id)
+      : makeLeaf(info.id, { kind: "terminal", title: fallbackTitle }),
   );
   return t;
 }
@@ -687,7 +717,8 @@ export function hydrateTabs(infos: TabHydrateInfo[]): void {
 }
 
 export function attachTab(info: TabHydrateInfo): void {
-  if (hydrateOne(info)) activeId.value = info.id;
+  const t = hydrateOne(info);
+  if (t) activeId.value = t.id;
 }
 
 // ---- Panel panes ------------------------------------------------------------
@@ -871,17 +902,25 @@ export async function openPanelOnActive(kind: PanelKind): Promise<void> {
   await openPanelFromTerminal(kind, termId);
 }
 
-/** Local-only removal — the tab still exists on the backend, it has just
- *  moved to another window. Don't call closeTab/forgetTab. */
+/** Local-only removal — the tab's backends still exist, they have just moved
+ *  to another window. Don't call closeTab/forgetTab; do drop the workspace
+ *  tree and per-leaf state so nothing here keeps mapping the moved panes. */
 export function removeTabLocal(id: number): void {
   if (id === HOME_TAB_ID) return;
   const idx = tabs.value.findIndex((t) => t.id === id);
   if (idx < 0) return;
+  const ws = getWorkspace(id);
   tabs.value.splice(idx, 1);
-  snapshots.delete(id);
-  // If it was mid-reconnect, the destination window re-acquires the flag on
-  // the next retry — "ssh:reconnecting" re-fires on every failed attempt.
-  sshReconnecting.delete(id);
+  if (ws) {
+    for (const leaf of collectLeaves(ws.root)) {
+      snapshots.delete(leaf.tabId);
+      // If it was mid-reconnect, the destination window re-acquires the flag
+      // on the next retry — "ssh:reconnecting" re-fires on every failed
+      // attempt.
+      sshReconnecting.delete(leaf.tabId);
+    }
+  }
+  deleteWorkspace(id);
   if (activeId.value === id) {
     const next = tabs.value.find((t) => t.kind !== "home");
     activeId.value = next ? next.id : HOME_TAB_ID;

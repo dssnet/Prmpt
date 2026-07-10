@@ -6,8 +6,9 @@ import type { PanelDesc } from "./panels";
 // either a backend tab (its own PTY/thread/render stream) or a frontend
 // panel (file browser, git, … — see state/panels.ts); each split divides its
 // area horizontally ("h" → side-by-side, vertical divider) or vertically
-// ("v" → stacked, horizontal divider). A workspace occupies one tab-bar slot
-// whose TabState.id is reused as the registry key.
+// ("v" → stacked, horizontal divider). A workspace occupies one tab-bar slot;
+// its TabState.id (a synthetic frontend id, never a backend id — see
+// state/tabs.ts) is the registry key.
 
 export type SplitDir = "h" | "v";
 

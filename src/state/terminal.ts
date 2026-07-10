@@ -25,7 +25,6 @@ import {
   dropPanelIntoTarget,
   dropTabIntoTarget,
   focusWorkspacePane,
-  isInteractiveTab,
   isWorkspaceTab,
   snapshotFor,
   useTabs,
@@ -268,13 +267,13 @@ export function getActivePanes(): PaneOverlay[] {
 
 export function reflowActive(activeTab: TabState | null): void {
   if (!renderer) return;
-  const { cols, rows, w, h } = computeDims();
+  const { w, h, cols, rows } = computeDims();
   renderer.resize(w, h, cols, rows);
+  // Pane backends are resized by reflowWorkspaceLayout (per-pane geometry);
+  // there is no whole-tab PTY to resize — tab ids don't name backends.
   if (isWorkspaceTab(activeTab)) {
     const a = activeWs();
     if (a) reflowWorkspaceLayout(a.ws, w, h);
-    drawNow();
-    return;
   }
   // Setting canvas.width/height clears the WebGL drawing buffer to opaque
   // black (alpha:false). Must repaint synchronously before the browser
@@ -284,32 +283,6 @@ export function reflowActive(activeTab: TabState | null): void {
   // top-left in the new viewport) until the backend acks the resize and
   // emits a fresh snapshot a round-trip later.
   drawNow();
-  if (isInteractiveTab(activeTab)) {
-    void resizeTab({
-      tabId: activeTab!.id,
-      cols,
-      rows,
-      cellWidthPx: Math.round(cellWidthPx * dpr),
-      cellHeightPx: Math.round(cellHeightPx * dpr),
-    });
-  }
-}
-
-export function pingAllForRedraw(allTabs: TabState[]): void {
-  const dims = computeDims();
-  for (const t of allTabs) {
-    if (t.kind === "home") continue;
-    // Workspace panes are sized by reflowWorkspaceLayout, not the full host
-    // geometry — don't clobber them here.
-    if (t.kind === "workspace") continue;
-    void resizeTab({
-      tabId: t.id,
-      cols: dims.cols,
-      rows: dims.rows,
-      cellWidthPx: Math.round(cellWidthPx * dpr),
-      cellHeightPx: Math.round(cellHeightPx * dpr),
-    });
-  }
 }
 
 export function applyRendererTheme(theme: ThemeConfig): void {
@@ -1046,24 +1019,16 @@ export function resolveDropAt(
   const lp = clientToLocal(clientX, clientY);
   if (!lp) return null;
 
-  let rect: { x: number; y: number; w: number; h: number };
-  let slotId: number;
-  let targetPaneTabId: number;
-
+  // Every non-home tab is a workspace, so a missing registry entry means the
+  // drop target isn't usable — never fall back to the slot id as a pane id.
   const a = activeWs();
-  if (a) {
-    // Terminal panes and panel panes are both valid split targets.
-    const pane = paneAt(lp.x, lp.y) ?? panelPaneAt(lp.x, lp.y);
-    if (!pane) return null;
-    rect = { x: pane.x, y: pane.y, w: pane.w, h: pane.h };
-    slotId = a.slotId;
-    targetPaneTabId = pane.tabId;
-  } else {
-    const d = computeDims();
-    rect = { x: 0, y: 0, w: d.w, h: d.h };
-    slotId = activeTab.id;
-    targetPaneTabId = activeTab.id;
-  }
+  if (!a) return null;
+  // Terminal panes and panel panes are both valid split targets.
+  const pane = paneAt(lp.x, lp.y) ?? panelPaneAt(lp.x, lp.y);
+  if (!pane) return null;
+  const rect = { x: pane.x, y: pane.y, w: pane.w, h: pane.h };
+  const slotId = a.slotId;
+  const targetPaneTabId = pane.tabId;
 
   // Dropping a tab onto its own pane — or a workspace tab onto any pane of
   // itself — is a no-op (see dropTabIntoTarget); suppress the preview so the

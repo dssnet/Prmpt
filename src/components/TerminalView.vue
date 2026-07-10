@@ -30,7 +30,6 @@ import {
   commitWorkspaceDrop,
   getActivePanes,
   getActivePanelPanes,
-  pingAllForRedraw,
   pointOverTerminal,
   reflowActive,
   requestDraw,
@@ -44,6 +43,7 @@ import {
 } from "../state/terminal";
 import {
   detachWorkspaceLeaf,
+  firstTerminalLeafId,
   focusWorkspacePane,
   moveWorkspaceLeaf,
   openPanelFromTerminal,
@@ -61,7 +61,7 @@ const canvasRef = ref<HTMLCanvasElement | null>(null);
 const hostRef = ref<HTMLElement | null>(null);
 const wrapRef = ref<HTMLElement | null>(null);
 
-const { active, tabs, renderSeq } = useTabs();
+const { active, renderSeq } = useTabs();
 
 // ---- Panel panes -----------------------------------------------------------
 // Panels (file browser, git, …) are workspace leaves; their rects come from
@@ -90,11 +90,14 @@ const PANEL_VIEWS: Record<
 
 // Pills are shortcuts: each opens a fresh, self-contained panel seeded from
 // the terminal it sits on (its cwd / server). `fromTabId` is the originating
-// terminal pane; on a plain tab it's the active tab itself.
+// terminal pane; without one, seed from the active tab's first terminal pane
+// (slot ids name no backend, so the tab id itself can't seed a cwd).
 function openPanel(kind: PanelKind, fromTabId?: number): void {
   const id =
     fromTabId ??
-    (active.value && active.value.kind !== "home" ? active.value.id : undefined);
+    (active.value && active.value.kind !== "home"
+      ? firstTerminalLeafId(active.value.id) ?? undefined
+      : undefined);
   if (id == null) return;
   void openPanelFromTerminal(kind, id);
 }
@@ -403,7 +406,6 @@ watch(selectionTick, () => requestDraw());
 
 watch(theme, (next) => {
   applyRendererTheme(next);
-  pingAllForRedraw(tabs.value);
   requestDraw();
 });
 </script>
