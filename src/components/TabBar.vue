@@ -144,6 +144,9 @@ let drag: DragState | null = null;
 const ghost = ref<{ x: number; y: number; label: string } | null>(null);
 let suppressClickUntil = 0;
 let pointerX = 0;
+// Last horizontal drag direction — picks which edge of the carried tab is the
+// "leading" one for the half-over reorder threshold.
+let dragDirRight = true;
 let rafId = 0;
 let pinning = false;
 let pinnedEl: HTMLElement | null = null;
@@ -184,6 +187,21 @@ function pointInTabBar(cx: number, cy: number): boolean {
 // changes, so the .tab-move animation doesn't thrash on every mousemove.
 let lastReorderBeforeId: number | null | undefined = undefined;
 
+// The carried tab's left edge, clamped to the strip. The strip container
+// clips overflowing children (overflow-hidden), so an unclamped tab would
+// slide under the home button / overflow dropdown on the left or the +
+// button on the right and get cut off — instead it stops flush at the
+// first/last slot while the cursor keeps going.
+function clampedDragLeft(): number {
+  if (!drag) return pointerX;
+  const left = pointerX - drag.grabOffsetX;
+  const root = stripEl.value?.$el ?? null;
+  if (!root) return left;
+  const r = root.getBoundingClientRect();
+  const max = Math.max(r.left, r.right - drag.width);
+  return Math.min(Math.max(left, r.left), max);
+}
+
 // Glue the picked-up tab under the cursor every frame. It keeps its own DOM
 // node (keyed by id) as the array reorders, so we just translate it from
 // wherever the layout put it to where the cursor is holding it.
@@ -191,11 +209,10 @@ function dragFrame(): void {
   if (!drag || !drag.active || !pinnedEl) return;
   const el = pinnedEl;
   if (el.isConnected) {
+    const target = clampedDragLeft();
     el.style.transform = "";
     const left = el.getBoundingClientRect().left;
-    el.style.transform = `translateX(${Math.round(
-      pointerX - drag.grabOffsetX - left,
-    )}px)`;
+    el.style.transform = `translateX(${Math.round(target - left)}px)`;
   }
   rafId = requestAnimationFrame(dragFrame);
 }
@@ -233,18 +250,26 @@ function stopPin(settle: boolean): void {
   }
 }
 
-// Where the dragged tab's center currently sits, vs. the other tabs' centers.
+// A neighbor yields its slot as soon as the dragged tab covers more than half
+// of it: compare the dragged tab's *leading* edge (right edge when moving
+// right, left when moving left) against the other tabs' centers. Uses the
+// clamped visual position so the trigger matches what the user sees — and at
+// the strip ends the end tab's center stays strictly past the clamped edge,
+// so the outermost slots remain reachable. Only the leading edge is checked;
+// after a swap the neighbor's layout slot moves away, which gives natural
+// hysteresis instead of flip-flopping at the threshold.
 function computeReorderBeforeId(): number | null {
   if (!drag) return null;
-  const centerX = pointerX - drag.grabOffsetX + drag.width / 2;
+  const left = clampedDragLeft();
+  const edge = dragDirRight ? left + drag.width : left;
   for (const { id, el } of visibleTabEls()) {
     if (id === drag.tabId) continue; // skip the tab being carried
     const t = tabs.value.find((x) => x.id === id);
     if (!t || t.kind === "home") continue;
     const r = el.getBoundingClientRect();
-    if (centerX < r.left + r.width / 2) return id;
+    if (edge < r.left + r.width / 2) return id;
   }
-  return null; // past the last center → append
+  return null; // leading edge past the last center → append
 }
 
 function applyLiveReorder(): void {
@@ -253,7 +278,21 @@ function applyLiveReorder(): void {
   if (beforeId === drag.tabId) return; // dropping onto itself → no-op
   if (beforeId === lastReorderBeforeId) return; // slot unchanged
   lastReorderBeforeId = beforeId;
+  // Vue's TransitionGroup decides whether to run the .tab-move FLIP at all by
+  // probing the computed transition of a *clone of its first child* — and the
+  // clone keeps imperatively-added classes. When the carried tab is that first
+  // child (dragging the first tab, or a tab parked in slot 0), .tab-dragging's
+  // `transition: none` makes the probe fail and every neighbor's slide-over is
+  // skipped. Take the class off for the reorder's render flush and restore it
+  // on nextTick — after the probe/FLIP ran, before anything paints.
+  const el = pinning ? pinnedEl : null;
+  el?.classList.remove("tab-dragging");
   moveTab(drag.tabId, beforeId);
+  if (el) {
+    void nextTick(() => {
+      if (pinning && pinnedEl === el) el.classList.add("tab-dragging");
+    });
+  }
 }
 
 function onTabMouseDown(t: TabState, e: MouseEvent): void {
@@ -281,6 +320,7 @@ function onTabMouseDown(t: TabState, e: MouseEvent): void {
 
 function onDragMove(e: MouseEvent): void {
   if (!drag) return;
+  if (e.clientX !== pointerX) dragDirRight = e.clientX > pointerX;
   pointerX = e.clientX;
   if (!drag.active) {
     const dx = e.screenX - drag.startScreenX;
@@ -297,9 +337,10 @@ function onDragMove(e: MouseEvent): void {
     applyLiveReorder();
     return;
   }
-  // Left the bar: drop the carried look. Re-arm the slot guard so re-entering
-  // the bar recomputes from scratch.
-  stopPin(false);
+  // Left the bar: drop the carried look — settling, so the tab glides back to
+  // its slot instead of teleporting while the ghost takes over. Re-arm the
+  // slot guard so re-entering the bar recomputes from scratch.
+  stopPin(true);
   lastReorderBeforeId = undefined;
   // Outside the bar: original ghost + workspace-drop affordance.
   ghost.value = { x: e.clientX, y: e.clientY, label: drag.label };
@@ -1037,15 +1078,18 @@ function onWindowResize(): void {
   position: relative;
   z-index: 30;
   cursor: grabbing;
-  opacity: 0.97;
+  opacity: 0.55;
   box-shadow: 0 6px 18px rgba(0, 0, 0, 0.4);
   pointer-events: none;
   will-change: transform;
 }
 
-/* On drop, glide from the cursor to the resolved slot instead of snapping. */
+/* On drop, glide from the cursor to the resolved slot instead of snapping,
+   fading back to full opacity from the dragging translucency. */
 .tab-settle {
-  transition: transform 200ms cubic-bezier(0.22, 1, 0.36, 1) !important;
+  transition:
+    transform 200ms cubic-bezier(0.22, 1, 0.36, 1),
+    opacity 200ms ease-out !important;
   position: relative;
   z-index: 20;
 }
