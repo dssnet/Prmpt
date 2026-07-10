@@ -19,9 +19,13 @@ import {
   PanelLeft,
   PanelRight,
   PanelTop,
+  SquareArrowOutUpRight,
+  SquareSplitHorizontal,
+  X,
 } from "lucide-vue-next";
 
 import { terminalCwd } from "../ipc";
+import { requestClosePane } from "./closeGuard";
 import { copyContextLink, setContextLink } from "./links";
 import { openFloatingMenu, type FloatingMenuEntry } from "./floatingMenu";
 import {
@@ -35,8 +39,13 @@ import {
   pasteFromClipboard,
   pointerCell,
 } from "./terminal";
-import { dropTabIntoTarget, spawnTerminal, useTabs } from "./tabs";
-import type { SplitDir } from "./workspace";
+import {
+  detachWorkspaceLeaf,
+  dropTabIntoTarget,
+  spawnTerminal,
+  useTabs,
+} from "./tabs";
+import { collectLeaves, getWorkspace, type SplitDir } from "./workspace";
 
 const { active } = useTabs();
 
@@ -88,15 +97,39 @@ export function openTerminalContextMenu(e: MouseEvent): void {
   const slotId = active.value?.id;
   if (paneId != null && slotId != null) {
     const splits: Array<[string, typeof PanelRight, SplitDir, boolean]> = [
-      ["Split Right", PanelRight, "h", false],
-      ["Split Left", PanelLeft, "h", true],
-      ["Split Down", PanelBottom, "v", false],
-      ["Split Up", PanelTop, "v", true],
+      ["Right", PanelRight, "h", false],
+      ["Left", PanelLeft, "h", true],
+      ["Down", PanelBottom, "v", false],
+      ["Up", PanelTop, "v", true],
     ];
     items.push(null);
-    for (const [text, icon, dir, first] of splits) {
-      items.push({ text, icon, action: () => void splitPane(slotId, paneId, dir, first) });
-    }
+    items.push({
+      text: "Split",
+      icon: SquareSplitHorizontal,
+      submenu: splits.map(([text, icon, dir, first]) => ({
+        text,
+        icon,
+        action: () => void splitPane(slotId, paneId, dir, first),
+      })),
+    });
+
+    // Detaching a single-pane workspace is a no-op (it already is its own
+    // tab), so the item is disabled there. Close funnels through the
+    // confirm-on-close guard like the pane X button.
+    const ws = getWorkspace(slotId);
+    const solePane = !ws || collectLeaves(ws.root).length <= 1;
+    items.push(null);
+    items.push({
+      text: "Move to New Tab",
+      icon: SquareArrowOutUpRight,
+      disabled: solePane,
+      action: () => detachWorkspaceLeaf(slotId, paneId),
+    });
+    items.push({
+      text: "Close Terminal",
+      icon: X,
+      action: () => void requestClosePane(paneId),
+    });
   }
 
   openFloatingMenu(e.clientX, e.clientY, items);
