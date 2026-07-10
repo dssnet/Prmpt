@@ -966,8 +966,11 @@ export function inputTargetTabId(): number | null {
   return isPanelLeafId(focused) ? null : focused;
 }
 
-export async function pasteFromClipboard(): Promise<void> {
-  const target = inputTargetTabId();
+/** Paste into `targetTabId`, or the focused pane when omitted (keyboard
+ *  chord / app menu). The context menu passes the pane that was right-clicked,
+ *  which needn't be the focused one. */
+export async function pasteFromClipboard(targetTabId?: number): Promise<void> {
+  const target = targetTabId ?? inputTargetTabId();
   if (target == null) return;
   let text: string | null = null;
   try {
