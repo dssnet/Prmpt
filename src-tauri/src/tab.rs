@@ -22,7 +22,7 @@ use libghostty_vt::{
     render::{CellIterator, CursorVisualStyle, Dirty, RenderState, RowIterator},
     screen::{CellWide, Screen},
     style::{RgbColor, StyleColor},
-    terminal::{Mode, Point, PointCoordinate, ScrollViewport},
+    terminal::{ColorScheme, Mode, Point, PointCoordinate, ScrollViewport},
     Terminal, TerminalOptions,
 };
 use parking_lot::Mutex;
@@ -877,6 +877,25 @@ fn run_tab_loop(
         let pending = bell_pending.clone();
         terminal.on_bell(move |_t| pending.set(true))?;
     }
+    // Answer CSI ? 996 n ("report color scheme") from the active theme's
+    // background luma. Companion to the OSC 10/11 replies below — newer
+    // TUIs use this DSR for light/dark detection. Runs inside vt_write;
+    // the config lock is only ever held briefly, so this stays non-blocking
+    // in practice.
+    {
+        let config = config.clone();
+        terminal.on_color_scheme(move |_t| {
+            let bg = parse_hex(&config.lock().theme.background);
+            // ITU-R BT.601 luma, scaled ×1000; midpoint splits light/dark.
+            let luma =
+                299 * u32::from(bg.r) + 587 * u32::from(bg.g) + 114 * u32::from(bg.b);
+            Some(if luma < 128_000 {
+                ColorScheme::Dark
+            } else {
+                ColorScheme::Light
+            })
+        })?;
+    }
     // Key events are encoded here (not in the webview) so the encoder can
     // read the terminal's live modes — DECCKM, keypad mode and the kitty
     // keyboard flags an app like Claude Code pushes — without mirroring
@@ -1173,6 +1192,28 @@ fn run_tab_loop(
                     // (which the engine's Rust API doesn't expose);
                     // vt_write still gets every byte.
                     let scanned = osc_scanner.scan(&bytes);
+                    // Answer OSC 10;? / 11;? default-color queries with the
+                    // active theme's colors. The engine has no default-color
+                    // concept (themes live in Prmpt's config), so without a
+                    // reply theme-adaptive TUIs (Codex, fzf, neovim
+                    // background detection) time out and fall back to a
+                    // generic 16-color look. try_send: replies are
+                    // disposable, same policy as on_pty_write.
+                    if !scanned.color_queries.is_empty() {
+                        let theme = config.lock().theme.clone();
+                        for q in &scanned.color_queries {
+                            let (code, color) = match q.kind {
+                                osc_notify::ColorQueryKind::Foreground => {
+                                    (10, parse_hex(&theme.foreground))
+                                }
+                                osc_notify::ColorQueryKind::Background => {
+                                    (11, parse_hex(&theme.background))
+                                }
+                            };
+                            let _ = write_tx
+                                .try_send(osc_color_reply(code, color, q.bel_terminated));
+                        }
+                    }
                     if let Some(dir) = scanned.cwd {
                         // Adopt only directories that exist on this
                         // machine: an OSC 7 relayed by a manual `ssh`
@@ -1455,6 +1496,20 @@ fn parse_hex(s: &str) -> RgbColor {
         _ => (0, 0, 0),
     };
     RgbColor { r, g, b }
+}
+
+/// Format the reply to an `OSC 10;?` / `OSC 11;?` default-color query.
+/// xterm reports 16-bit-per-channel `rgb:RRRR/GGGG/BBBB` (8-bit values
+/// doubled up, 0xAB → 0xABAB) and echoes the query's terminator.
+fn osc_color_reply(code: u8, c: RgbColor, bel_terminated: bool) -> Vec<u8> {
+    let mut s = format!(
+        "\x1b]{code};rgb:{:04x}/{:04x}/{:04x}",
+        u16::from(c.r) * 0x101,
+        u16::from(c.g) * 0x101,
+        u16::from(c.b) * 0x101
+    );
+    s.push_str(if bel_terminated { "\x07" } else { "\x1b\\" });
+    s.into_bytes()
 }
 
 fn build_themed_colors(

@@ -16,12 +16,38 @@
 //! API's stream handler treats `report_pwd` as a no-op, so `Terminal::pwd()`
 //! never learns it; this scanner is what feeds the tab's `osc_cwd` and,
 //! through it, `terminal_cwd` (git panel, saved-workspace snapshots).
+//!
+//! Default-color queries (`OSC 10 ; ?` / `OSC 11 ; ?`) are also detected
+//! here because the engine has no default-color concept at all — themes
+//! live in Prmpt's config. TUIs (Codex, fzf, neovim `background`
+//! detection, …) send these to learn the real background so they can
+//! blend their UI shades against it; without a reply they time out and
+//! fall back to a generic 16-color look. The tab loop answers with the
+//! active theme's colors. Each query records whether it was
+//! BEL-terminated so the reply can echo the query's terminator (xterm
+//! convention — some parsers only accept the form they sent).
 
 /// A parsed OSC 9 / OSC 777 notification.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OscNotification {
     pub title: Option<String>,
     pub body: Option<String>,
+}
+
+/// Which default color an `OSC 10;?` / `OSC 11;?` query asks about.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColorQueryKind {
+    Foreground,
+    Background,
+}
+
+/// A default-color query awaiting a reply on the PTY.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ColorQuery {
+    pub kind: ColorQueryKind,
+    /// The query ended with BEL (0x07) rather than ST (ESC \). The reply
+    /// must echo the same terminator.
+    pub bel_terminated: bool,
 }
 
 /// Everything extracted from one PTY chunk.
@@ -32,6 +58,8 @@ pub struct OscScan {
     /// plain path) or OSC 9;9 (path verbatim, quotes stripped). Parsed
     /// only; the caller decides whether the directory exists/applies.
     pub cwd: Option<String>,
+    /// Default fg/bg color queries, in stream order.
+    pub color_queries: Vec<ColorQuery>,
 }
 
 /// Cap on the buffered OSC payload. Anything longer is truncated (we still
@@ -84,7 +112,7 @@ impl OscNotifyScanner {
                 }
                 State::Osc => match b {
                     0x07 => {
-                        self.finalize(&mut out);
+                        self.finalize(&mut out, true);
                         self.state = State::Ground;
                     }
                     0x1b => self.state = State::OscEsc,
@@ -97,7 +125,7 @@ impl OscNotifyScanner {
                 State::OscEsc => match b {
                     // ST (ESC \) terminates the OSC.
                     b'\\' => {
-                        self.finalize(&mut out);
+                        self.finalize(&mut out, false);
                         self.state = State::Ground;
                     }
                     // ESC ] right after an aborting ESC starts a new OSC.
@@ -114,13 +142,25 @@ impl OscNotifyScanner {
         out
     }
 
-    fn finalize(&mut self, out: &mut OscScan) {
+    fn finalize(&mut self, out: &mut OscScan, bel_terminated: bool) {
         let payload = String::from_utf8_lossy(&self.buf).into_owned();
         self.buf.clear();
         let Some((code, rest)) = payload.split_once(';') else {
             return;
         };
         match code {
+            // OSC 10/11 with a `?` payload query the default fg/bg color
+            // (a non-`?` payload would *set* it — unsupported, themes own
+            // the colors here). Multi-parameter queries (`10;?;?`, which
+            // xterm treats as 10 then 11) are rare and ignored.
+            "10" if rest == "?" => out.color_queries.push(ColorQuery {
+                kind: ColorQueryKind::Foreground,
+                bel_terminated,
+            }),
+            "11" if rest == "?" => out.color_queries.push(ColorQuery {
+                kind: ColorQueryKind::Background,
+                bel_terminated,
+            }),
             "9" => match rest.strip_prefix("9;") {
                 // OSC 9 subcommand 9 is ConEmu/Windows Terminal "report
                 // cwd", not a notification. Windows Terminal's canonical
@@ -271,6 +311,40 @@ mod tests {
             s.scan(b"\x1b]9;ok\x07").notifications,
             vec![note(None, Some("ok"))]
         );
+    }
+
+    #[test]
+    fn color_queries_detected_with_terminator() {
+        let mut s = OscNotifyScanner::new();
+        let got = s.scan(b"\x1b]10;?\x07\x1b]11;?\x1b\\");
+        assert_eq!(
+            got.color_queries,
+            vec![
+                ColorQuery {
+                    kind: ColorQueryKind::Foreground,
+                    bel_terminated: true,
+                },
+                ColorQuery {
+                    kind: ColorQueryKind::Background,
+                    bel_terminated: false,
+                },
+            ]
+        );
+        assert!(got.notifications.is_empty());
+        assert_eq!(got.cwd, None);
+    }
+
+    #[test]
+    fn color_set_and_other_codes_are_not_queries() {
+        let mut s = OscNotifyScanner::new();
+        // Setting a color (non-`?` payload), cursor color query (OSC 12),
+        // and notifications must not produce color queries.
+        assert!(s
+            .scan(b"\x1b]11;rgb:1e1e/2e2e/3e3e\x07")
+            .color_queries
+            .is_empty());
+        assert!(s.scan(b"\x1b]12;?\x07").color_queries.is_empty());
+        assert!(s.scan(b"\x1b]9;hi\x07").color_queries.is_empty());
     }
 
     #[test]
