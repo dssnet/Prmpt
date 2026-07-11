@@ -187,11 +187,11 @@ function pointInTabBar(cx: number, cy: number): boolean {
 // changes, so the .tab-move animation doesn't thrash on every mousemove.
 let lastReorderBeforeId: number | null | undefined = undefined;
 
-// The carried tab's left edge, clamped to the strip. The strip container
-// clips overflowing children (overflow-hidden), so an unclamped tab would
-// slide under the home button / overflow dropdown on the left or the +
-// button on the right and get cut off — instead it stops flush at the
-// first/last slot while the cursor keeps going.
+// The carried tab's left edge, clamped to the strip. The strip no longer
+// clips (the enter/move overshoot needs to paint past the edges), so the
+// clamp is what keeps a dragged tab from sliding over the home button /
+// overflow dropdown on the left or the + button on the right — it stops
+// flush at the first/last slot while the cursor keeps going.
 function clampedDragLeft(): number {
   if (!drag) return pointerX;
   const left = pointerX - drag.grabOffsetX;
@@ -202,18 +202,40 @@ function clampedDragLeft(): number {
   return Math.min(Math.max(left, r.left), max);
 }
 
+// Pushing past a strip end doesn't stop dead: the tab rubber-bands a few px
+// past the clamp (asymptotic, capped at EDGE_MAX_OVER) and an underdamped
+// spring animates that overshoot, so slamming into the edge bounces a touch
+// and letting the cursor back in springs the tab back flush. Purely visual —
+// reorder logic keeps using the hard-clamped position.
+const EDGE_MAX_OVER = 14; // px the tab can be pushed past the strip end
+const EDGE_GIVE = 0.5; // follow ratio just past the edge (1 = sticks to cursor)
+const EDGE_STIFFNESS = 2400; // spring k (1/s²) — stiff enough to feel instant
+const EDGE_DAMPING = 44; // ζ ≈ 0.45 → a small visible bounce
+let edgeOver = 0;
+let edgeVel = 0;
+let lastFrameTs = 0;
+
 // Glue the picked-up tab under the cursor every frame. It keeps its own DOM
 // node (keyed by id) as the array reorders, so we just translate it from
 // wherever the layout put it to where the cursor is holding it.
-function dragFrame(): void {
+function dragFrame(ts: number): void {
   if (!drag || !drag.active || !pinnedEl) return;
   const el = pinnedEl;
   if (el.isConnected) {
     const target = clampedDragLeft();
+    const excess = pointerX - drag.grabOffsetX - target; // signed px past the end
+    // tanh: near-linear give at first (EDGE_GIVE of cursor speed), then walls
+    // hard at EDGE_MAX_OVER — soft contact, stiff limit.
+    const want =
+      Math.tanh((excess * EDGE_GIVE) / EDGE_MAX_OVER) * EDGE_MAX_OVER;
+    const dt = lastFrameTs ? Math.min((ts - lastFrameTs) / 1000, 1 / 30) : 1 / 60;
+    edgeVel += (EDGE_STIFFNESS * (want - edgeOver) - EDGE_DAMPING * edgeVel) * dt;
+    edgeOver += edgeVel * dt;
     el.style.transform = "";
     const left = el.getBoundingClientRect().left;
-    el.style.transform = `translateX(${Math.round(target - left)}px)`;
+    el.style.transform = `translateX(${Math.round(target + edgeOver - left)}px)`;
   }
+  lastFrameTs = ts;
   rafId = requestAnimationFrame(dragFrame);
 }
 
@@ -223,6 +245,9 @@ function startPin(): void {
   pinnedEl = drag.el;
   pinnedEl.classList.remove("tab-settle");
   pinnedEl.classList.add("tab-dragging");
+  edgeOver = 0;
+  edgeVel = 0;
+  lastFrameTs = 0;
   rafId = requestAnimationFrame(dragFrame);
 }
 
@@ -837,7 +862,7 @@ function onWindowResize(): void {
     </div>
     <div
       v-if="visibleTabs.length > 0"
-      class="flex-initial min-w-0 overflow-hidden"
+      class="flex-initial min-w-0"
     >
       <TransitionGroup
         ref="stripEl"
