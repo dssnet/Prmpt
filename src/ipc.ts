@@ -458,16 +458,30 @@ export async function openNewWindow(): Promise<void> {
 }
 
 /** Like `openNewWindow`, but the surfaced window opens a frontend panel
- *  (file browser / git) instead of a terminal — for dragging a + menu
- *  option out into its own window. */
-export async function openPanelWindow(kind: "files" | "git"): Promise<void> {
-  await invoke("open_panel_window", { kind });
+ *  (file browser / git) instead of a terminal — for dragging a + menu option
+ *  out into its own window (no `desc`: a fresh, unseeded panel) or tearing a
+ *  panel pane off into its own window (`desc`/`title`: its live seeds +
+ *  title, passed through the backend opaquely). */
+export async function openPanelWindow(
+  kind: "files" | "git",
+  desc?: unknown,
+  title?: string,
+): Promise<void> {
+  await invoke("open_panel_window", {
+    kind,
+    desc: desc ?? null,
+    title: title ?? null,
+  });
 }
 
 /** Payload for `window:activate-blank`. `panel` (when set) asks the surfaced
- *  window to open that panel kind instead of spawning a terminal. */
+ *  window to open that panel kind instead of spawning a terminal;
+ *  `panel_desc`/`panel_title` carry a torn-off panel's seeds + live title
+ *  (see `openPanelWindow`). */
 export interface ActivateBlankPayload {
   panel?: "files" | "git" | null;
+  panel_desc?: import("./state/panels").PanelDesc | null;
+  panel_title?: string | null;
 }
 
 /** Fires on a reserve when it's been popped for a blank activation
@@ -487,6 +501,26 @@ export async function windowAtScreenPoint(
   exclude: string,
 ): Promise<string | null> {
   return await invoke<string | null>("window_at_screen_point", { x, y, exclude });
+}
+
+/** One attachable window for a cross-window tab drag (see `state/drag.ts`):
+ *  outer bounds for cursor hit-testing plus the content (webview client area)
+ *  origin, all in logical screen coordinates. `screen − content_*` converts a
+ *  screen point into that window's client coordinates. */
+export interface DragTargetInfo {
+  label: string;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  content_x: number;
+  content_y: number;
+}
+
+/** Every window a tab drag could hover/drop onto, most-recently-focused
+ *  first (the backend's z-order approximation for overlapping windows). */
+export async function windowDragTargets(exclude: string): Promise<DragTargetInfo[]> {
+  return await invoke<DragTargetInfo[]>("window_drag_targets", { exclude });
 }
 
 export function onTabAttached(

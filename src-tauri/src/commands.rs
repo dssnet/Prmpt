@@ -432,10 +432,18 @@ pub fn open_new_window(app: AppHandle) -> AppResult<()> {
 
 /// Like `open_new_window`, but the surfaced window opens a frontend panel
 /// (file browser / git) instead of a terminal. Entry point for dragging a
-/// + menu option out of the window. `kind` is a `PanelKind` ("files"/"git").
+/// + menu option out of the window (`desc`/`title` absent — a fresh panel)
+/// and for tearing a panel pane off into its own window (`desc`/`title`
+/// carry the pane's live seeds + title, opaque to the backend). `kind` is a
+/// `PanelKind` ("files"/"git").
 #[tauri::command]
-pub fn open_panel_window(app: AppHandle, kind: String) -> AppResult<()> {
-    activate_blank_window(&app, Some(kind));
+pub fn open_panel_window(
+    app: AppHandle,
+    kind: String,
+    desc: Option<serde_json::Value>,
+    title: Option<String>,
+) -> AppResult<()> {
+    activate_blank_window(&app, Some(crate::PanelSpawn { kind, desc, title }));
     Ok(())
 }
 
@@ -577,6 +585,72 @@ pub fn window_at_screen_point(
         }
     }
     None
+}
+
+/// One attachable window for a cross-window tab drag: its outer bounds (for
+/// hit-testing the cursor) and the top-left of its *content* (webview client
+/// area), all in logical screen coordinates. Subtracting the content origin
+/// from a screen point yields the target webview's client coordinates — what
+/// its drop-preview code (tab-bar hit test, `resolveDropAt`) works in.
+#[derive(serde::Serialize)]
+pub struct DragTargetInfo {
+    pub label: String,
+    pub x: f64,
+    pub y: f64,
+    pub w: f64,
+    pub h: f64,
+    pub content_x: f64,
+    pub content_y: f64,
+}
+
+/// Every window a tab drag could hover/drop onto, ordered most-recently-
+/// focused first (`FOCUS_ORDER` — the closest thing to z-order Tauri gives
+/// us, so the frontend's first rect hit is the window the user actually
+/// sees under the cursor when windows overlap). Fetched once at drag start;
+/// the same reserve/visibility filters as `window_at_screen_point` apply.
+#[tauri::command]
+pub fn window_drag_targets(
+    app: AppHandle,
+    pool: State<'_, SharedWindowPool>,
+    exclude: String,
+) -> Vec<DragTargetInfo> {
+    let order = crate::FOCUS_ORDER.lock().clone();
+    let rank =
+        |label: &str| order.iter().position(|l| l == label).unwrap_or(usize::MAX);
+    let mut out: Vec<DragTargetInfo> = Vec::new();
+    for (label, window) in app.webview_windows() {
+        if label == exclude {
+            continue;
+        }
+        if pool.mode_for(&label) == WindowMode::Reserve {
+            continue;
+        }
+        if !window.is_visible().unwrap_or(false) || window.is_minimized().unwrap_or(false) {
+            continue;
+        }
+        let scale = window.scale_factor().unwrap_or(1.0);
+        let (Ok(pos), Ok(size), Ok(content)) = (
+            window.outer_position(),
+            window.outer_size(),
+            window.inner_position(),
+        ) else {
+            continue;
+        };
+        let pos: LogicalPosition<f64> = pos.to_logical(scale);
+        let size: LogicalSize<f64> = size.to_logical(scale);
+        let content: LogicalPosition<f64> = content.to_logical(scale);
+        out.push(DragTargetInfo {
+            label,
+            x: pos.x,
+            y: pos.y,
+            w: size.width,
+            h: size.height,
+            content_x: content.x,
+            content_y: content.y,
+        });
+    }
+    out.sort_by_key(|t| rank(&t.label));
+    out
 }
 
 // ---------- SSH unlock + connect ----------

@@ -35,7 +35,6 @@ import {
   getWorkspace,
   isPanelLeaf,
   layout as layoutWorkspace,
-  markTabConsumed,
   setRatio,
   setWorkspace,
   GUTTER,
@@ -977,9 +976,9 @@ export interface DropResolution {
   highlight: { x: number; y: number; w: number; h: number };
 }
 
-/** Live drop-zone highlight, set while a tab is dragged over the terminal.
- *  Rendered by TerminalView; driven by the tab's drag/dragend source events
- *  (reliable in WKWebView) plus the native dragover/drop path when available. */
+/** Live drop-zone highlight, set while a tab/pane drag hovers the terminal.
+ *  Rendered by TerminalView; driven by the mouse-driven drags in state/drag
+ *  (local moves via `dragAffordances`, foreign hovers via the xdrag events). */
 export const wsDragPreview = ref<{
   x: number;
   y: number;
@@ -1103,9 +1102,7 @@ export function commitWorkspaceDrop(
     res.dir,
     res.placeDraggedFirst,
   );
-  if (slot == null) return false;
-  markTabConsumed();
-  return true;
+  return slot != null;
 }
 
 /** Like `commitWorkspaceDrop`, but drops a *new* panel (file browser / git)
@@ -1120,15 +1117,13 @@ export function commitPanelWorkspaceDrop(
   wsDragPreview.value = null;
   if (!res) return false;
   const slot = dropPanelIntoTarget(
-    kind,
+    { kind },
     res.slotId,
     res.targetPaneTabId,
     res.dir,
     res.placeDraggedFirst,
   );
-  if (slot == null) return false;
-  markTabConsumed();
-  return true;
+  return slot != null;
 }
 
 /** Commit a divider drag: pointer position → new ratio for `splitId`. */

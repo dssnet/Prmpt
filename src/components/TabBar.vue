@@ -23,7 +23,6 @@ import {
   type TabState,
 } from "../state/tabs";
 import type { PanelKind } from "../state/panels";
-import { openPanelWindow } from "../ipc";
 import { requestCloseTab } from "../state/closeGuard";
 import { bellTabs } from "../state/notifications";
 import { popupMenu } from "../contextMenu";
@@ -38,22 +37,30 @@ import { Button, ConfirmDialog, Input, Modal } from "./ui";
 import {
   collectLeaves,
   getWorkspace,
-  resetTabConsumed,
   workspaceTick,
 } from "../state/workspace";
 import NotificationCenter from "./NotificationCenter.vue";
 import UpdateIcon from "./UpdateIcon.vue";
 import {
-  clearWorkspaceDragPreview,
   commitPanelWorkspaceDrop,
   commitWorkspaceDrop,
   pointOverTerminal,
-  updateWorkspaceDragPreview,
 } from "../state/terminal";
+import {
+  barInsertPoint,
+  beginCrossDrag,
+  clearDragAffordances,
+  DRAG_START_PX,
+  dragAffordances,
+  dropNewPanelOut,
+  dropTabOut,
+  endCrossDrag,
+  moveCrossDrag,
+  registerBarDropResolver,
+  shouldLeaveWindow,
+  unregisterBarDropResolver,
+} from "../state/drag";
 
-const props = defineProps<{
-  onDragOut?: (tabId: number, screenX: number, screenY: number) => void;
-}>();
 const emit = defineEmits<{
   requestNewTab: [];
   newTabWorkspace: [clientX: number, clientY: number];
@@ -120,9 +127,9 @@ function onMiddleClose(t: TabState): void {
 // not reliably deliver dragover/drag coordinates for in-page drags, so the
 // live workspace preview needs real mousemove positions. Tear-off still works
 // because mouse events keep flowing to this window while the button is held,
-// even over other windows (implicit capture).
-const DRAG_OUT_THRESHOLD = 200; // screen px before a release tears off
-const DRAG_START_PX = 5; // travel before a press becomes a drag
+// even over other windows (implicit capture). The shared affordances (ghost,
+// split highlight, cross-window hover) live in state/drag; only the in-strip
+// carry/reorder physics below are tab-bar specific.
 
 interface DragState {
   tabId: number;
@@ -141,7 +148,6 @@ interface DragState {
   width: number;
 }
 let drag: DragState | null = null;
-const ghost = ref<{ x: number; y: number; label: string } | null>(null);
 let suppressClickUntil = 0;
 let pointerX = 0;
 // Last horizontal drag direction — picks which edge of the carried tab is the
@@ -352,12 +358,14 @@ function onDragMove(e: MouseEvent): void {
     const dy = e.screenY - drag.startScreenY;
     if (dx * dx + dy * dy < DRAG_START_PX * DRAG_START_PX) return;
     drag.active = true;
-    resetTabConsumed();
+    // Arm cross-window hover (fetches the other windows' rects once).
+    // noTearOff tabs can't cross windows, so they never arm it.
+    if (!drag.noTearOff) void beginCrossDrag(drag.label);
   }
   // Inside the bar: carry the tab under the cursor and reorder live.
   if (pointInTabBar(e.clientX, e.clientY)) {
-    ghost.value = null;
-    clearWorkspaceDragPreview();
+    clearDragAffordances();
+    moveCrossDrag(e.screenX, e.screenY, true);
     startPin();
     applyLiveReorder();
     return;
@@ -367,9 +375,9 @@ function onDragMove(e: MouseEvent): void {
   // slot guard so re-entering the bar recomputes from scratch.
   stopPin(true);
   lastReorderBeforeId = undefined;
-  // Outside the bar: original ghost + workspace-drop affordance.
-  ghost.value = { x: e.clientX, y: e.clientY, label: drag.label };
-  updateWorkspaceDragPreview(e.clientX, e.clientY, drag.tabId);
+  // Outside the bar: ghost + drop affordances here and, over another Prmpt
+  // window, forwarded there.
+  dragAffordances(e, { label: drag.label, draggedId: drag.tabId });
 }
 
 function onDragUp(e: MouseEvent): void {
@@ -379,26 +387,31 @@ function onDragUp(e: MouseEvent): void {
   const inBar = !!d && pointInTabBar(e.clientX, e.clientY);
   stopPin(inBar); // settle into the slot if dropped in the bar
   drag = null;
-  ghost.value = null;
-  clearWorkspaceDragPreview();
+  clearDragAffordances();
   if (!d || !d.active) return; // never moved → it was a click
   // Swallow the click that follows this drag so it doesn't also switch tabs.
   suppressClickUntil = performance.now() + 300;
 
   // Released inside the bar → it was a reorder, already applied live.
-  if (inBar) return;
+  if (inBar) {
+    endCrossDrag();
+    return;
+  }
 
   // Released over this window's terminal area → workspace split/merge.
   if (pointOverTerminal(e.clientX, e.clientY)) {
+    endCrossDrag();
     commitWorkspaceDrop(d.tabId, e.clientX, e.clientY);
     return;
   }
-  // Otherwise, far enough → tear off into a new / other window.
+  // Otherwise → leave the window: attach to the one under the cursor, or
+  // tear off past the threshold. dropTabOut ends the cross-drag state.
   if (d.noTearOff) return; // multi-pane trees can't cross windows yet
-  const dx = e.screenX - d.startScreenX;
-  const dy = e.screenY - d.startScreenY;
-  if (dx * dx + dy * dy < DRAG_OUT_THRESHOLD * DRAG_OUT_THRESHOLD) return;
-  props.onDragOut?.(d.tabId, e.screenX, e.screenY);
+  if (!shouldLeaveWindow(e, d.startScreenX, d.startScreenY)) {
+    endCrossDrag();
+    return;
+  }
+  void dropTabOut(d.tabId, e.screenX, e.screenY);
 }
 
 // The + button (and the panel options in its right-click menu) share the tabs'
@@ -443,17 +456,19 @@ function onSpawnMove(e: MouseEvent): void {
     const dy = e.screenY - spawnDrag.startScreenY;
     if (dx * dx + dy * dy < DRAG_START_PX * DRAG_START_PX) return;
     spawnDrag.active = true;
-    resetTabConsumed();
+    // Everything the + button spawns can land in another window (terminals
+    // via the tab tear-off/attach path, panels by value), so always arm
+    // cross-window hover.
+    void beginCrossDrag(SPAWN_LABEL[spawnDrag.kind]);
   }
   // Inside the bar: no affordance — releasing here is just "new tab".
   if (pointInTabBar(e.clientX, e.clientY)) {
-    ghost.value = null;
-    clearWorkspaceDragPreview();
+    clearDragAffordances();
+    moveCrossDrag(e.screenX, e.screenY, true);
     return;
   }
-  // Outside the bar: ghost + the same workspace drop highlight tabs show.
-  ghost.value = { x: e.clientX, y: e.clientY, label: SPAWN_LABEL[spawnDrag.kind] };
-  updateWorkspaceDragPreview(e.clientX, e.clientY);
+  // Outside the bar: same ghost + drop affordances tabs show.
+  dragAffordances(e, { label: SPAWN_LABEL[spawnDrag.kind] });
 }
 
 function onSpawnUp(e: MouseEvent): void {
@@ -461,38 +476,90 @@ function onSpawnUp(e: MouseEvent): void {
   window.removeEventListener("mouseup", onSpawnUp);
   const d = spawnDrag;
   spawnDrag = null;
-  ghost.value = null;
-  clearWorkspaceDragPreview();
+  clearDragAffordances();
   if (!d) return;
   const kind = d.kind;
   // Never moved (or dropped back in the bar) → a plain new tab of this kind.
   if (!d.active || pointInTabBar(e.clientX, e.clientY)) {
+    endCrossDrag();
     spawnNewTabHere(kind);
     return;
   }
   // Over this window's terminal → split into the workspace there. Terminals go
   // through App (it spawns the backend shell); panels open directly.
   if (pointOverTerminal(e.clientX, e.clientY)) {
+    endCrossDrag();
     if (kind === "terminal") emit("newTabWorkspace", e.clientX, e.clientY);
     else commitPanelWorkspaceDrop(kind, e.clientX, e.clientY);
     return;
   }
-  // Far enough out → open in a new / other window.
-  const dx = e.screenX - d.startScreenX;
-  const dy = e.screenY - d.startScreenY;
-  if (dx * dx + dy * dy >= DRAG_OUT_THRESHOLD * DRAG_OUT_THRESHOLD) {
-    if (kind === "terminal") emit("newTabWindow", e.screenX, e.screenY);
-    else void openPanelWindow(kind);
+  // Leaving the window (over another Prmpt window, or far enough out for a
+  // new one) → open there.
+  if (shouldLeaveWindow(e, d.startScreenX, d.startScreenY)) {
+    if (kind === "terminal") {
+      // App spawns the shell, then hands it to the shared dropTabOut.
+      emit("newTabWindow", e.screenX, e.screenY);
+    } else {
+      dropNewPanelOut(kind, e.screenX, e.screenY);
+    }
     return;
   }
   // Small drag that left the bar but landed nowhere meaningful → new tab.
+  endCrossDrag();
   spawnNewTabHere(kind);
 }
 
 function spawnNewTabHere(kind: SpawnKind): void {
   if (kind === "terminal") emit("requestNewTab");
-  else openPanelTab(kind);
+  else openPanelTab({ kind });
 }
+
+// ---- Bar drops from outside the strip ---------------------------------------
+// Two drags can land in the bar without having started there: a tab dragged
+// over from another window (state/drag.ts forwards its cursor here) and a
+// pane dragged off the active workspace (TerminalView, detaching into its
+// own tab). Both feed `barInsertPoint`; this side renders the slot insertion
+// indicator and the registered resolver places the actual drop.
+
+/** The slot a bar drop at x would insert before (null = append) — same
+ *  half-over rule as local reorders, minus the carried-width offset. */
+function barDropBeforeId(x: number): number | null {
+  for (const { id, el } of visibleTabEls()) {
+    const r = el.getBoundingClientRect();
+    if (x < r.left + r.width / 2) return id;
+  }
+  return null;
+}
+
+function barDropResolver(
+  x: number,
+  y: number,
+): { beforeId: number | null } | null {
+  if (!pointInTabBar(x, y)) return null;
+  return { beforeId: barDropBeforeId(x) };
+}
+
+const BAR_INDICATOR_H = 18;
+const barIndicator = computed<{ left: number; top: number } | null>(() => {
+  const f = barInsertPoint.value;
+  if (!f || !pointInTabBar(f.x, f.y)) return null;
+  const bar = outerEl.value?.getBoundingClientRect();
+  if (!bar) return null;
+  const els = visibleTabEls();
+  let left: number;
+  if (els.length === 0) {
+    // Empty strip: where the first tab would land, right after home.
+    left = bar.left + OUTER_PX / 2 + HOME_W + GAP / 2;
+  } else {
+    const beforeId = barDropBeforeId(f.x);
+    const el =
+      beforeId != null ? els.find((t) => t.id === beforeId)?.el : undefined;
+    left = el
+      ? el.getBoundingClientRect().left - GAP / 2
+      : els[els.length - 1].el.getBoundingClientRect().right + GAP / 2;
+  }
+  return { left, top: bar.top + (bar.height - BAR_INDICATOR_H) / 2 };
+});
 
 // Right-clicking the + opens a small inline menu of the *other* new-pane kinds
 // (left-click / left-drag default to a terminal). Its rows are draggable just
@@ -695,6 +762,7 @@ onMounted(() => {
   document.addEventListener("mousedown", onDocMouseDown);
   document.addEventListener("keydown", onKeyDown);
   window.addEventListener("resize", onWindowResize);
+  registerBarDropResolver(barDropResolver);
 });
 
 onBeforeUnmount(() => {
@@ -702,6 +770,7 @@ onBeforeUnmount(() => {
   document.removeEventListener("mousedown", onDocMouseDown);
   document.removeEventListener("keydown", onKeyDown);
   window.removeEventListener("resize", onWindowResize);
+  unregisterBarDropResolver(barDropResolver);
 });
 
 watch(overflowTabs, (n) => {
@@ -971,14 +1040,19 @@ function onWindowResize(): void {
       <NotificationCenter />
     </div>
   </div>
+  <!-- Slot insertion indicator for any bar-droppable drag (foreign tab or
+       local pane detach) hovering the strip. The ghost pill itself is the
+       shared DragGhost, rendered from App.vue. -->
   <Teleport to="body">
     <div
-      v-if="ghost"
-      class="tab-drag-ghost"
-      :style="{ left: `${ghost.x + 12}px`, top: `${ghost.y + 12}px` }"
-    >
-      {{ ghost.label }}
-    </div>
+      v-if="barIndicator"
+      class="xdrag-indicator"
+      :style="{
+        left: `${barIndicator.left - 1}px`,
+        top: `${barIndicator.top}px`,
+        height: `${BAR_INDICATOR_H}px`,
+      }"
+    />
   </Teleport>
   <Modal v-if="saveDialogOpen">
     <form
@@ -1018,22 +1092,15 @@ function onWindowResize(): void {
 </template>
 
 <style scoped>
-.tab-drag-ghost {
+/* Insertion slot for a bar-droppable drag (foreign tab / pane detach). */
+.xdrag-indicator {
   position: fixed;
-  z-index: 9999;
+  z-index: 9998;
+  width: 2px;
+  border-radius: 1px;
   pointer-events: none;
-  max-width: 220px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  padding: 3px 10px;
-  font-size: 12px;
-  border-radius: 9999px;
-  color: var(--fg, #e6e6e6);
-  background: var(--surface-3, #333);
-  border: 1px solid var(--border-strong, rgba(255, 255, 255, 0.2));
-  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.4);
-  opacity: 0.92;
+  background: var(--accent, #89b4fa);
+  box-shadow: 0 0 6px var(--accent, #89b4fa);
 }
 </style>
 

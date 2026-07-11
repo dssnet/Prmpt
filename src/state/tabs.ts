@@ -356,10 +356,12 @@ export function openSftpOnlyHost(hostId: number, label: string): void {
 /** Open a panel (file browser / git) as its own tab in the tab bar — a
  *  panel-only workspace with no terminal pane, like `openSftpOnlyHost` but for
  *  local-seeded panels. The single panel pane is self-contained (it picks its
- *  own source/folder); closing it collapses the whole tab. */
-export function openPanelTab(kind: PanelKind): void {
+ *  own source/folder); closing it collapses the whole tab. `desc`/`title`
+ *  carry a moved panel's seeds + live title (cross-window drops); a fresh
+ *  panel passes just `{ kind }`. Returns the new tab's slot id. */
+export function openPanelTab(desc: PanelDesc, title?: string): number {
   const slotId = allocPanelLeafId();
-  const leaf = makePanelLeaf({ kind });
+  const leaf = makePanelLeaf(desc, title);
   const t: TabState = {
     id: slotId,
     kind: "workspace",
@@ -368,6 +370,7 @@ export function openPanelTab(kind: PanelKind): void {
   tabs.value.push(t);
   setWorkspace(slotId, { root: leaf, focusedTabId: leaf.tabId });
   activeId.value = slotId;
+  return slotId;
 }
 
 /** Register a fully-built workspace tree (its backends already spawned) as a
@@ -464,23 +467,25 @@ export function dropTabIntoTarget(
   return targetSlotId;
 }
 
-/** Drop a *new* panel (file browser / git) onto a pane in the target
- *  workspace, splitting the hit pane — the panel-spawning counterpart of
- *  `dropTabIntoTarget` (used when a + menu option is dragged onto a terminal).
- *  The panel is self-contained, so it opens unseeded. Returns the target slot
- *  id, or null if the drop wasn't a usable workspace target. */
+/** Drop a panel (file browser / git) onto a pane in the target workspace,
+ *  splitting the hit pane — the panel-spawning counterpart of
+ *  `dropTabIntoTarget`. Used when a + menu option is dragged onto a terminal
+ *  (`desc` is just `{ kind }`, an unseeded fresh panel) and when a panel pane
+ *  arrives from another window (`desc`/`title` carry its seeds + live title).
+ *  Returns the target slot id, or null if the drop wasn't a usable target. */
 export function dropPanelIntoTarget(
-  kind: PanelKind,
+  desc: PanelDesc,
   targetSlotId: number,
   targetPaneTabId: number,
   dir: SplitDir,
   placeDraggedFirst: boolean,
+  title?: string,
 ): number | null {
   const target = findTab(targetSlotId);
   if (!target || target.kind !== "workspace") return null;
   const tws = getWorkspace(targetSlotId);
   if (!tws) return null;
-  const leaf = makePanelLeaf({ kind });
+  const leaf = makePanelLeaf(desc, title);
   const root = splitLeaf(
     tws.root,
     targetPaneTabId,
@@ -630,13 +635,14 @@ export function moveWorkspaceLeaf(
  *  becomes a self-standing, PTY-less workspace you can split terminals or more
  *  panels into — the same shape the SFTP-only connection workspace already has.
  *  Detaching the slot's primary pane (tabId == slotId) or the only pane is a
- *  no-op for now (cross-tab moves are a later phase). */
-export function detachWorkspaceLeaf(slotId: number, tabId: number): void {
+ *  no-op for now (cross-tab moves are a later phase). Returns the new tab's
+ *  slot id, or null when the detach was a no-op. */
+export function detachWorkspaceLeaf(slotId: number, tabId: number): number | null {
   const ws = getWorkspace(slotId);
-  if (!ws) return;
+  if (!ws) return null;
   const leaf = findLeafByTabId(ws.root, tabId);
-  if (!leaf) return;
-  if (collectLeaves(ws.root).length <= 1) return;
+  if (!leaf) return null;
+  if (collectLeaves(ws.root).length <= 1) return null;
   const origin = leaf.origin;
   applyWorkspaceRemoval(slotId, tabId, removeLeaf(ws.root, tabId));
   const t: TabState = {
@@ -650,6 +656,7 @@ export function detachWorkspaceLeaf(slotId: number, tabId: number): void {
   tabs.value.push(t);
   setWorkspace(t.id, { root: makeLeaf(tabId, origin), focusedTabId: tabId });
   activeId.value = t.id;
+  return t.id;
 }
 
 /** Close a single pane (its backend PTY). The exit event then prunes the
@@ -727,12 +734,37 @@ export function attachTab(info: TabHydrateInfo): void {
 // in place (same slot id, same collapse-back-to-tab behavior when it closes).
 // One pane of each kind per workspace; the toggle closes an existing one.
 
-function makePanelLeaf(desc: PanelDesc): LeafNode {
+function makePanelLeaf(desc: PanelDesc, title?: string): LeafNode {
   return makeLeaf(allocPanelLeafId(), {
     kind: "panel",
-    title: panelTitle(desc),
+    title: title || panelTitle(desc),
     panel: desc,
   });
+}
+
+/** The leaf id of a panel-only tab's single pane, or null when the tab is
+ *  multi-pane or terminal-backed — the panel counterpart of
+ *  `soleTerminalBackendId`, for whole-tab moves. */
+export function solePanelLeafId(slotId: number): number | null {
+  const ws = getWorkspace(slotId);
+  if (!ws) return null;
+  const leaves = collectLeaves(ws.root);
+  if (leaves.length !== 1 || !isPanelLeaf(leaves[0])) return null;
+  return leaves[0].tabId;
+}
+
+/** Snapshot a panel pane for a cross-window move: its `PanelDesc` seeds
+ *  (copied — the source leaf is about to be closed) and live title. Panels
+ *  persist their current folder back onto the seed (`setPanelLeafSeedPath`),
+ *  so recreating from this snapshot reopens the panel where it was. */
+export function panelLeafSnapshot(
+  slotId: number,
+  leafId: number,
+): { desc: PanelDesc; title: string } | null {
+  const ws = getWorkspace(slotId);
+  const leaf = ws ? findLeafByTabId(ws.root, leafId) : null;
+  if (!leaf || !leaf.origin.panel) return null;
+  return { desc: { ...leaf.origin.panel }, title: leaf.origin.title };
 }
 
 /** Close a panel pane; the workspace closes entirely when its last pane goes.
@@ -900,6 +932,21 @@ export async function openPanelOnActive(kind: PanelKind): Promise<void> {
     termId = ws.focusedTabId;
   }
   await openPanelFromTerminal(kind, termId);
+}
+
+/** Local-only removal of a single pane — its backend still exists, it has
+ *  just moved to another window (cross-window pane drag). The `removeTabLocal`
+ *  counterpart at leaf granularity: prune the leaf and its per-leaf state
+ *  without touching the backend. Callers must guarantee the workspace keeps
+ *  at least one other pane — on an emptied tree `applyWorkspaceRemoval` would
+ *  close the whole tab, which closes remaining backends by id and could reap
+ *  the very pane that just moved. */
+export function removeWorkspaceLeafLocal(slotId: number, tabId: number): void {
+  const ws = getWorkspace(slotId);
+  if (!ws) return;
+  snapshots.delete(tabId);
+  sshReconnecting.delete(tabId);
+  applyWorkspaceRemoval(slotId, tabId, removeLeaf(ws.root, tabId));
 }
 
 /** Local-only removal — the tab's backends still exist, they have just moved

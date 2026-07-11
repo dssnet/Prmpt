@@ -65,6 +65,13 @@ impl WindowCounter {
 /// The no-windows-left auto-exit is `prevent_exit`'d, so it never sets this.
 pub static SHUTTING_DOWN: AtomicBool = AtomicBool::new(false);
 
+/// Window labels ordered most-recently-focused first, maintained by the
+/// per-window Focused/Destroyed handlers in `configure_new_window`. Tauri
+/// exposes no real z-order, so this is the tie-breaker when a screen point
+/// falls inside several overlapping windows (cross-window tab-drag hover
+/// and drop hit-testing in `window_drag_targets`).
+pub static FOCUS_ORDER: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
 /// Tab IDs queued for hydration into a window that hasn't yet booted
 /// its frontend. The frontend drains its entry via
 /// `list_tabs_for_window` on init.
@@ -249,6 +256,7 @@ pub fn run() {
             commands::open_new_window,
             commands::open_panel_window,
             commands::window_at_screen_point,
+            commands::window_drag_targets,
             commands::get_stronghold_unlock,
             commands::get_db_url,
             commands::connect_ssh_host,
@@ -408,11 +416,24 @@ pub fn run() {
 
 /// Payload for `window:activate-blank`. `panel` names a frontend panel kind
 /// ("files" / "git") the freshly-surfaced window should open instead of a
-/// terminal — set when the window was born from a dragged-out + menu option.
-/// `None` (the common dock-click / Cmd+N path) means "spawn a terminal".
+/// terminal — set when the window was born from a dragged-out + menu option
+/// or a panel pane torn off into its own window. `panel_desc`/`panel_title`
+/// (opaque to the backend — the frontend's `PanelDesc` seeds + display title)
+/// carry a torn-off panel's state so it reopens where it was. `None` (the
+/// common dock-click / Cmd+N path) means "spawn a terminal".
 #[derive(Clone, serde::Serialize)]
 struct ActivateBlankPayload {
     panel: Option<String>,
+    panel_desc: Option<serde_json::Value>,
+    panel_title: Option<String>,
+}
+
+/// A panel the surfaced window should open instead of a terminal: its kind
+/// plus the frontend-opaque seeds/title (see `ActivateBlankPayload`).
+pub(crate) struct PanelSpawn {
+    pub kind: String,
+    pub desc: Option<serde_json::Value>,
+    pub title: Option<String>,
 }
 
 /// Pop a Ready reserve and surface it as a blank new window, or fall back
@@ -421,14 +442,26 @@ struct ActivateBlankPayload {
 /// asks the surfaced window to open a panel (file browser / git) rather than
 /// a terminal; it only flows through the reserve path (the fresh-build
 /// fallback prespawns a terminal and ignores it — a rare cold-pool case).
-pub(crate) fn activate_blank_window(app: &AppHandle, panel: Option<String>) {
+pub(crate) fn activate_blank_window(app: &AppHandle, panel: Option<PanelSpawn>) {
     let pool = app.state::<SharedWindowPool>();
     if let Some(label) = pool.pop_for_blank() {
         if let Some(window) = app.get_webview_window(&label) {
+            let payload = match panel {
+                Some(p) => ActivateBlankPayload {
+                    panel: Some(p.kind),
+                    panel_desc: p.desc,
+                    panel_title: p.title,
+                },
+                None => ActivateBlankPayload {
+                    panel: None,
+                    panel_desc: None,
+                    panel_title: None,
+                },
+            };
             let _ = app.emit_to(
                 EventTarget::webview_window(&label),
                 "window:activate-blank",
-                ActivateBlankPayload { panel },
+                payload,
             );
             let _ = window.show();
             let _ = window.set_focus();
@@ -660,7 +693,13 @@ pub fn configure_new_window<R: Runtime>(window: &WebviewWindow<R>) {
     let label = window.label().to_string();
     let app = window.app_handle().clone();
     window.on_window_event(move |event| {
+        if matches!(event, WindowEvent::Focused(true)) {
+            let mut order = FOCUS_ORDER.lock();
+            order.retain(|l| l != &label);
+            order.insert(0, label.clone());
+        }
         if matches!(event, WindowEvent::Destroyed) {
+            FOCUS_ORDER.lock().retain(|l| l != &label);
             let registry = app.state::<tab::SharedRegistry>();
             for tab_id in registry.tabs_in_window(&label) {
                 let _ = registry.close(tab_id);

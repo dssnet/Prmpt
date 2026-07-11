@@ -307,14 +307,14 @@ function rootCommands(): Command[] {
       section: "Panels",
       icon: FolderTree,
       keywords: "sftp folder directory",
-      perform: () => openPanelTab("files"),
+      perform: () => void openPanelTab({ kind: "files" }),
     },
     {
       id: "panel.git.tab",
       title: "Open Git Panel in New Tab",
       section: "Panels",
       icon: GitBranch,
-      perform: () => openPanelTab("git"),
+      perform: () => void openPanelTab({ kind: "git" }),
     },
     // Panels — in their own window
     {

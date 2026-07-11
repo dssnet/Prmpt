@@ -26,8 +26,6 @@ import {
   onMouseUp,
   mouseReportActive,
   pointerCell,
-  clearWorkspaceDragPreview,
-  commitWorkspaceDrop,
   getActivePanes,
   getActivePanelPanes,
   pointOverTerminal,
@@ -35,7 +33,6 @@ import {
   requestDraw,
   resolveDropAt,
   teardownTerminalSession,
-  updateWorkspaceDragPreview,
   useTerminalSelection,
   wsDragPreview,
   type PaneOverlay,
@@ -45,6 +42,7 @@ import {
   detachWorkspaceLeaf,
   firstTerminalLeafId,
   focusWorkspacePane,
+  moveTab,
   moveWorkspaceLeaf,
   openPanelFromTerminal,
   setPanelLeafTitle,
@@ -52,7 +50,24 @@ import {
   useTabs,
 } from "../state/tabs";
 import { requestClosePane } from "../state/closeGuard";
-import { workspaceTick, type DividerRect } from "../state/workspace";
+import {
+  beginCrossDrag,
+  clearDragAffordances,
+  DRAG_START_PX,
+  dragAffordances,
+  dropLeafOut,
+  dropTabOut,
+  endCrossDrag,
+  pointInOwnWindow,
+  resolveBarDrop,
+  shouldLeaveWindow,
+} from "../state/drag";
+import {
+  collectLeaves,
+  getWorkspace,
+  workspaceTick,
+  type DividerRect,
+} from "../state/workspace";
 import { useTheme } from "../state/theme";
 
 const props = defineProps<{ config: Config }>();
@@ -131,8 +146,6 @@ function refreshOverlays(): void {
 }
 const refreshDividers = refreshOverlays;
 
-const TAB_MIME = "application/x-prmpt-tab";
-
 let wheelAccum = 0;
 
 const onWindowMouseMove = (e: MouseEvent) => onMouseMove(e);
@@ -187,47 +200,6 @@ function onHostContextMenu(e: MouseEvent) {
   openTerminalContextMenu(e);
 }
 
-// ---- Tab → terminal-area drop (create / extend a workspace) ---------------
-
-function dragHasTab(e: DragEvent): boolean {
-  const t = e.dataTransfer?.types;
-  if (!t) return false;
-  if (Array.prototype.includes.call(t, TAB_MIME)) return true;
-  // WebKit often hides custom MIME types during dragover (exposing them only
-  // on drop) and reports an empty type list for in-page drags. Treat that as
-  // a potential tab drag — OS file drags instead report "Files" here, so they
-  // still won't trigger the workspace preview.
-  return t.length === 0;
-}
-
-// Document-level so the live preview tracks the cursor across the whole
-// window during a native drag (WKWebView only delivers dragover to the
-// element actually under the pointer, and the canvas/overlays sit on top of
-// the host). preventDefault is required for the drop to be accepted and for
-// dragover to keep firing.
-function onDocDragOver(e: DragEvent) {
-  if (!dragHasTab(e)) return;
-  e.preventDefault();
-  if (e.dataTransfer) e.dataTransfer.dropEffect = "move";
-  updateWorkspaceDragPreview(e.clientX, e.clientY);
-}
-
-function onDocDrop(e: DragEvent) {
-  if (!dragHasTab(e)) return;
-  e.preventDefault();
-  const raw = e.dataTransfer?.getData(TAB_MIME);
-  const draggedId = raw ? Number(raw) : NaN;
-  if (Number.isFinite(draggedId)) {
-    commitWorkspaceDrop(draggedId, e.clientX, e.clientY);
-  }
-  clearWorkspaceDragPreview();
-}
-
-function onDocDragEnd() {
-  // Drag cancelled or ended outside the terminal — drop the stale highlight.
-  clearWorkspaceDragPreview();
-}
-
 // ---- Divider drag (resize splits) -----------------------------------------
 
 let dragSplitId: string | null = null;
@@ -266,14 +238,24 @@ function onDividerUp() {
 
 // ---- Per-pane hover bar: close / move a pane ------------------------------
 
-const paneGhost = ref<{ x: number; y: number; label: string } | null>(null);
 let paneDrag: {
   tabId: number;
   slotId: number;
   label: string;
   startX: number;
   startY: number;
+  startScreenX: number;
+  startScreenY: number;
   active: boolean;
+  // Whether releasing off the terminal would actually detach the pane into
+  // its own tab (detachWorkspaceLeaf no-ops on a workspace's only pane) —
+  // gates the tab-bar insertion indicator so it never promises a drop that
+  // won't happen.
+  detachable: boolean;
+  // The workspace's only pane: dragging it out is the same move as dragging
+  // the tab itself, so the drop routes through the shared dropTabOut (whole
+  // tab moves / tears off) instead of the prune-one-leaf path.
+  sole: boolean;
 } | null = null;
 
 function workspaceSlotId(): number | null {
@@ -288,13 +270,19 @@ function onPaneBarDown(p: { tabId: number; title: string }, e: MouseEvent) {
   e.stopPropagation(); // don't begin a terminal text selection
   // Panel panes own their DOM focus and never take workspace (PTY) focus.
   if (!isPanelLeafId(p.tabId)) focusWorkspacePane(slotId, p.tabId);
+  const ws = getWorkspace(slotId);
+  const leafCount = ws ? collectLeaves(ws.root).length : 0;
   paneDrag = {
     tabId: p.tabId,
     slotId,
     label: p.title,
     startX: e.clientX,
     startY: e.clientY,
+    startScreenX: e.screenX,
+    startScreenY: e.screenY,
     active: false,
+    detachable: leafCount > 1,
+    sole: leafCount === 1,
   };
   window.addEventListener("mousemove", onPaneDragMove);
   window.addEventListener("mouseup", onPaneDragUp);
@@ -305,11 +293,19 @@ function onPaneDragMove(e: MouseEvent) {
   if (!paneDrag.active) {
     const dx = e.clientX - paneDrag.startX;
     const dy = e.clientY - paneDrag.startY;
-    if (dx * dx + dy * dy < 25) return; // 5px before it's a real drag
+    if (dx * dx + dy * dy < DRAG_START_PX * DRAG_START_PX) return;
     paneDrag.active = true;
+    // Arm cross-window hover — every pane can move to another window
+    // (terminals by backend id, panels by value).
+    void beginCrossDrag(paneDrag.label);
   }
-  paneGhost.value = { x: e.clientX, y: e.clientY, label: paneDrag.label };
-  updateWorkspaceDragPreview(e.clientX, e.clientY, paneDrag.tabId);
+  // Ghost + split highlight (+ the bar insertion indicator when a detach
+  // could land in the strip) + cross-window forwarding, all shared.
+  dragAffordances(e, {
+    label: paneDrag.label,
+    draggedId: paneDrag.tabId,
+    barInsert: paneDrag.detachable,
+  });
 }
 
 function onPaneDragUp(e: MouseEvent) {
@@ -317,10 +313,10 @@ function onPaneDragUp(e: MouseEvent) {
   window.removeEventListener("mouseup", onPaneDragUp);
   const d = paneDrag;
   paneDrag = null;
-  paneGhost.value = null;
-  clearWorkspaceDragPreview();
+  clearDragAffordances();
   if (!d || !d.active) return;
   if (pointOverTerminal(e.clientX, e.clientY)) {
+    endCrossDrag();
     const res = resolveDropAt(e.clientX, e.clientY);
     if (res && res.slotId === d.slotId) {
       moveWorkspaceLeaf(
@@ -333,9 +329,27 @@ function onPaneDragUp(e: MouseEvent) {
     }
     return;
   }
+  // Released outside this window → the pane moves, same engine as tab drags:
+  // a sole pane is the whole tab (dropTabOut: attach/recreate with placement,
+  // or a fresh window past the threshold); one pane of many moves alone
+  // (dropLeafOut). Both route terminals by backend id and panels by value.
+  if (!pointInOwnWindow(e.clientX, e.clientY)) {
+    if (d.sole) {
+      if (shouldLeaveWindow(e, d.startScreenX, d.startScreenY)) {
+        void dropTabOut(d.slotId, e.screenX, e.screenY);
+        return;
+      }
+    } else if (dropLeafOut(d.slotId, d.tabId, e.screenX, e.screenY)) {
+      return;
+    }
+  }
+  endCrossDrag();
   // Released off the terminal (e.g. onto the tab bar) → pop the pane back out
-  // into its own standalone tab.
-  detachWorkspaceLeaf(d.slotId, d.tabId);
+  // into its own standalone tab, honoring the bar slot the indicator showed
+  // when the release was over the strip (elsewhere it appends, as before).
+  const bar = d.detachable ? resolveBarDrop(e.clientX, e.clientY) : null;
+  const newSlot = detachWorkspaceLeaf(d.slotId, d.tabId);
+  if (newSlot != null && bar) moveTab(newSlot, bar.beforeId);
 }
 
 function onPaneClose(p: { tabId: number }) {
@@ -355,9 +369,6 @@ onMounted(() => {
   resizeObs.observe(hostRef.value);
   window.addEventListener("mousemove", onWindowMouseMove);
   window.addEventListener("mouseup", onWindowMouseUp);
-  document.addEventListener("dragover", onDocDragOver);
-  document.addEventListener("drop", onDocDrop);
-  document.addEventListener("dragend", onDocDragEnd);
 });
 
 onBeforeUnmount(() => {
@@ -365,9 +376,6 @@ onBeforeUnmount(() => {
   resizeObs = null;
   window.removeEventListener("mousemove", onWindowMouseMove);
   window.removeEventListener("mouseup", onWindowMouseUp);
-  document.removeEventListener("dragover", onDocDragOver);
-  document.removeEventListener("drop", onDocDrop);
-  document.removeEventListener("dragend", onDocDragEnd);
   window.removeEventListener("mousemove", onPaneDragMove);
   window.removeEventListener("mouseup", onPaneDragUp);
   onDividerUp();
@@ -381,8 +389,7 @@ watch(active, () => {
     // Leaving a workspace for Home: drop the pane frames / hover bars and any
     // in-flight drag affordance so they don't linger on top of the Home view.
     refreshOverlays();
-    paneGhost.value = null;
-    clearWorkspaceDragPreview();
+    clearDragAffordances();
     return;
   }
   reflowActive(active.value);
@@ -555,13 +562,6 @@ watch(theme, (next) => {
   </div>
   <Teleport to="body">
     <div
-      v-if="paneGhost"
-      class="pane-drag-ghost"
-      :style="{ left: `${paneGhost.x + 12}px`, top: `${paneGhost.y + 12}px` }"
-    >
-      {{ paneGhost.label }}
-    </div>
-    <div
       v-if="sftpDragGhost"
       class="sftp-drag-ghost"
       :style="{ left: `${sftpDragGhost.x + 14}px`, top: `${sftpDragGhost.y + 14}px` }"
@@ -642,7 +642,6 @@ watch(theme, (next) => {
   flex: 1;
   min-height: 0;
 }
-.pane-drag-ghost,
 .sftp-drag-ghost {
   position: fixed;
   z-index: 9999;

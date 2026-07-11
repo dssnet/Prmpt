@@ -265,17 +265,3 @@ export function isWorkspaceSlot(slotId: number): boolean {
   return workspaces.has(slotId);
 }
 
-// Cross-component flag: a tab-bar drag that ends inside the terminal area is
-// "consumed" into a workspace; TabBar.onDragEnd must then skip its tear-off.
-let consumed = false;
-export function markTabConsumed(): void {
-  consumed = true;
-}
-export function takeTabConsumed(): boolean {
-  const v = consumed;
-  consumed = false;
-  return v;
-}
-export function resetTabConsumed(): void {
-  consumed = false;
-}

@@ -5,7 +5,6 @@ import { onMounted, onBeforeUnmount, ref } from "vue";
 
 import { isModifierKey, toWireKeyEvent } from "./input";
 import {
-  attachTab,
   bootstrapWindow,
   closeCurrentWindow,
   currentWindowLabel,
@@ -25,8 +24,6 @@ import {
   onWindowActivateBlank,
   openNewWindow,
   scrollTab,
-  tearOffTab,
-  windowAtScreenPoint,
   writeKey,
   writePaste,
   type Config,
@@ -40,7 +37,6 @@ import {
   closeWorkspacePane,
   dropTabIntoTarget,
   firstTerminalLeafId,
-  soleTerminalBackendId,
   handleExit,
   handleRender,
   HOME_TAB_ID,
@@ -50,7 +46,6 @@ import {
   isHostConnected,
   shellTabsForHost,
   owningTabId,
-  removeTabLocal,
   setActive,
   setSshReconnecting,
   snapshotFor,
@@ -91,6 +86,11 @@ import {
   requestCloseTab,
   windowCloseMessage,
 } from "./state/closeGuard";
+import {
+  consumeCrossDropPlacement,
+  dropTabOut,
+  installCrossDragTarget,
+} from "./state/drag";
 import { notify, notifyBell } from "./state/notifications";
 import { startupView } from "./state/uiPrefs";
 import {
@@ -104,6 +104,7 @@ import {
 import { openCommandPalette, paletteOpen } from "./state/commandPalette";
 import { showToast } from "./state/toasts";
 import CommandPalette from "./components/CommandPalette.vue";
+import DragGhost from "./components/DragGhost.vue";
 import HomeView from "./components/HomeView.vue";
 import HostKeyFirstConnectModal from "./components/HostKeyFirstConnectModal.vue";
 import HostKeyMismatchModal from "./components/HostKeyMismatchModal.vue";
@@ -266,41 +267,7 @@ async function newTabInWindow(
     cellWidthPx: Math.round(cellWidthPx * dpr),
     cellHeightPx: Math.round(cellHeightPx * dpr),
   });
-  await handleDragOut(newId, screenX, screenY);
-}
-
-async function handleDragOut(
-  tabId: number,
-  screenX: number,
-  screenY: number,
-): Promise<void> {
-  // `tabId` is the frontend slot id; the backend tear-off/attach commands key
-  // on the backend PTY id, which lives on the tab's sole terminal leaf
-  // (TabBar only allows tearing off single-pane tabs; panel-only tabs have no
-  // backend to move).
-  const backendId = soleTerminalBackendId(tabId);
-  if (backendId == null) return;
-  // Cursor in CSS pixels (matches Tauri logical units). If it's over another
-  // of our windows, attach to it; otherwise tear off into a new window sized
-  // like the source. innerWidth/innerHeight rather than outer* — WKWebView
-  // often reports zero for outer*, which would yield a 0x0 window.
-  try {
-    const target = await windowAtScreenPoint(screenX, screenY, myLabel);
-    if (target) {
-      await attachTab(backendId, target);
-    } else {
-      const width = Math.max(400, window.innerWidth);
-      const height = Math.max(300, window.innerHeight);
-      await tearOffTab({ tabId: backendId, screenX, screenY, width, height });
-    }
-    removeTabLocal(tabId);
-    // Tearing off the last terminal closes the source window — same rule as
-    // the exit path. Otherwise we'd leave an empty shell.
-    const liveTerminals = tabs.value.filter((t) => t.kind !== "home");
-    if (liveTerminals.length === 0) void closeCurrentWindow();
-  } catch (err) {
-    console.error("drag-out failed:", err);
-  }
+  await dropTabOut(newId, screenX, screenY);
 }
 
 function scrollActive(
@@ -559,20 +526,29 @@ onMounted(async () => {
     // activate-blank fire spawn an extra shell on top.
     hasAdoptedTab = true;
     attachTabLocal(p as TabHydrateInfo);
+    // A cross-window drag drop may have buffered a placement for this tab
+    // (bar slot / workspace split) — apply it before the reflow so the
+    // resize targets the final pane geometry.
+    consumeCrossDropPlacement(p.id);
     // Resize newly-attached tabs to this window's geometry; their dims were
     // sized for the source window and likely no longer match.
     reflowActive(active.value);
   }));
+  // Receiving side of cross-window tab drags (hover preview + drop placement
+  // forwarded by the source window).
+  unlisteners.push(...(await installCrossDragTarget()));
   // Activation for a previously-reserve window: spawn the first tab now
   // that the user has actually claimed this webview. Must be installed
   // before bootstrapWindow returns so a pop_for_blank firing immediately
   // after bootstrap can't race past the listener registration.
   unlisteners.push(await onWindowActivateBlank((p) => {
-    // A window dragged out from a + menu option opens that panel as its sole
-    // tab; the ordinary blank activation (dock-click / Cmd+N) spawns a shell.
+    // A window dragged out from a + menu option (fresh, `{ kind }` only) or a
+    // torn-off panel pane (desc/title carry its seeds + live title) opens
+    // that panel as its sole tab; the ordinary blank activation (dock-click /
+    // Cmd+N) spawns a shell.
     if (p.panel) {
       hasAdoptedTab = true; // don't let a later activate-blank pile a shell on top
-      openPanelTab(p.panel);
+      openPanelTab(p.panel_desc ?? { kind: p.panel }, p.panel_title ?? undefined);
       return;
     }
     void autoSpawnInitialTab();
@@ -724,7 +700,6 @@ onBeforeUnmount(() => {
 <template>
   <TitleBar />
   <TabBar
-    :on-drag-out="handleDragOut"
     @request-new-tab="spawnNewTab"
     @new-tab-workspace="newTabIntoWorkspace"
     @new-tab-window="newTabInWindow"
@@ -765,4 +740,5 @@ onBeforeUnmount(() => {
   <Toasts />
   <FloatingMenu />
   <CommandPalette />
+  <DragGhost />
 </template>
