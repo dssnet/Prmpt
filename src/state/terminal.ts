@@ -78,8 +78,37 @@ let cellHeightPx = 0;
 let dpr = 1;
 let config: Config | null = null;
 
-let selection: Selection | null = null;
+// One selection per leaf (pane), keyed by leaf tab id, so a selection
+// survives tab switches and pane focus changes: it re-appears when its pane
+// is shown again, and a pane only ever renders its *own* highlight — never
+// another tab's coordinates over unrelated content. User-facing operations
+// (mouse, copy, clear, select-all) act on the focused pane's entry. Leaf ids
+// are monotonic on both sides (backend AtomicU64, frontend negative counter),
+// never reused, so a stale entry can't leak onto a future pane; setSelection
+// prunes entries whose pane is gone regardless.
+const selections = new Map<number, Selection>();
 const selectionTick = ref(0);
+
+function focusedSelection(): Selection | null {
+  const id = inputTargetTabId();
+  if (id == null) return null;
+  return selections.get(id) ?? null;
+}
+
+function setFocusedSelection(sel: Selection): void {
+  const id = inputTargetTabId();
+  if (id == null) return;
+  for (const key of selections.keys()) {
+    if (snapshotFor(key) === undefined) selections.delete(key);
+  }
+  selections.set(id, sel);
+}
+
+/** Delete the focused pane's selection; true if one existed. */
+function dropFocusedSelection(): boolean {
+  const id = inputTargetTabId();
+  return id != null && selections.delete(id);
+}
 
 // Cached layout of the active workspace (CSS px, host-relative). Recomputed by
 // reflowWorkspace; read by the draw path, hit-testing, and divider drags so
@@ -350,8 +379,8 @@ function drawActive(): void {
         // scroll/output or clears.
         if (revalidateLinkHover(snap)) syncHoverCursor();
         const focused = pane.tabId === a.ws.focusedTabId;
-        const sel =
-          focused && selection ? selectionForRender(selection, snap) : null;
+        const stored = selections.get(pane.tabId);
+        const sel = stored ? selectionForRender(stored, snap) : null;
         renderer.renderInto(
           decoratePayloadForHover(snap),
           sel,
@@ -372,7 +401,8 @@ function drawActive(): void {
   const snap = focusedSnapshot();
   if (!snap) return;
   if (revalidateLinkHover(snap)) syncHoverCursor();
-  const sel = selection ? selectionForRender(selection, snap) : null;
+  const stored = selections.get(snap.tab_id);
+  const sel = stored ? selectionForRender(stored, snap) : null;
   renderer.render(decoratePayloadForHover(snap), sel);
 }
 
@@ -566,14 +596,15 @@ function applyDragMove(e: MouseEvent): void {
   const p = cellFromEvent(e);
   if (pendingAnchor) {
     if (p.col === pendingAnchor.col && p.screenRow === pendingAnchor.screenRow) return;
-    selection = { anchor: pendingAnchor, head: p, mode: "char" };
+    setFocusedSelection({ anchor: pendingAnchor, head: p, mode: "char" });
     pendingAnchor = null;
     selectionTick.value++;
     requestDraw();
     return;
   }
-  if (!selection) return;
-  selection.head = p;
+  const sel = focusedSelection();
+  if (!sel) return;
+  sel.head = p;
   selectionTick.value++;
   requestDraw();
 }
@@ -700,9 +731,9 @@ function focusPaneUnder(e: MouseEvent): void {
   const lp = localPoint(e);
   const hit = lp ? paneAt(lp.x, lp.y) : null;
   if (hit && hit.tabId !== a.ws.focusedTabId) {
+    // Selections are per pane: the previous pane keeps its own, the newly
+    // focused pane shows its own (if any) — nothing to clear here.
     focusWorkspacePane(a.slotId, hit.tabId);
-    selection = null;
-    selectionTick.value++;
   }
 }
 
@@ -799,8 +830,7 @@ export function onMouseDown(e: MouseEvent, activeKind: string | undefined): void
   lastClickCell = p;
   const mode: SelectionMode = clickCount >= 3 ? "line" : clickCount === 2 ? "word" : "char";
 
-  if (selection) {
-    selection = null;
+  if (dropFocusedSelection()) {
     selectionTick.value++;
     requestDraw();
   }
@@ -812,7 +842,7 @@ export function onMouseDown(e: MouseEvent, activeKind: string | undefined): void
     const sel: Selection = { anchor: p, head: p, mode };
     if (mode === "word") expandSelectionWord(sel);
     else expandSelectionLine(sel);
-    selection = sel;
+    setFocusedSelection(sel);
     pendingAnchor = null;
     dragging = false;
     selectionTick.value++;
@@ -865,11 +895,12 @@ export function onMouseUp(): void {
   pendingAnchor = null;
   lastDragEvent = null;
   stopAutoScroll();
-  if (selection) {
-    const a = selection.anchor;
-    const h = selection.head;
+  const sel = focusedSelection();
+  if (sel) {
+    const a = sel.anchor;
+    const h = sel.head;
     const nonEmpty = a.screenRow !== h.screenRow || a.col !== h.col;
-    if (nonEmpty && (hadDrag || selection.mode !== "char")) {
+    if (nonEmpty && (hadDrag || sel.mode !== "char")) {
       copyCurrentSelection();
     }
   }
@@ -877,8 +908,7 @@ export function onMouseUp(): void {
 
 export function clearSelection(): void {
   stopAutoScroll();
-  if (!selection) return;
-  selection = null;
+  if (!dropFocusedSelection()) return;
   selectionTick.value++;
   requestDraw();
 }
@@ -887,27 +917,28 @@ export function selectAll(): void {
   const snap = focusedSnapshot();
   if (!snap || snap.cols <= 0 || snap.rows <= 0) return;
   const top = snap.viewport_top;
-  selection = {
+  setFocusedSelection({
     anchor: { col: 0, screenRow: top },
     head: { col: snap.cols - 1, screenRow: top + snap.rows - 1 },
     mode: "char",
-  };
+  });
   selectionTick.value++;
   requestDraw();
 }
 
 export function hasSelection(): boolean {
-  return selection !== null;
+  return focusedSelection() !== null;
 }
 
 export function copyCurrentSelection(): void {
-  if (!selection) return;
+  const sel = focusedSelection();
+  if (!sel) return;
   const snap = focusedSnapshot();
   if (!snap) return;
-  const a = selection.anchor;
-  const h = selection.head;
+  const a = sel.anchor;
+  const h = sel.head;
   if (a.screenRow === h.screenRow && a.col === h.col) return;
-  const { start, end } = orderSelection(selection);
+  const { start, end } = orderSelection(sel);
   // Extract from the backend grid (not the viewport snapshot) so selections
   // spanning scrollback copy in full.
   void copySelectionText(
