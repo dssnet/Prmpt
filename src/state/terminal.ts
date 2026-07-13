@@ -8,6 +8,7 @@ import {
   copySelectionText,
   resizeTab,
   scrollTab,
+  terminalCwd,
   writeInput,
   writeMouse,
   writePaste,
@@ -24,6 +25,7 @@ import {
   activeSnapshot,
   dropPanelIntoTarget,
   dropTabIntoTarget,
+  firstTerminalLeafId,
   focusWorkspacePane,
   isWorkspaceTab,
   snapshotFor,
@@ -936,6 +938,19 @@ export function inputTargetTabId(): number | null {
   // is no PTY to route keyboard / paste / scroll to, so target nothing.
   const focused = ws.ws.focusedTabId;
   return isPanelLeafId(focused) ? null : focused;
+}
+
+/** Cwd of the focused terminal — the pane keyboard input targets, or the
+ *  active tab's first terminal when a panel has focus (the slot id names no
+ *  backend, so it can't answer terminal_cwd). `undefined` when it isn't
+ *  knowable: home tab, SSH panes, dead shells, pwsh without a prompt hook. */
+export async function focusedTerminalCwd(): Promise<string | undefined> {
+  const { active } = useTabs();
+  const a = active.value;
+  const target =
+    inputTargetTabId() ?? (a != null ? firstTerminalLeafId(a.id) : null);
+  if (target == null) return undefined;
+  return (await terminalCwd(target).catch(() => null)) ?? undefined;
 }
 
 /** Paste into `targetTabId`, or the focused pane when omitted (keyboard

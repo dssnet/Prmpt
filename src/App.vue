@@ -63,6 +63,7 @@ import {
   computeDims,
   resolveDropAt,
   focusCanvas,
+  focusedTerminalCwd,
   getCellMetrics,
   hasSelection,
   inputTargetTabId,
@@ -175,7 +176,11 @@ function dismissConnectError(): void {
   }
 }
 
-async function spawnNewTab(): Promise<void> {
+// `sameCwd` (Alt held when the + button drops): start in the focused
+// terminal's cwd instead of home. Resolved before the spawn — the spawn makes
+// the new tab active, which would repoint "focused terminal" at itself.
+async function spawnNewTab(sameCwd = false): Promise<void> {
+  const cwd = sameCwd ? await focusedTerminalCwd() : undefined;
   const { cellWidthPx, cellHeightPx, dpr } = getCellMetrics();
   const dims = computeDims();
   await spawnTerminal({
@@ -183,6 +188,7 @@ async function spawnNewTab(): Promise<void> {
     rows: dims.rows,
     cellWidthPx: Math.round(cellWidthPx * dpr),
     cellHeightPx: Math.round(cellHeightPx * dpr),
+    cwd,
   });
   focusCanvas();
 }
@@ -224,12 +230,15 @@ async function autoSpawnInitialTab(): Promise<void> {
 async function newTabIntoWorkspace(
   clientX: number,
   clientY: number,
+  sameCwd = false,
 ): Promise<void> {
   // Resolve the drop target *before* spawning: spawnTerminal makes the new tab
   // active, which would make resolveDropAt point the split at the new tab
   // itself (and the self-drop guard would then cancel it). Mirrors
-  // splitActive's capture-then-spawn-then-split ordering.
+  // splitActive's capture-then-spawn-then-split ordering. The cwd is captured
+  // before the spawn for the same reason.
   const res = resolveDropAt(clientX, clientY);
+  const cwd = sameCwd ? await focusedTerminalCwd() : undefined;
   const { cellWidthPx, cellHeightPx, dpr } = getCellMetrics();
   const dims = computeDims();
   const newId = await spawnTerminal({
@@ -237,6 +246,7 @@ async function newTabIntoWorkspace(
     rows: dims.rows,
     cellWidthPx: Math.round(cellWidthPx * dpr),
     cellHeightPx: Math.round(cellHeightPx * dpr),
+    cwd,
   });
   // No pane under the cursor → the freshly spawned tab just stays a normal
   // tab, a fine fallback.
@@ -258,7 +268,9 @@ async function newTabIntoWorkspace(
 async function newTabInWindow(
   screenX: number,
   screenY: number,
+  sameCwd = false,
 ): Promise<void> {
+  const cwd = sameCwd ? await focusedTerminalCwd() : undefined;
   const { cellWidthPx, cellHeightPx, dpr } = getCellMetrics();
   const dims = computeDims();
   const newId = await spawnTerminal({
@@ -266,6 +278,7 @@ async function newTabInWindow(
     rows: dims.rows,
     cellWidthPx: Math.round(cellWidthPx * dpr),
     cellHeightPx: Math.round(cellHeightPx * dpr),
+    cwd,
   });
   await dropTabOut(newId, screenX, screenY);
 }

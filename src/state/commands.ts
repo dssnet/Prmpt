@@ -27,7 +27,7 @@ import {
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 
 import { listHosts, type SshHostRow } from "../db";
-import { openNewWindow, openPanelWindow, terminalCwd } from "../ipc";
+import { openNewWindow, openPanelWindow } from "../ipc";
 import { connectHost, defaultConnectMode, type ConnectMode } from "./connect";
 import {
   registerCommandSource,
@@ -39,6 +39,7 @@ import {
   autoSplitDir,
   computeDims,
   focusCanvas,
+  focusedTerminalCwd,
   getCellMetrics,
   inputTargetTabId,
 } from "./terminal";
@@ -102,15 +103,7 @@ type TerminalPlacement = "tab" | "right" | "down";
 async function resolveSpawnCwd(
   choice: "same" | "home" | "pick",
 ): Promise<string | undefined | null> {
-  if (choice === "same") {
-    // Focused pane, or the first terminal when a panel has focus — the slot
-    // id names no backend, so it can't answer terminal_cwd.
-    const a = active.value;
-    const target =
-      inputTargetTabId() ?? (a != null ? firstTerminalLeafId(a.id) : null);
-    if (target == null) return undefined;
-    return (await terminalCwd(target).catch(() => null)) ?? undefined;
-  }
+  if (choice === "same") return await focusedTerminalCwd();
   if (choice === "pick") {
     const dir = await openDialog({ directory: true, title: "Starting folder" });
     return typeof dir === "string" ? dir : null;

@@ -61,10 +61,12 @@ import {
   unregisterBarDropResolver,
 } from "../state/drag";
 
+// `sameCwd` on the terminal spawns: Alt/Option was held at release, asking the
+// new shell to start in the focused terminal's cwd instead of home.
 const emit = defineEmits<{
-  requestNewTab: [];
-  newTabWorkspace: [clientX: number, clientY: number];
-  newTabWindow: [screenX: number, screenY: number];
+  requestNewTab: [sameCwd: boolean];
+  newTabWorkspace: [clientX: number, clientY: number, sameCwd: boolean];
+  newTabWindow: [screenX: number, screenY: number, sameCwd: boolean];
 }>();
 
 const { tabs, active } = useTabs();
@@ -479,17 +481,21 @@ function onSpawnUp(e: MouseEvent): void {
   clearDragAffordances();
   if (!d) return;
   const kind = d.kind;
+  // Alt (Option) held at release: start the new terminal in the focused
+  // terminal's cwd instead of home. Read off the mouseup so the modifier
+  // decides at the drop, not at the grab.
+  const sameCwd = e.altKey;
   // Never moved (or dropped back in the bar) → a plain new tab of this kind.
   if (!d.active || pointInTabBar(e.clientX, e.clientY)) {
     endCrossDrag();
-    spawnNewTabHere(kind);
+    spawnNewTabHere(kind, sameCwd);
     return;
   }
   // Over this window's terminal → split into the workspace there. Terminals go
   // through App (it spawns the backend shell); panels open directly.
   if (pointOverTerminal(e.clientX, e.clientY)) {
     endCrossDrag();
-    if (kind === "terminal") emit("newTabWorkspace", e.clientX, e.clientY);
+    if (kind === "terminal") emit("newTabWorkspace", e.clientX, e.clientY, sameCwd);
     else commitPanelWorkspaceDrop(kind, e.clientX, e.clientY);
     return;
   }
@@ -498,7 +504,7 @@ function onSpawnUp(e: MouseEvent): void {
   if (shouldLeaveWindow(e, d.startScreenX, d.startScreenY)) {
     if (kind === "terminal") {
       // App spawns the shell, then hands it to the shared dropTabOut.
-      emit("newTabWindow", e.screenX, e.screenY);
+      emit("newTabWindow", e.screenX, e.screenY, sameCwd);
     } else {
       dropNewPanelOut(kind, e.screenX, e.screenY);
     }
@@ -506,11 +512,11 @@ function onSpawnUp(e: MouseEvent): void {
   }
   // Small drag that left the bar but landed nowhere meaningful → new tab.
   endCrossDrag();
-  spawnNewTabHere(kind);
+  spawnNewTabHere(kind, sameCwd);
 }
 
-function spawnNewTabHere(kind: SpawnKind): void {
-  if (kind === "terminal") emit("requestNewTab");
+function spawnNewTabHere(kind: SpawnKind, sameCwd = false): void {
+  if (kind === "terminal") emit("requestNewTab", sameCwd);
   else openPanelTab({ kind });
 }
 
