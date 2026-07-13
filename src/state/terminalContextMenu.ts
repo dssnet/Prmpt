@@ -49,7 +49,10 @@ import { collectLeaves, getWorkspace, type SplitDir } from "./workspace";
 
 const { active } = useTabs();
 
-async function splitPane(
+/** Split `paneId` in `slotId`, spawning a terminal that inherits the pane's
+ * working directory when knowable (local shells; SSH panes and dead shells
+ * fall back to the default). Also used by the pane pill's split button. */
+export async function splitPane(
   slotId: number,
   paneId: number,
   dir: SplitDir,

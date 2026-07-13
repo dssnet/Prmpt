@@ -1,9 +1,9 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch, type Component } from "vue";
-import { GitBranch, PanelRight, X } from "lucide-vue-next";
+import { GitBranch, PanelRight, SquareSplitHorizontal, X } from "lucide-vue-next";
 
 import { wheelScroll, type Config } from "../ipc";
-import { openTerminalContextMenu } from "../state/terminalContextMenu";
+import { openTerminalContextMenu, splitPane } from "../state/terminalContextMenu";
 import { sftpDragGhost } from "../state/sftp";
 import { highlightedPaneId } from "../state/paneHighlight";
 import { isPanelLeafId, type PanelKind } from "../state/panels";
@@ -115,6 +115,15 @@ function openPanel(kind: PanelKind, fromTabId?: number): void {
       : undefined);
   if (id == null) return;
   void openPanelFromTerminal(kind, id);
+}
+
+// Pill shortcut: split the pane to the right with a fresh terminal that
+// inherits this pane's working directory (same path as the context menu's
+// Split → Right).
+function onPaneSplitRight(p: PaneOverlay): void {
+  const slotId = workspaceSlotId();
+  if (slotId == null) return;
+  void splitPane(slotId, p.tabId, "h", false);
 }
 
 const { selectionTick } = useTerminalSelection();
@@ -472,6 +481,15 @@ watch(theme, (next) => {
     >
       <PaneTitlebar :title="p.title" draggable @bardown="onPaneBarDown(p, $event)">
         <template #actions>
+          <button
+            type="button"
+            class="pane-close"
+            title="Split right (same folder)"
+            @mousedown.stop.prevent
+            @click.stop="onPaneSplitRight(p)"
+          >
+            <SquareSplitHorizontal :size="12" :stroke-width="2.25" />
+          </button>
           <button
             type="button"
             class="pane-close"
