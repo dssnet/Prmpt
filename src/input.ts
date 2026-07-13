@@ -84,6 +84,59 @@ function unshiftedCodepoint(e: KeyboardEvent): number {
   return 0;
 }
 
+/** Composition commits (dead keys, IME) reach the PTY via `compositionend`
+ *  on the hidden capture textarea — but WKWebView then re-reports the
+ *  keystroke that terminated the composition through the key pipeline
+ *  (xterm.js #5894), in shapes seen in the wild:
+ *    - the terminating key with its plain layout value (dead-~ then a →
+ *      commit "ã", then keydown key="a")
+ *    - the committed text echoed as the key value (keydown key="ã")
+ *    - commit and cancelling key fused ("~q" for dead-~ then q)
+ *  Remember the last commit so the immediately-following keydown can be
+ *  de-duplicated. */
+let imeCommit: string | null = null;
+let imeCommitAt = 0;
+
+export function noteImeCommit(text: string): void {
+  imeCommit = text;
+  imeCommitAt = performance.now();
+}
+
+/** De-duplicate the keydown re-reported after a composition commit. `drop`
+ *  means the keystroke's contribution is already inside the committed text;
+ *  `utf8` overrides the wire event's text when the key value carried
+ *  commit + real key fused. */
+export function filterImeKeydown(e: KeyboardEvent): { drop: boolean; utf8?: string } {
+  const commit = imeCommit;
+  imeCommit = null; // one-shot: only the first keydown after a commit
+  if (commit == null) return { drop: false };
+  // Only the keydown belonging to the physical keystroke that terminated
+  // the composition qualifies — it lands in the same dispatch burst as
+  // compositionend. Anything later is a fresh keystroke (Chromium-based
+  // webviews never re-report, so nothing may linger and eat real input).
+  if (performance.now() - imeCommitAt > 50) return { drop: false };
+  if (
+    // Cancelled composition (Escape): the cancelling key still echoes.
+    commit === "" ||
+    // Committed text echoed verbatim.
+    e.key === commit ||
+    // Space commits a bare accent and is consumed by it (dead-~ Space → "~").
+    e.key === " " ||
+    // Combining press re-reported with its plain value: NFD exposes the
+    // base letter inside the composed char ("ã" → "a" + U+0303).
+    commit.normalize("NFD").includes(e.key)
+  ) {
+    return { drop: true };
+  }
+  // Non-combining key cancelled the dead key, fused into one value ("~q"):
+  // the commit was already written — forward just the real key's character.
+  if (e.key.length > commit.length && e.key.startsWith(commit)) {
+    const rest = e.key.slice(commit.length);
+    if ([...rest].length === 1) return { drop: false, utf8: rest };
+  }
+  return { drop: false };
+}
+
 /** Translate a DOM keyboard event into the wire shape `write_key` expects,
  *  or null for events the terminal should never see (IME composition,
  *  dead keys). */

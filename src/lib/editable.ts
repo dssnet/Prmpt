@@ -10,7 +10,13 @@ export type EditableInput = HTMLInputElement | HTMLTextAreaElement;
 // Enter to the PTY. Defaults to `activeElement` when no candidate is given.
 export function focusedEditable(candidate?: EventTarget | null): EditableInput | null {
   const el = (candidate as Element | null) ?? document.activeElement;
-  if (el instanceof HTMLTextAreaElement) return el;
+  if (el instanceof HTMLTextAreaElement) {
+    // The hidden IME-capture textarea (TerminalView) holds keyboard focus on
+    // behalf of the terminal — treat it as "not editable" so keystrokes,
+    // paste, and Edit-menu actions route to the PTY, not into the field.
+    if (el.dataset.imeCapture != null) return null;
+    return el;
+  }
   if (el instanceof HTMLInputElement) {
     // Bail on inputs that don't carry editable text (checkbox/radio/buttons).
     const t = el.type;

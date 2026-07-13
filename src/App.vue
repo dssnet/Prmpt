@@ -3,7 +3,7 @@ import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import type { UnlistenFn } from "@tauri-apps/api/event";
 import { onMounted, onBeforeUnmount, ref } from "vue";
 
-import { isModifierKey, toWireKeyEvent } from "./input";
+import { filterImeKeydown, isModifierKey, toWireKeyEvent } from "./input";
 import {
   bootstrapWindow,
   closeCurrentWindow,
@@ -446,8 +446,25 @@ function onKeyDown(e: KeyboardEvent) {
   // Bare modifier presses only produce bytes under the kitty keyboard
   // protocol — skip the IPC round-trip (and the preventDefault) otherwise.
   if (isModifierKey(e) && (snapshotFor(target)?.kitty_flags ?? 0) === 0) return;
+  // Dead key: nothing to forward — the composed character arrives via
+  // compositionend on the hidden IME capture. But composition only engages
+  // when that textarea holds focus, so reclaim it in case focus drifted to
+  // <body> (this press is lost either way; the next one composes).
+  if (e.key === "Dead") {
+    focusCanvas();
+    return;
+  }
+  // De-dup WebKit's post-composition echo: the committed char re-reported as
+  // its own keydown (drop), or fused into the cancelling key's `key` value
+  // ("~q" — forward just the "q").
+  const ime = filterImeKeydown(e);
+  if (ime.drop) {
+    e.preventDefault();
+    return;
+  }
   const wire = toWireKeyEvent(e, e.repeat ? "repeat" : "press");
   if (!wire) return;
+  if (ime.utf8 != null) wire.utf8 = ime.utf8;
   e.preventDefault();
   clearSelection();
   void writeKey(target, wire);
@@ -466,6 +483,13 @@ function onKeyUp(e: KeyboardEvent) {
   const wire = toWireKeyEvent(e, "release");
   if (!wire) return;
   void writeKey(target, wire);
+}
+
+// Refocus the hidden IME capture when app-switching parked focus on <body> —
+// dead-key composition only engages while it holds focus. Never steals from
+// a real control (inputs, palette) since those keep focus themselves.
+function onWindowFocus() {
+  if (document.activeElement === document.body) focusCanvas();
 }
 
 function onPaste(e: ClipboardEvent) {
@@ -506,6 +530,7 @@ function onContextMenu(e: MouseEvent) {
 onMounted(async () => {
   window.addEventListener("keydown", onKeyDown);
   window.addEventListener("keyup", onKeyUp);
+  window.addEventListener("focus", onWindowFocus);
   window.addEventListener("paste", onPaste);
   window.addEventListener("contextmenu", onEditableContextMenu, true);
   window.addEventListener("contextmenu", onContextMenu);
@@ -695,6 +720,7 @@ onMounted(async () => {
 onBeforeUnmount(() => {
   window.removeEventListener("keydown", onKeyDown);
   window.removeEventListener("keyup", onKeyUp);
+  window.removeEventListener("focus", onWindowFocus);
   window.removeEventListener("paste", onPaste);
   window.removeEventListener("contextmenu", onEditableContextMenu, true);
   window.removeEventListener("contextmenu", onContextMenu);

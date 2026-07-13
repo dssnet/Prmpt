@@ -14,6 +14,7 @@ import TerminalScrollbar from "./TerminalScrollbar.vue";
 import {
   applyRendererTheme,
   commitDividerDrag,
+  focusCanvas,
   getActiveDividers,
   getCellMetrics,
   initTerminalSession,
@@ -73,6 +74,7 @@ import { useTheme } from "../state/theme";
 const props = defineProps<{ config: Config }>();
 
 const canvasRef = ref<HTMLCanvasElement | null>(null);
+const imeRef = ref<HTMLTextAreaElement | null>(null);
 const hostRef = ref<HTMLElement | null>(null);
 const wrapRef = ref<HTMLElement | null>(null);
 
@@ -368,9 +370,10 @@ function onPaneClose(p: { tabId: number }) {
 }
 
 onMounted(() => {
-  if (!canvasRef.value || !hostRef.value) return;
+  if (!canvasRef.value || !imeRef.value || !hostRef.value) return;
   initTerminalSession({
     canvas: canvasRef.value,
+    ime: imeRef.value,
     host: hostRef.value,
     config: props.config,
   });
@@ -439,12 +442,29 @@ watch(theme, (next) => {
     @wheel="onHostWheel"
     @contextmenu="onHostContextMenu"
   >
+    <!-- Hidden IME capture: keyboard focus lives here (see focusCanvas) so
+         dead-key / IME composition engages; composed text is forwarded to
+         the PTY on compositionend. Normal keys are handled by App.vue's
+         window keydown (which preventDefaults them before they'd insert). -->
+    <textarea
+      ref="imeRef"
+      data-ime-capture
+      tabindex="-1"
+      aria-hidden="true"
+      autocapitalize="off"
+      autocorrect="off"
+      autocomplete="off"
+      spellcheck="false"
+      class="absolute pointer-events-none"
+      style="left: 0; top: 0; width: 1px; height: 1px; opacity: 0; resize: none; border: 0; padding: 0; outline: none"
+    />
     <canvas
       id="terminal-canvas"
       ref="canvasRef"
       tabindex="0"
       class="absolute inset-0 w-full h-full block"
       :style="{ visibility: canvasVisible ? 'visible' : 'hidden' }"
+      @focus="focusCanvas"
     />
     <!-- Resize dividers (workspace only). -->
     <div

@@ -6,6 +6,7 @@ import { ref } from "vue";
 
 import {
   copySelectionText,
+  FLAG_UNDERLINE,
   resizeTab,
   scrollTab,
   terminalCwd,
@@ -17,7 +18,7 @@ import {
   type RenderPayload,
   type ThemeConfig,
 } from "../ipc";
-import { IS_MAC } from "../input";
+import { IS_MAC, noteImeCommit } from "../input";
 import { Canvas2DRenderer } from "../renderer/canvas2d";
 import { measureCell, type Renderer, type SelectionRange } from "../renderer/index";
 import { WebGLRenderer } from "../renderer/webgl";
@@ -72,6 +73,7 @@ let lastBg = -1;
 
 let renderer: Renderer | null = null;
 let canvasEl: HTMLCanvasElement | null = null;
+let imeEl: HTMLTextAreaElement | null = null;
 let hostEl: HTMLElement | null = null;
 let cellWidthPx = 0;
 let cellHeightPx = 0;
@@ -170,10 +172,15 @@ export function getCellMetrics(): { cellWidthPx: number; cellHeightPx: number; d
 
 export function initTerminalSession(args: {
   canvas: HTMLCanvasElement;
+  ime: HTMLTextAreaElement;
   host: HTMLElement;
   config: Config;
 }): void {
   canvasEl = args.canvas;
+  imeEl = args.ime;
+  imeEl.addEventListener("compositionstart", onImeCompositionUpdate);
+  imeEl.addEventListener("compositionupdate", onImeCompositionUpdate);
+  imeEl.addEventListener("compositionend", onImeCompositionEnd);
   hostEl = args.host;
   config = args.config;
   dpr = window.devicePixelRatio || 1;
@@ -196,6 +203,11 @@ export function teardownTerminalSession(): void {
   renderer?.dispose();
   renderer = null;
   canvasEl = null;
+  imeEl?.removeEventListener("compositionstart", onImeCompositionUpdate);
+  imeEl?.removeEventListener("compositionupdate", onImeCompositionUpdate);
+  imeEl?.removeEventListener("compositionend", onImeCompositionEnd);
+  imeEl = null;
+  imePreedit = "";
   hostEl = null;
   config = null;
   lastHoverCell = null;
@@ -327,8 +339,73 @@ export function applyTerminalBg(rgb: number): void {
   document.body.style.background = hex;
 }
 
+/** Route keyboard focus to the terminal — specifically to the hidden
+ *  IME-capture textarea, not the canvas: a canvas is never a text-input
+ *  target, so dead-key / IME composition (Option+N space → "~") only engages
+ *  when an editable element holds focus. Window-level keydown handling is
+ *  focus-agnostic; the textarea exists purely so WebKit runs the input
+ *  method and delivers the composed text via `compositionend`. */
 export function focusCanvas(): void {
-  canvasEl?.focus();
+  (imeEl ?? canvasEl)?.focus();
+}
+
+/** Pending composition text — a dead key waiting for its second keystroke
+ *  (Option+N showing "~"). Drawn underlined at the input-target pane's
+ *  cursor by `decoratePayloadForPreedit`, the marked-text visual native
+ *  terminals use. Purely visual: nothing reaches the PTY until the
+ *  composition commits. */
+let imePreedit = "";
+
+function onImeCompositionUpdate(e: CompositionEvent): void {
+  imePreedit = e.data ?? "";
+  requestDraw();
+}
+
+/** A composition on the hidden capture textarea committed (dead key or IME).
+ *  Forward the text to the focused pane as raw PTY input — the same way
+ *  native terminals deliver IME commits. This is the only path composed
+ *  characters take: their keydowns are dropped (`isComposing` / key ===
+ *  "Dead"), and `noteImeCommit` arms the keydown de-dup for WebKit's
+ *  post-composition echo events. */
+function onImeCompositionEnd(e: CompositionEvent): void {
+  imePreedit = "";
+  requestDraw();
+  if (imeEl) imeEl.value = ""; // don't let committed marked text accumulate
+  const text = e.data ?? "";
+  // Arm the keydown de-dup even for a cancelled composition (empty commit):
+  // the cancelling keystroke (Escape) is still re-reported and must not
+  // reach the PTY — it was spent cancelling the preedit.
+  noteImeCommit(text);
+  if (!text) return;
+  const target = inputTargetTabId();
+  if (target == null) return;
+  clearSelection();
+  void writeInput(target, new TextEncoder().encode(text));
+}
+
+/** Overlay the pending composition text on a *copy* of the payload headed to
+ *  the renderer (same copy-not-mutate rule as decoratePayloadForHover):
+ *  preedit codepoints underlined in default colors starting at the cursor
+ *  cell, cursor shifted past them. Identity for every payload except the
+ *  input target's while a composition is live. */
+function decoratePayloadForPreedit(snap: RenderPayload): RenderPayload {
+  if (!imePreedit) return snap;
+  const cur = snap.cursor;
+  if (!cur || !cur.visible) return snap;
+  if (snap.tab_id !== inputTargetTabId()) return snap;
+  const cells = snap.cells.slice();
+  let col = cur.x;
+  for (const ch of imePreedit) {
+    if (col >= snap.cols) break;
+    cells[cur.y * snap.cols + col] = {
+      ch: ch.codePointAt(0)!,
+      fg: snap.default_fg,
+      bg: snap.default_bg,
+      flags: FLAG_UNDERLINE,
+    };
+    col++;
+  }
+  return { ...snap, cells, cursor: { ...cur, x: Math.min(col, snap.cols - 1) } };
 }
 
 let scheduled = false;
@@ -382,7 +459,7 @@ function drawActive(): void {
         const stored = selections.get(pane.tabId);
         const sel = stored ? selectionForRender(stored, snap) : null;
         renderer.renderInto(
-          decoratePayloadForHover(snap),
+          decoratePayloadForPreedit(decoratePayloadForHover(snap)),
           sel,
           { x: pane.x, y: pane.y, w: pane.w, h: pane.h },
           {
@@ -403,7 +480,7 @@ function drawActive(): void {
   if (revalidateLinkHover(snap)) syncHoverCursor();
   const stored = selections.get(snap.tab_id);
   const sel = stored ? selectionForRender(stored, snap) : null;
-  renderer.render(decoratePayloadForHover(snap), sel);
+  renderer.render(decoratePayloadForPreedit(decoratePayloadForHover(snap)), sel);
 }
 
 /** Convert the screen-coord selection into the viewport-relative range the
