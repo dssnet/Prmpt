@@ -844,15 +844,19 @@ export function listWorkspaceTerminals(
   }));
 }
 
-/** Open a new, self-contained panel pane in the active workspace next to the
- *  pane `fromTabId` (falling back to the focused pane). Always adds a fresh
- *  pane — panels don't toggle. */
+/** Open a new, self-contained panel pane in `fromTabId`'s own workspace, next
+ *  to that pane (falling back to the focused pane). Always adds a fresh pane
+ *  — panels don't toggle. Resolves the workspace from `fromTabId` itself,
+ *  not the global active tab: callers (`openPanelFromTerminal`) may `await`
+ *  before reaching here, during which the active tab can change — anchoring
+ *  on `activeId` would then splice the panel into an unrelated workspace. */
 export function openPanelPane(
   kind: PanelKind,
   fromTabId: number,
   desc: PanelDesc,
 ): void {
-  const a = findTab(activeId.value);
+  const slotId = workspaceOfLeaf(fromTabId);
+  const a = slotId != null ? findTab(slotId) : null;
   if (!a || a.kind !== "workspace") return;
   const ws = getWorkspace(a.id);
   if (!ws) return;

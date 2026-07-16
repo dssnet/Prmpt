@@ -318,7 +318,7 @@ function describeError(err: unknown): string {
   return typeof err === "string" ? err : err instanceof Error ? err.message : String(err);
 }
 
-async function load(path: string): Promise<void> {
+async function load(path: string): Promise<boolean> {
   loading.value = true;
   error.value = null;
   try {
@@ -326,8 +326,10 @@ async function load(path: string): Promise<void> {
     cwd.value = listing.path;
     parent.value = listing.parent;
     entries.value = listing.entries;
+    return true;
   } catch (err) {
     error.value = describeError(err);
+    return false;
   } finally {
     loading.value = false;
   }
@@ -350,10 +352,12 @@ async function init(): Promise<void> {
   forwardStack.value = [];
   // A panel seeded from a terminal's cwd opens there directly, ignoring the
   // shared remembered location (and falling back to it / home if the seed no
-  // longer loads).
+  // longer loads). Success is "loaded without error", not a string match on
+  // the requested path — `list_local_dir` canonicalizes (resolves symlinks),
+  // so a raw shell $PWD like a symlinked path never equals the resolved
+  // `cwd.value` even though it loaded the right directory.
   if (props.seedPath) {
-    await load(props.seedPath);
-    if (cwd.value === props.seedPath) return;
+    if (await load(props.seedPath)) return;
     error.value = null;
   }
   // Resume the last visited directory; if it no longer loads (deleted,
@@ -362,8 +366,7 @@ async function init(): Promise<void> {
   if (mem) {
     backStack.value = [...mem.back];
     forwardStack.value = [...mem.forward];
-    await load(mem.cwd);
-    if (cwd.value === mem.cwd) return;
+    if (await load(mem.cwd)) return;
     browserLocations.delete(props.locationKey);
     backStack.value = [];
     forwardStack.value = [];
@@ -414,7 +417,7 @@ function navigate(e: LocalEntry): void {
  *  still inserts its path into the terminal. */
 function onNameClick(ev: MouseEvent, e: LocalEntry): void {
   if (ev.shiftKey || ev.metaKey || ev.ctrlKey) return;
-  if (!e.is_dir) insertPath(e, props.defaultTargetTabId);
+  if (!e.is_dir) insertPath([e], props.defaultTargetTabId);
 }
 function goUp(): void {
   if (parent.value) void visit(parent.value);
@@ -435,23 +438,29 @@ function sendToTerminal(text: string, tabId: number | null): void {
 function cdInto(e: LocalEntry, tabId: number | null): void {
   sendToTerminal(`cd ${shellQuote(e.path)}\n`, tabId);
 }
-function insertPath(e: LocalEntry, tabId: number | null): void {
-  sendToTerminal(shellQuote(e.path), tabId);
+// A multi-selection inserts every path on one line, space-separated, so it
+// drops into the terminal as one command's worth of arguments.
+function insertPath(entries: LocalEntry[], tabId: number | null): void {
+  sendToTerminal(entries.map((e) => shellQuote(e.path)).join(" "), tabId);
 }
 
 // ---- OS integration ----
-async function openInOs(e: LocalEntry): Promise<void> {
-  try {
-    await localOpen(e.path);
-  } catch (err) {
-    error.value = describeError(err);
+async function openInOs(entries: LocalEntry[]): Promise<void> {
+  for (const e of entries) {
+    try {
+      await localOpen(e.path);
+    } catch (err) {
+      error.value = describeError(err);
+    }
   }
 }
-async function reveal(e: LocalEntry): Promise<void> {
-  try {
-    await localReveal(e.path);
-  } catch (err) {
-    error.value = describeError(err);
+async function reveal(entries: LocalEntry[]): Promise<void> {
+  for (const e of entries) {
+    try {
+      await localReveal(e.path);
+    } catch (err) {
+      error.value = describeError(err);
+    }
   }
 }
 
@@ -724,13 +733,18 @@ function openRowMenu(ev: MouseEvent, e: LocalEntry): void {
     ? terminalMenuItem("cd here in terminal", (id) => cdInto(e, id))
     : null;
   if (cdItem) cdItem.icon = SquareTerminal;
-  const insertItem = terminalMenuItem("Insert path into terminal", (id) =>
-    insertPath(e, id),
+  const insertItem = terminalMenuItem(
+    group.length > 1 ? `Insert ${group.length} paths into terminal` : "Insert path into terminal",
+    (id) => insertPath(group, id),
   );
   if (insertItem) insertItem.icon = TextCursorInput;
   const items: FloatingMenuEntry[] = [
-    { text: "Open", icon: ExternalLink, action: () => void openInOs(e) },
-    { text: "Reveal in file manager", icon: FolderOpen, action: () => void reveal(e) },
+    { text: group.length > 1 ? `Open ${group.length} items` : "Open", icon: ExternalLink, action: () => void openInOs(group) },
+    {
+      text: group.length > 1 ? `Reveal ${group.length} items` : "Reveal in file manager",
+      icon: FolderOpen,
+      action: () => void reveal(group),
+    },
   ];
   const termItems = [cdItem, insertItem].filter(Boolean) as FloatingMenuItem[];
   if (termItems.length) items.push(null, ...termItems);
@@ -979,7 +993,7 @@ onBeforeUnmount(() => {
             :data-sftp-folder="e.is_dir ? e.path : undefined"
             :data-marquee-path="e.path"
             @mousedown="onRowMouseDown($event, e)"
-            @dblclick="e.is_dir ? navigate(e) : openInOs(e)"
+            @dblclick="e.is_dir ? navigate(e) : openInOs([e])"
             @contextmenu.prevent.stop="openRowMenu($event, e)"
           >
             <td class="pl-2.5 pr-1 py-1">

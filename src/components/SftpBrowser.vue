@@ -456,22 +456,37 @@ async function confirmDelete(): Promise<void> {
 }
 
 // ---- transfers ----
-async function download(e: SftpEntry): Promise<void> {
-  let dest: string | null;
-  if (e.is_dir) {
-    const parent = await openDialog({ directory: true });
-    if (!parent || Array.isArray(parent)) return;
-    dest = `${parent.replace(/\/+$/, "")}/${e.name}`;
-  } else {
-    dest = await saveDialog({ defaultPath: e.name });
-  }
-  if (!dest) return;
+async function downloadOne(e: SftpEntry, dest: string): Promise<void> {
   const id = trackTransfer(transferKey.value, props.tabId, e.name, "down", e.size || null);
   try {
     await sftpDownload(props.tabId, e.path, dest, id);
   } catch (err) {
     markTransferError(id, describeError(err));
   }
+}
+
+// A single item picks its own destination (save dialog for files, a parent
+// folder for dirs); a multi-selection picks one destination folder and each
+// item lands inside it under its own name.
+async function download(entries: SftpEntry[]): Promise<void> {
+  if (entries.length === 1) {
+    const [e] = entries;
+    let dest: string | null;
+    if (e.is_dir) {
+      const parent = await openDialog({ directory: true });
+      if (!parent || Array.isArray(parent)) return;
+      dest = `${parent.replace(/\/+$/, "")}/${e.name}`;
+    } else {
+      dest = await saveDialog({ defaultPath: e.name });
+    }
+    if (!dest) return;
+    await downloadOne(e, dest);
+    return;
+  }
+  const parent = await openDialog({ directory: true });
+  if (!parent || Array.isArray(parent)) return;
+  const dir = parent.replace(/\/+$/, "");
+  await Promise.all(entries.map((e) => downloadOne(e, `${dir}/${e.name}`)));
 }
 
 async function upload(): Promise<void> {
@@ -611,7 +626,11 @@ function openRowMenu(e: SftpEntry): void {
       ? visibleEntries.value.filter((x) => selected.value.has(x.path))
       : [e];
   void popupMenu([
-    { text: "Download", icon: Download, action: () => void download(e) },
+    {
+      text: group.length > 1 ? `Download ${group.length} items` : "Download",
+      icon: Download,
+      action: () => void download(group),
+    },
     { text: "Rename", icon: Pencil, action: () => startRename(e) },
     null,
     {

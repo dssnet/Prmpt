@@ -65,6 +65,6 @@ export function panelTitle(desc: PanelDesc): string {
 /** Fraction of the split kept by the pane being split (the panel gets the
  *  rest) when a panel opens. */
 export const PANEL_SPLIT_RATIO: Record<PanelKind, number> = {
-  files: 0.62,
-  git: 0.68,
+  files: 0.5,
+  git: 0.5,
 };
