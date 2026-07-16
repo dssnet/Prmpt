@@ -208,6 +208,15 @@ pub fn run() {
     }
 
     let builder = tauri::Builder::default()
+        // Must be the first plugin registered (per upstream docs) — it
+        // exits the process immediately if another instance is already
+        // running. The callback runs in that already-running instance and
+        // just opens a fresh window, the same thing Cmd+N / the macOS dock
+        // reactivation already do, so a relaunch never spawns a second
+        // process (see the ExitRequested/Reopen handling further down).
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            activate_blank_window(app, None);
+        }))
         .plugin(
             tauri_plugin_sql::Builder::new()
                 .add_migrations(&db_url, sql_migrations)
@@ -390,7 +399,11 @@ pub fn run() {
             // standard macOS convention). Tauri fires ExitRequested with
             // `code: None` for that path; our menu "quit" handler calls
             // `app.exit(0)` which gives `code: Some(0)`. Distinguish on
-            // that and only prevent the no-code exits.
+            // that and only prevent the no-code exits. macOS-only: Windows
+            // and Linux have no dock-icon reactivation (see the Reopen arm
+            // below), so preventing exit there orphans a windowless process
+            // with no way for the user to bring it back.
+            #[cfg(target_os = "macos")]
             RunEvent::ExitRequested { code, api, .. } if code.is_none() => {
                 api.prevent_exit();
             }
