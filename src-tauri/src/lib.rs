@@ -259,6 +259,7 @@ pub fn run() {
             commands::forget_tab,
             commands::frontend_log,
             commands::tear_off_tab,
+            commands::tear_off_window,
             commands::attach_tab,
             commands::list_tabs_for_window,
             commands::bootstrap_window,

@@ -431,6 +431,27 @@ export async function attachTab(tabId: number, targetLabel: string): Promise<voi
   await invoke("attach_tab", { tabId, targetLabel });
 }
 
+/** Label-only counterpart of `tearOffTab`: creates (or pops a reserve for)
+ *  a window positioned/sized for a tear-off drop, without attaching any
+ *  tab to it. Used for whole-workspace (multi-pane) cross-window moves,
+ *  which need the target label before they know every pane's backend id
+ *  to `attachTab`. */
+export async function tearOffWindow(args: {
+  screenX: number;
+  screenY: number;
+  width: number;
+  height: number;
+}): Promise<string> {
+  return await invoke<string>("tear_off_window", {
+    args: {
+      screen_x: args.screenX,
+      screen_y: args.screenY,
+      width: args.width,
+      height: args.height,
+    },
+  });
+}
+
 export async function listTabsForWindow(label: string): Promise<TabInfo[]> {
   return await invoke<TabInfo[]>("list_tabs_for_window", { label });
 }

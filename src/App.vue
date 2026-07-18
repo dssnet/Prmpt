@@ -91,6 +91,7 @@ import {
   consumeCrossDropPlacement,
   dropTabOut,
   installCrossDragTarget,
+  tryAbsorbIntoWorkspaceBatch,
 } from "./state/drag";
 import { notify, notifyBell } from "./state/notifications";
 import { startupView } from "./state/uiPrefs";
@@ -563,6 +564,12 @@ onMounted(async () => {
     // Sticky: once a tab was attached here, never let a stray
     // activate-blank fire spawn an extra shell on top.
     hasAdoptedTab = true;
+    // A whole multi-pane workspace crossing windows attaches its panes one
+    // backend id at a time; each one lands here first. If this id is part
+    // of such a pending batch, absorb it there instead of hydrating it as
+    // its own standalone tab — the batch assembles (and reflows) the whole
+    // tree once every id it names has arrived.
+    if (tryAbsorbIntoWorkspaceBatch(p as TabHydrateInfo)) return;
     attachTabLocal(p as TabHydrateInfo);
     // A cross-window drag drop may have buffered a placement for this tab
     // (bar slot / workspace split) — apply it before the reflow so the

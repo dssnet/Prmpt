@@ -36,6 +36,7 @@ import {
 import { Button, ConfirmDialog, Input, Modal } from "./ui";
 import {
   collectLeaves,
+  collectTerminalLeaves,
   getWorkspace,
   workspaceTick,
 } from "../state/workspace";
@@ -108,6 +109,19 @@ function tabPaneCount(t: TabState): number {
   return ws ? collectLeaves(ws.root).length : 1;
 }
 
+/** True when a multi-pane tab has no terminal leaf at all (built entirely
+ *  from split panel panes) — the one shape `dropTabOut`'s whole-workspace
+ *  cross-window move can't carry, since it needs at least one backend id to
+ *  learn the target window's label from. Single-pane tabs (terminal or
+ *  panel-only) always move fine regardless of this check. */
+function tabIsAllPanel(t: TabState): boolean {
+  void workspaceTick.value;
+  if (t.kind !== "workspace") return false;
+  const ws = getWorkspace(t.id);
+  if (!ws || collectLeaves(ws.root).length <= 1) return false;
+  return collectTerminalLeaves(ws.root).length === 0;
+}
+
 function onTabClick(t: TabState): void {
   if (performance.now() < suppressClickUntil) return;
   setActive(t.id);
@@ -139,9 +153,10 @@ interface DragState {
   startScreenX: number;
   startScreenY: number;
   active: boolean;
-  // Multi-pane workspace tabs can be reordered and merged into another
-  // workspace, but not torn off (tear-off moves one backend tab id across
-  // windows; it can't carry a tree yet).
+  // Set only for an all-panel multi-pane tab (no terminal leaf at all) —
+  // the one shape the cross-window machinery can't move, since it has no
+  // backend id to key a target-window lookup on. Every other tab (single-
+  // pane, or multi-pane with at least one terminal) can cross windows.
   noTearOff: boolean;
   // The tab's own DOM node (stable across reorder — keyed by id), the grab
   // point within it, and its width, so it can ride under the cursor.
@@ -338,9 +353,11 @@ function onTabMouseDown(t: TabState, e: MouseEvent): void {
     startScreenX: e.screenX,
     startScreenY: e.screenY,
     active: false,
-    // Any tab can be grafted into another workspace (multi-pane trees merge
-    // whole); only single-pane tabs can tear off into another window.
-    noTearOff: tabPaneCount(t) > 1,
+    // Any tab can be grafted into another workspace or cross into another
+    // window (single-pane by backend id/panel value, multi-pane as a whole
+    // tree) — except an all-panel multi-pane tab, which has no backend id
+    // for the cross-window machinery to key its target-window lookup on.
+    noTearOff: tabIsAllPanel(t),
     el,
     grabOffsetX: e.clientX - r.left,
     width: r.width,
@@ -361,7 +378,8 @@ function onDragMove(e: MouseEvent): void {
     if (dx * dx + dy * dy < DRAG_START_PX * DRAG_START_PX) return;
     drag.active = true;
     // Arm cross-window hover (fetches the other windows' rects once).
-    // noTearOff tabs can't cross windows, so they never arm it.
+    // noTearOff tabs (all-panel multi-pane) can't cross windows, so they
+    // never arm it.
     if (!drag.noTearOff) void beginCrossDrag(drag.label);
   }
   // Inside the bar: carry the tab under the cursor and reorder live.
@@ -408,7 +426,7 @@ function onDragUp(e: MouseEvent): void {
   }
   // Otherwise → leave the window: attach to the one under the cursor, or
   // tear off past the threshold. dropTabOut ends the cross-drag state.
-  if (d.noTearOff) return; // multi-pane trees can't cross windows yet
+  if (d.noTearOff) return; // all-panel multi-pane tree — can't cross windows
   if (!shouldLeaveWindow(e, d.startScreenX, d.startScreenY)) {
     endCrossDrag();
     return;

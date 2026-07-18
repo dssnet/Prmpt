@@ -343,14 +343,18 @@ function onPaneDragUp(e: MouseEvent) {
   // Released outside this window → the pane moves, same engine as tab drags:
   // a sole pane is the whole tab (dropTabOut: attach/recreate with placement,
   // or a fresh window past the threshold); one pane of many moves alone
-  // (dropLeafOut). Both route terminals by backend id and panels by value.
+  // (dropLeafOut: attach to the window under the cursor, or tear off into a
+  // fresh one — same two outcomes, no threshold, since leaving a workspace
+  // pane's own bounds already takes real travel). Both route terminals by
+  // backend id and panels by value.
   if (!pointInOwnWindow(e.clientX, e.clientY)) {
     if (d.sole) {
       if (shouldLeaveWindow(e, d.startScreenX, d.startScreenY)) {
         void dropTabOut(d.slotId, e.screenX, e.screenY);
         return;
       }
-    } else if (dropLeafOut(d.slotId, d.tabId, e.screenX, e.screenY)) {
+    } else {
+      dropLeafOut(d.slotId, d.tabId, e.screenX, e.screenY);
       return;
     }
   }

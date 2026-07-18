@@ -12,36 +12,51 @@ import {
   closeCurrentWindow,
   openPanelWindow,
   tearOffTab,
+  tearOffWindow,
   windowAtScreenPoint,
   windowDragTargets,
   type DragTargetInfo,
 } from "../ipc";
 import {
   clearWorkspaceDragPreview,
+  reflowActive,
   resolveDropAt,
   updateWorkspaceDragPreview,
 } from "./terminal";
 import {
+  addRestoredWorkspace,
   closePanelLeaf,
   closeTabAndForget,
   dropPanelIntoTarget,
   dropTabIntoTarget,
   moveTab,
   openPanelTab,
+  originFromHydrateInfo,
   panelLeafSnapshot,
   removeTabLocal,
   removeWorkspaceLeafLocal,
   solePanelLeafId,
   soleTerminalBackendId,
   useTabs,
+  type TabHydrateInfo,
 } from "./tabs";
 import {
+  allocPanelLeafId,
   isPanelLeafId,
   panelTitle,
   type PanelDesc,
   type PanelKind,
 } from "./panels";
-import { workspaceOfLeaf } from "./workspace";
+import {
+  collectTerminalLeaves,
+  getWorkspace,
+  isPanelLeaf,
+  makeLeaf,
+  makeSplit,
+  workspaceOfLeaf,
+  type SplitDir,
+  type WorkspaceNode,
+} from "./workspace";
 
 // The drag module. Every drag in the app — a tab pill, the + button, a pane
 // titlebar — shares the same anatomy, and this module owns the shared parts:
@@ -56,8 +71,9 @@ import { workspaceOfLeaf } from "./workspace";
 //    fetched at drag start and forwards translated positions over Tauri
 //    events; the target renders the same affordances locally,
 //  - the drop routines: `dropTabOut` (a whole tab leaves this window — same
-//    move whether it was grabbed by its tab pill or as a workspace's sole
-//    pane) and `dropLeafOut` (one pane of many moves alone).
+//    move whether it was grabbed by its tab pill, as a workspace's sole
+//    pane, or as a multi-pane workspace's tree via `moveWorkspaceOut`) and
+//    `dropLeafOut` (one pane of many moves alone).
 //
 // What stays in the sources is only what's genuinely different about each
 // grip: in-strip carry/reorder physics (TabBar), in-workspace re-tiling
@@ -70,6 +86,8 @@ import { workspaceOfLeaf } from "./workspace";
 //   xdrag:leave                — cursor left the target (or drag cancelled).
 //   xdrag:drop  {x, y, tab_id} — released at (x, y); tab_id is the backend id
 //                                about to be attach_tab'd to this window.
+//   xdrag:drop_workspace        — a whole multi-pane workspace's tree shape;
+//                                see the block comment above `moveWorkspaceOut`.
 
 const MY_LABEL = getCurrentWebviewWindow().label;
 const MY_TARGET: TauriEventTarget = { kind: "WebviewWindow", label: MY_LABEL };
@@ -98,6 +116,33 @@ interface CrossPanelDropPayload {
   y: number;
   desc: PanelDesc;
   title: string;
+}
+
+/** A whole multi-pane workspace's tree shape, wire-friendly: split dirs/
+ *  ratios are explicit (not resolved from cursor geometry like `xdrag:drop`),
+ *  panel leaves carry their desc/title by value, and terminal leaves carry
+ *  just their backend id — the target derives their origin from the
+ *  `TabHydrateInfo` its own `attach_tab` call delivers. See the
+ *  "whole-workspace cross-window moves" block below. */
+type WireNode =
+  | { kind: "term"; tabId: number; focused: boolean }
+  | { kind: "panel"; desc: PanelDesc; title: string; focused: boolean }
+  | { kind: "split"; dir: SplitDir; ratio: number; a: WireNode; b: WireNode };
+
+/** `xdrag:drop_workspace` — a whole multi-pane workspace released over this
+ *  window. `x`/`y` are null for an append-only drop (tear-off into a new
+ *  window, or a fallback attach with no resolved hover point); otherwise
+ *  they resolve to a bar slot or a pane split target, same as single-pane
+ *  `xdrag:drop` (see `resolveWorkspaceDropPlacement`). */
+interface CrossWorkspaceDropPayload {
+  x: number | null;
+  y: number | null;
+  tree: WireNode;
+  termIds: number[];
+  title: string;
+  hostLabel?: string;
+  hostId?: number;
+  disableSftp?: boolean;
 }
 
 // ---- Shared constants ----------------------------------------------------
@@ -369,13 +414,128 @@ async function movePanelOut(
   else closePanelLeaf(slotId, leafId);
 }
 
+// ---- Whole-workspace cross-window moves ------------------------------------
+//
+// A multi-pane workspace can't move by a single backend id (dropTabOut's
+// sole-terminal fast path above) or a single PanelDesc (movePanelOut) — it's
+// a tree of several panes. `moveWorkspaceOut` ships the tree's *shape*
+// (split dirs/ratios, panel descs, and the backend ids of its terminal
+// leaves) over `xdrag:drop_workspace` ahead of a per-leaf `attach_tab` call
+// for each terminal id — mirroring `commitCrossDrop`'s "placement before
+// attach" ordering, just for N ids instead of one.
+//
+// The target buffers that shape (`pendingWorkspaceBatches`, keyed by every
+// terminal id it names) and intercepts each matching `window:tab_attached`
+// via `tryAbsorbIntoWorkspaceBatch` — called from App.vue's onTabAttached
+// *before* its normal one-tab-per-attach hydration — rather than letting it
+// spawn its own standalone tab. Once every named id has arrived,
+// `materializeWorkspaceBatch` assembles the whole tree as one new tab. Panel
+// leaves need no attach at all — the shape already carries their desc/title,
+// recreated with fresh local ids (leaf ids are only unique within the
+// process that allocated them).
+//
+// A tree with no terminal leaf at all (an all-panel multi-pane workspace)
+// isn't covered — `attach_tab`/`tear_off_window` both need at least one
+// backend id to learn the target label from. That's a rare shape (a
+// workspace built entirely from split panel panes); `dropTabOut` leaves it
+// in place rather than moving it partially.
+
+/** Cross-window wire form of a workspace's pane tree — see the block
+ *  comment above. `focusedTabId` doesn't survive to the wire (panel leaf
+ *  ids are process-local and get replaced on arrival), so the focused leaf
+ *  marks itself instead. */
+function toWireNode(node: WorkspaceNode, focusedTabId: number): WireNode {
+  if (node.kind === "split") {
+    return {
+      kind: "split",
+      dir: node.dir,
+      ratio: node.ratio,
+      a: toWireNode(node.a, focusedTabId),
+      b: toWireNode(node.b, focusedTabId),
+    };
+  }
+  const focused = node.tabId === focusedTabId;
+  return isPanelLeaf(node)
+    ? {
+        kind: "panel",
+        desc: { ...node.origin.panel! },
+        title: node.origin.title,
+        focused,
+      }
+    : { kind: "term", tabId: node.tabId, focused };
+}
+
+function wireTermIds(node: WireNode, out: number[] = []): number[] {
+  if (node.kind === "split") {
+    wireTermIds(node.a, out);
+    wireTermIds(node.b, out);
+  } else if (node.kind === "term") {
+    out.push(node.tabId);
+  }
+  return out;
+}
+
+/** The multi-pane counterpart of `dropTabOut`'s sole-terminal/sole-panel
+ *  fast paths: moves a whole split tree to the window under the cursor, or
+ *  tears it off into a new one. Returns false for an all-panel tree (see
+ *  the block comment above) — the caller leaves it in place rather than
+ *  moving it partially. */
+async function moveWorkspaceOut(
+  slotId: number,
+  cross: { label: string; x: number; y: number } | null,
+  screenX: number,
+  screenY: number,
+): Promise<boolean> {
+  const ws = getWorkspace(slotId);
+  if (!ws || collectTerminalLeaves(ws.root).length === 0) return false;
+
+  const wire = toWireNode(ws.root, ws.focusedTabId);
+  const termIds = wireTermIds(wire);
+  const tab = useTabs().tabs.value.find((t) => t.id === slotId);
+
+  let target = cross;
+  if (!target) {
+    const label = await windowAtScreenPoint(screenX, screenY, MY_LABEL);
+    target = label ? { label, x: -1, y: -1 } : null;
+  }
+  if (!target) {
+    // Cursor in CSS pixels (matches Tauri logical units). innerWidth/
+    // innerHeight rather than outer* — WKWebView often reports zero for
+    // outer*, which would yield a 0x0 window.
+    const width = Math.max(400, window.innerWidth);
+    const height = Math.max(300, window.innerHeight);
+    const label = await tearOffWindow({ screenX, screenY, width, height });
+    target = { label, x: -1, y: -1 };
+  }
+
+  // Sent (and awaited) before any attach_tab call below, same ordering
+  // `commitCrossDrop` relies on: the target must know this batch exists
+  // before the first matching window:tab_attached lands.
+  await emitTo(targetOf(target.label), "xdrag:drop_workspace", {
+    x: cross ? target.x : null,
+    y: cross ? target.y : null,
+    tree: wire,
+    termIds,
+    title: tab?.title ?? "Terminal",
+    hostLabel: tab?.hostLabel,
+    hostId: tab?.hostId,
+    disableSftp: tab?.disableSftp,
+  } satisfies CrossWorkspaceDropPayload);
+
+  for (const id of termIds) await attachTab(id, target.label);
+
+  removeTabLocal(slotId);
+  return true;
+}
+
 /** The shared end-of-drag routine for a whole tab leaving this window — tab
  *  drags, + -button drags, and a workspace's sole pane dragged by its
- *  titlebar (same tab, different handle). A terminal tab attaches its backend
- *  to the window under the cursor (sending the drop placement its hover
- *  preview promised) or tears off into a fresh window sized like this one; a
- *  panel-only tab moves by value the same way. Removes the tab locally on
- *  success and always ends the cross-drag state. */
+ *  titlebar (same tab, different handle). A single-terminal tab attaches its
+ *  backend to the window under the cursor (sending the drop placement its
+ *  hover preview promised) or tears off into a fresh window sized like this
+ *  one; a panel-only tab moves by value the same way; a multi-pane tab with
+ *  at least one terminal leaf moves as a whole tree via `moveWorkspaceOut`.
+ *  Removes the tab locally on success and always ends the cross-drag state. */
 export async function dropTabOut(
   slotId: number,
   screenX: number,
@@ -392,8 +552,11 @@ export async function dropTabOut(
     if (backendId == null) {
       // Panel-only tab: no backend to attach — move the panel by value.
       const leafId = solePanelLeafId(slotId);
-      if (leafId == null) return; // multi-pane tree — can't move whole
-      await movePanelOut(slotId, leafId, true, cross);
+      if (leafId != null) {
+        await movePanelOut(slotId, leafId, true, cross);
+      } else if (!(await moveWorkspaceOut(slotId, cross, screenX, screenY))) {
+        return; // all-panel multi-pane tree — not yet supported, leave in place
+      }
     } else {
       const target =
         cross?.label ?? (await windowAtScreenPoint(screenX, screenY, MY_LABEL));
@@ -451,27 +614,38 @@ export function dropNewPanelOut(
   })();
 }
 
-/** Move one pane of a multi-pane workspace to the window under the cursor.
- *  Terminal panes go by backend id: placement first (bar slot / split,
- *  resolved by the target from the drop point), then attach, then prune the
- *  leaf locally — the backend keeps running throughout. Panel panes move by
- *  value (`movePanelOut`). Returns false when the cursor wasn't over another
- *  window (the caller falls back to its local handling). */
+/** Move one pane of a multi-pane workspace out of this window — the
+ *  pane-titlebar counterpart of `dropTabOut`/`moveWorkspaceOut`, called once
+ *  the cursor has left this window's own bounds. Terminal panes go by
+ *  backend id: placement first (bar slot / split, resolved by the target
+ *  from the drop point) when there's a live hover target, then attach to the
+ *  window under the cursor or tear off into a fresh one, then prune the leaf
+ *  locally — the backend keeps running throughout. Panel panes move by value
+ *  (`movePanelOut`, which already opens a fresh panel window itself when
+ *  there's no hover target). */
 export function dropLeafOut(
   slotId: number,
   tabId: number,
   screenX: number,
   screenY: number,
-): boolean {
+): void {
   const cross = crossDropTargetAt(screenX, screenY);
-  if (!cross) return false;
   void (async () => {
     try {
       if (isPanelLeafId(tabId)) {
         await movePanelOut(slotId, tabId, false, cross);
       } else {
-        await commitCrossDrop(cross, tabId);
-        await attachTab(tabId, cross.label);
+        const target =
+          cross?.label ?? (await windowAtScreenPoint(screenX, screenY, MY_LABEL));
+        if (target) {
+          if (cross) await commitCrossDrop(cross, tabId);
+          await attachTab(tabId, target);
+        } else {
+          const width = Math.max(400, window.innerWidth);
+          const height = Math.max(300, window.innerHeight);
+          const label = await tearOffWindow({ screenX, screenY, width, height });
+          await attachTab(tabId, label);
+        }
         removeWorkspaceLeafLocal(slotId, tabId);
       }
     } catch (err) {
@@ -480,7 +654,6 @@ export function dropLeafOut(
       endCrossDrag();
     }
   })();
-  return true;
 }
 
 // ---- Cross-window transport (target side) ----------------------------------
@@ -557,6 +730,132 @@ function onForeignPanelDrop(p: CrossPanelDropPayload): void {
   if (bar) moveTab(slotId, bar.beforeId);
 }
 
+/** A whole multi-pane workspace's shape, buffered here (keyed by every
+ *  terminal id it names) until each one's `window:tab_attached` has landed —
+ *  see the "whole-workspace cross-window moves" block comment above
+ *  `moveWorkspaceOut`. TTL'd like `pendingPlacements`, just longer: this
+ *  waits on N sequential attach_tab round-trips, not one. */
+interface PendingWorkspaceBatch {
+  at: number;
+  payload: CrossWorkspaceDropPayload;
+  attached: Map<number, TabHydrateInfo>;
+  apply: ((slotId: number) => void) | null;
+}
+const pendingWorkspaceBatches = new Map<number, PendingWorkspaceBatch>();
+const WORKSPACE_BATCH_TTL_MS = 8000;
+
+/** Where a whole-workspace drop lands: a bar slot, or split into the pane
+ *  under the drop point — the same two placements `onForeignDrop` resolves
+ *  for a single-pane attach, reused here via `dropTabIntoTarget` (which
+ *  already grafts a whole tree, not just a single leaf). Resolved *now*,
+ *  before the batch's tree is even assembled, for the same reason
+ *  `onForeignDrop` resolves early: `resolveDropAt` reads the currently
+ *  active tab, which is what the drop's hover preview was actually shown
+ *  against. Null for dead space (no bar, no pane hit) or an append-only
+ *  drop (tear-off, or a fallback attach with no resolved hover point) —
+ *  the assembled tree is then just appended as a new tab. */
+function resolveWorkspaceDropPlacement(
+  p: CrossWorkspaceDropPayload,
+): ((slotId: number) => void) | null {
+  if (p.x == null || p.y == null) return null;
+  const bar = barResolver?.(p.x, p.y);
+  if (bar) {
+    const beforeId = bar.beforeId;
+    return (slotId) => moveTab(slotId, beforeId);
+  }
+  const res = resolveDropAt(p.x, p.y);
+  if (!res) return null;
+  return (slotId) =>
+    void dropTabIntoTarget(
+      slotId,
+      res.slotId,
+      res.targetPaneTabId,
+      res.dir,
+      res.placeDraggedFirst,
+    );
+}
+
+function onForeignWorkspaceDrop(p: CrossWorkspaceDropPayload): void {
+  clearDragAffordances();
+  const batch: PendingWorkspaceBatch = {
+    at: performance.now(),
+    payload: p,
+    attached: new Map(),
+    apply: resolveWorkspaceDropPlacement(p),
+  };
+  for (const id of p.termIds) pendingWorkspaceBatches.set(id, batch);
+}
+
+/** Rebuild a workspace tree from its wire shape, resolving each terminal
+ *  leaf's origin from the `TabHydrateInfo` its attach delivered and
+ *  allocating a fresh local id for each panel leaf. Tracks the id marked
+ *  `focused` in the wire tree as it goes (leaf ids are reassigned for
+ *  panels, so the wire can't just carry the original focused id). */
+function buildWorkspaceFromWire(
+  node: WireNode,
+  attached: Map<number, TabHydrateInfo>,
+  focusRef: { id: number },
+): WorkspaceNode {
+  if (node.kind === "split") {
+    return makeSplit(
+      node.dir,
+      buildWorkspaceFromWire(node.a, attached, focusRef),
+      buildWorkspaceFromWire(node.b, attached, focusRef),
+      node.ratio,
+    );
+  }
+  const leaf =
+    node.kind === "panel"
+      ? makeLeaf(allocPanelLeafId(), {
+          kind: "panel",
+          title: node.title,
+          panel: node.desc,
+        })
+      : makeLeaf(node.tabId, originFromHydrateInfo(attached.get(node.tabId)!));
+  if (node.focused) focusRef.id = leaf.tabId;
+  return leaf;
+}
+
+function materializeWorkspaceBatch(batch: PendingWorkspaceBatch): void {
+  const p = batch.payload;
+  const focusRef = { id: -1 };
+  const root = buildWorkspaceFromWire(p.tree, batch.attached, focusRef);
+  // Assembled as its own tab first (mirrors the single-pane path, which
+  // always attaches as a standalone tab before `dropTabIntoTarget` grafts
+  // and consumes it) — `apply` then either reorders it in the bar, splits
+  // it into a pane (consuming this tab into the target's tree), or is null
+  // and it just stays as the new tab it already is.
+  const slotId = addRestoredWorkspace(p.title, root, focusRef.id, {
+    hostLabel: p.hostLabel,
+    hostId: p.hostId,
+    disableSftp: p.disableSftp,
+  });
+  batch.apply?.(slotId);
+  // The panes were sized for the source window; re-tile/resize them (and
+  // their backend PTYs) to this one's geometry, same as a plain attach.
+  reflowActive(useTabs().active.value);
+}
+
+/** Intercept a `window:tab_attached` event for a leaf that's part of a
+ *  pending whole-workspace batch — called from App.vue's onTabAttached
+ *  *before* its normal attachTabLocal hydration. Returns true once absorbed
+ *  (the caller must skip normal hydration for it); assembles the whole tree
+ *  into one new tab once every leaf named in the batch has arrived. */
+export function tryAbsorbIntoWorkspaceBatch(info: TabHydrateInfo): boolean {
+  const batch = pendingWorkspaceBatches.get(info.id);
+  if (!batch) return false;
+  if (performance.now() - batch.at > WORKSPACE_BATCH_TTL_MS) {
+    for (const id of batch.payload.termIds) pendingWorkspaceBatches.delete(id);
+    return false;
+  }
+  batch.attached.set(info.id, info);
+  if (batch.attached.size === batch.payload.termIds.length) {
+    for (const id of batch.payload.termIds) pendingWorkspaceBatches.delete(id);
+    materializeWorkspaceBatch(batch);
+  }
+  return true;
+}
+
 /** Apply a buffered drop placement to a freshly-attached tab. Called from the
  *  `window:tab_attached` handler with the backend tab id it carried; a no-op
  *  for ordinary (non-cross-drag) attaches. */
@@ -586,6 +885,11 @@ export async function installCrossDragTarget(): Promise<UnlistenFn[]> {
     listen<CrossPanelDropPayload>(
       "xdrag:drop_panel",
       (e) => onForeignPanelDrop(e.payload),
+      { target: MY_TARGET },
+    ),
+    listen<CrossWorkspaceDropPayload>(
+      "xdrag:drop_workspace",
+      (e) => onForeignWorkspaceDrop(e.payload),
       { target: MY_TARGET },
     ),
   ]);

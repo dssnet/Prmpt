@@ -24,6 +24,7 @@ import {
   workspaceOfLeaf,
   type LeafNode,
   type SplitDir,
+  type TabOrigin,
   type WorkspaceNode,
 } from "./workspace";
 import {
@@ -383,9 +384,17 @@ export function addRestoredWorkspace(
   label: string,
   root: WorkspaceNode,
   focusedTabId: number,
+  meta?: { hostLabel?: string; hostId?: number; disableSftp?: boolean },
 ): number {
   const slotId = allocPanelLeafId();
-  const t: TabState = { id: slotId, kind: "workspace", title: label };
+  const t: TabState = {
+    id: slotId,
+    kind: "workspace",
+    title: label,
+    hostLabel: meta?.hostLabel,
+    hostId: meta?.hostId,
+    disableSftp: meta?.disableSftp,
+  };
   tabs.value.push(t);
   setWorkspace(slotId, { root, focusedTabId });
   activeId.value = slotId;
@@ -726,6 +735,24 @@ export function hydrateTabs(infos: TabHydrateInfo[]): void {
 export function attachTab(info: TabHydrateInfo): void {
   const t = hydrateOne(info);
   if (t) activeId.value = t.id;
+}
+
+/** The `TabOrigin` a hydrated backend tab gets, from its attach/boot info
+ *  alone — the origin-construction half of `hydrateOne`, split out so a
+ *  whole-workspace cross-window move (`state/drag.ts`) can build each leaf's
+ *  origin from that leaf's own info rather than the tab-level fields
+ *  `hydrateOne`/`sshTerminalLeaf` use, which assume a single-leaf tab. */
+export function originFromHydrateInfo(info: TabHydrateInfo): TabOrigin {
+  if (info.kind === "ssh") {
+    return {
+      kind: "ssh",
+      title: info.host_label ?? `SSH ${info.id}`,
+      hostLabel: info.host_label ?? undefined,
+      hostId: info.host_id ?? undefined,
+      disableSftp: info.disable_sftp ?? undefined,
+    };
+  }
+  return { kind: "terminal", title: `Terminal ${info.id}` };
 }
 
 // ---- Panel panes ------------------------------------------------------------
