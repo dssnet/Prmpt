@@ -409,33 +409,14 @@ export async function closeCurrentWindow(): Promise<void> {
   await getCurrentWebviewWindow().close();
 }
 
-export async function tearOffTab(args: {
-  tabId: number;
-  screenX: number;
-  screenY: number;
-  width: number;
-  height: number;
-}): Promise<string> {
-  return await invoke<string>("tear_off_tab", {
-    args: {
-      tab_id: args.tabId,
-      screen_x: args.screenX,
-      screen_y: args.screenY,
-      width: args.width,
-      height: args.height,
-    },
-  });
-}
-
 export async function attachTab(tabId: number, targetLabel: string): Promise<void> {
   await invoke("attach_tab", { tabId, targetLabel });
 }
 
-/** Label-only counterpart of `tearOffTab`: creates (or pops a reserve for)
- *  a window positioned/sized for a tear-off drop, without attaching any
- *  tab to it. Used for whole-workspace (multi-pane) cross-window moves,
- *  which need the target label before they know every pane's backend id
- *  to `attachTab`. */
+/** Creates (or pops a reserve for) a window positioned/sized for a tear-off
+ *  drop, without attaching any tab to it — every cross-window move (whole
+ *  tab, one pane, or a fresh "+"-button spawn) learns the target label from
+ *  this, then attaches each backend id itself via `attachTab`. */
 export async function tearOffWindow(args: {
   screenX: number;
   screenY: number;

@@ -56,9 +56,9 @@ import {
   clearDragAffordances,
   DRAG_START_PX,
   dragAffordances,
-  dropLeafOut,
-  dropTabOut,
   endCrossDrag,
+  moveLeafOut,
+  moveTabOut,
   pointInOwnWindow,
   resolveBarDrop,
   shouldLeaveWindow,
@@ -264,7 +264,7 @@ let paneDrag: {
   // won't happen.
   detachable: boolean;
   // The workspace's only pane: dragging it out is the same move as dragging
-  // the tab itself, so the drop routes through the shared dropTabOut (whole
+  // the tab itself, so the drop routes through the shared moveTabOut (whole
   // tab moves / tears off) instead of the prune-one-leaf path.
   sole: boolean;
 } | null = null;
@@ -341,20 +341,20 @@ function onPaneDragUp(e: MouseEvent) {
     return;
   }
   // Released outside this window → the pane moves, same engine as tab drags:
-  // a sole pane is the whole tab (dropTabOut: attach/recreate with placement,
+  // a sole pane is the whole tab (moveTabOut: attach/recreate with placement,
   // or a fresh window past the threshold); one pane of many moves alone
-  // (dropLeafOut: attach to the window under the cursor, or tear off into a
+  // (moveLeafOut: attach to the window under the cursor, or tear off into a
   // fresh one — same two outcomes, no threshold, since leaving a workspace
   // pane's own bounds already takes real travel). Both route terminals by
   // backend id and panels by value.
   if (!pointInOwnWindow(e.clientX, e.clientY)) {
     if (d.sole) {
       if (shouldLeaveWindow(e, d.startScreenX, d.startScreenY)) {
-        void dropTabOut(d.slotId, e.screenX, e.screenY);
+        void moveTabOut(d.slotId, e.screenX, e.screenY);
         return;
       }
     } else {
-      dropLeafOut(d.slotId, d.tabId, e.screenX, e.screenY);
+      moveLeafOut(d.slotId, d.tabId, e.screenX, e.screenY);
       return;
     }
   }

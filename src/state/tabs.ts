@@ -199,17 +199,6 @@ export function isWorkspaceTab(t: TabState | null | undefined): boolean {
   return !!t && t.kind === "workspace";
 }
 
-/** The backend id of a single-pane tab's terminal leaf, or null when the tab
- *  is multi-pane or panel-only. Tear-off moves exactly one backend tab across
- *  windows, so this is the id `tear_off_tab` / `attach_tab` need. */
-export function soleTerminalBackendId(slotId: number): number | null {
-  const ws = getWorkspace(slotId);
-  if (!ws) return null;
-  const leaves = collectLeaves(ws.root);
-  if (leaves.length !== 1 || isPanelLeaf(leaves[0])) return null;
-  return leaves[0].tabId;
-}
-
 /** First terminal leaf of a tab — the anchor/cwd fallback when the focused
  *  pane is a panel (`inputTargetTabId()` returns null there). Null for
  *  panel-only workspaces. */
@@ -755,6 +744,22 @@ export function originFromHydrateInfo(info: TabHydrateInfo): TabOrigin {
   return { kind: "terminal", title: `Terminal ${info.id}` };
 }
 
+/** The TabState-level host fields a hydrated backend tab gets, from its
+ *  attach/boot info alone — the tab-level counterpart of
+ *  `originFromHydrateInfo`. Used when a lone terminal leaf moves out of a
+ *  multi-pane workspace (`state/drag.ts`'s `moveLeafOut`) and lands as its
+ *  own new tab with no whole-tab metadata to draw on. */
+export function metaFromHydrateInfo(
+  info: TabHydrateInfo,
+): { hostLabel?: string; hostId?: number; disableSftp?: boolean } {
+  if (info.kind !== "ssh") return {};
+  return {
+    hostLabel: info.host_label ?? undefined,
+    hostId: info.host_id ?? undefined,
+    disableSftp: info.disable_sftp ?? undefined,
+  };
+}
+
 // ---- Panel panes ------------------------------------------------------------
 // Panels (file browser, git, …) are workspace leaves like terminals, just
 // frontend-only: opening one on a plain tab converts the tab into a workspace
@@ -767,31 +772,6 @@ function makePanelLeaf(desc: PanelDesc, title?: string): LeafNode {
     title: title || panelTitle(desc),
     panel: desc,
   });
-}
-
-/** The leaf id of a panel-only tab's single pane, or null when the tab is
- *  multi-pane or terminal-backed — the panel counterpart of
- *  `soleTerminalBackendId`, for whole-tab moves. */
-export function solePanelLeafId(slotId: number): number | null {
-  const ws = getWorkspace(slotId);
-  if (!ws) return null;
-  const leaves = collectLeaves(ws.root);
-  if (leaves.length !== 1 || !isPanelLeaf(leaves[0])) return null;
-  return leaves[0].tabId;
-}
-
-/** Snapshot a panel pane for a cross-window move: its `PanelDesc` seeds
- *  (copied — the source leaf is about to be closed) and live title. Panels
- *  persist their current folder back onto the seed (`setPanelLeafSeedPath`),
- *  so recreating from this snapshot reopens the panel where it was. */
-export function panelLeafSnapshot(
-  slotId: number,
-  leafId: number,
-): { desc: PanelDesc; title: string } | null {
-  const ws = getWorkspace(slotId);
-  const leaf = ws ? findLeafByTabId(ws.root, leafId) : null;
-  if (!leaf || !leaf.origin.panel) return null;
-  return { desc: { ...leaf.origin.panel }, title: leaf.origin.title };
 }
 
 /** Close a panel pane; the workspace closes entirely when its last pane goes.
@@ -975,8 +955,10 @@ export async function openPanelOnActive(kind: PanelKind): Promise<void> {
 export function removeWorkspaceLeafLocal(slotId: number, tabId: number): void {
   const ws = getWorkspace(slotId);
   if (!ws) return;
+  const leaf = findLeafByTabId(ws.root, tabId);
   snapshots.delete(tabId);
   sshReconnecting.delete(tabId);
+  if (leaf?.origin.panel?.kind === "files") releaseSftpForPane(tabId);
   applyWorkspaceRemoval(slotId, tabId, removeLeaf(ws.root, tabId));
 }
 
@@ -996,6 +978,11 @@ export function removeTabLocal(id: number): void {
       // on the next retry — "ssh:reconnecting" re-fires on every failed
       // attempt.
       sshReconnecting.delete(leaf.tabId);
+      // A files-panel leaf's SFTP consumer is registered to this window;
+      // release it here the same way closeTabAndForget/closePanelLeaf do,
+      // so the pooled connection drops (or hands off) instead of leaking a
+      // registration to a window that no longer holds the pane.
+      if (leaf.origin.panel?.kind === "files") releaseSftpForPane(leaf.tabId);
     }
   }
   deleteWorkspace(id);

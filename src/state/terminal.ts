@@ -24,8 +24,6 @@ import { measureCell, type Renderer, type SelectionRange } from "../renderer/ind
 import { WebGLRenderer } from "../renderer/webgl";
 import {
   activeSnapshot,
-  dropPanelIntoTarget,
-  dropTabIntoTarget,
   firstTerminalLeafId,
   focusWorkspacePane,
   isWorkspaceTab,
@@ -1206,47 +1204,6 @@ export function pointOverTerminal(clientX: number, clientY: number): boolean {
   const { active } = useTabs();
   if (!active.value || active.value.kind === "home") return false;
   return clientToLocal(clientX, clientY) !== null;
-}
-
-/** Perform the drop of `draggedId` at this client point. Returns true if it
- *  was consumed into a workspace (caller should then skip tear-off). */
-export function commitWorkspaceDrop(
-  draggedId: number,
-  clientX: number,
-  clientY: number,
-): boolean {
-  const res = resolveDropAt(clientX, clientY, draggedId);
-  wsDragPreview.value = null;
-  if (!res) return false;
-  const slot = dropTabIntoTarget(
-    draggedId,
-    res.slotId,
-    res.targetPaneTabId,
-    res.dir,
-    res.placeDraggedFirst,
-  );
-  return slot != null;
-}
-
-/** Like `commitWorkspaceDrop`, but drops a *new* panel (file browser / git)
- *  at this client point instead of an existing tab — for a + menu option
- *  dragged onto the terminal area. Returns true if it landed in a workspace. */
-export function commitPanelWorkspaceDrop(
-  kind: PanelKind,
-  clientX: number,
-  clientY: number,
-): boolean {
-  const res = resolveDropAt(clientX, clientY);
-  wsDragPreview.value = null;
-  if (!res) return false;
-  const slot = dropPanelIntoTarget(
-    { kind },
-    res.slotId,
-    res.targetPaneTabId,
-    res.dir,
-    res.placeDraggedFirst,
-  );
-  return slot != null;
 }
 
 /** Commit a divider drag: pointer position → new ratio for `splitId`. */

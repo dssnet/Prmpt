@@ -88,10 +88,9 @@ import {
   windowCloseMessage,
 } from "./state/closeGuard";
 import {
-  consumeCrossDropPlacement,
-  dropTabOut,
   installCrossDragTarget,
-  tryAbsorbIntoWorkspaceBatch,
+  moveTabOut,
+  tryAbsorbIntoMoveBatch,
 } from "./state/drag";
 import { notify, notifyBell } from "./state/notifications";
 import { startupView } from "./state/uiPrefs";
@@ -281,7 +280,7 @@ async function newTabInWindow(
     cellHeightPx: Math.round(cellHeightPx * dpr),
     cwd,
   });
-  await dropTabOut(newId, screenX, screenY);
+  await moveTabOut(newId, screenX, screenY);
 }
 
 function scrollActive(
@@ -564,17 +563,13 @@ onMounted(async () => {
     // Sticky: once a tab was attached here, never let a stray
     // activate-blank fire spawn an extra shell on top.
     hasAdoptedTab = true;
-    // A whole multi-pane workspace crossing windows attaches its panes one
-    // backend id at a time; each one lands here first. If this id is part
-    // of such a pending batch, absorb it there instead of hydrating it as
-    // its own standalone tab — the batch assembles (and reflows) the whole
-    // tree once every id it names has arrived.
-    if (tryAbsorbIntoWorkspaceBatch(p as TabHydrateInfo)) return;
+    // A moved tab (or workspace tree) crossing windows attaches its panes
+    // one backend id at a time; each one lands here first. If this id is
+    // part of such a pending move batch, absorb it there instead of
+    // hydrating it as its own standalone tab — the batch assembles, places,
+    // and reflows the whole tree once every id it names has arrived.
+    if (tryAbsorbIntoMoveBatch(p as TabHydrateInfo)) return;
     attachTabLocal(p as TabHydrateInfo);
-    // A cross-window drag drop may have buffered a placement for this tab
-    // (bar slot / workspace split) — apply it before the reflow so the
-    // resize targets the final pane geometry.
-    consumeCrossDropPlacement(p.id);
     // Resize newly-attached tabs to this window's geometry; their dims were
     // sized for the source window and likely no longer match.
     reflowActive(active.value);

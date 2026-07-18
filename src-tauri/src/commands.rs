@@ -302,15 +302,6 @@ pub fn frontend_log(window: WebviewWindow, level: String, message: String) {
 }
 
 #[derive(serde::Deserialize)]
-pub struct TearOffArgs {
-    pub tab_id: u64,
-    pub screen_x: f64,
-    pub screen_y: f64,
-    pub width: f64,
-    pub height: f64,
-}
-
-#[derive(serde::Deserialize)]
 pub struct TearOffWindowArgs {
     pub screen_x: f64,
     pub screen_y: f64,
@@ -319,15 +310,11 @@ pub struct TearOffWindowArgs {
 }
 
 /// Pop a `Ready` reserve (resizing/repositioning/showing it) or build a
-/// fresh window at the given screen geometry — the shared "give me a
-/// window for this tear-off drop" mechanics behind `tear_off_tab` (which
-/// also attaches one backend tab in the same round-trip) and
-/// `tear_off_window` (whole-workspace moves, which need the label before
-/// they know every backend id to attach — a multi-pane workspace has no
-/// single "the" tab to hand `tear_off_tab`). Returns the label and whether
-/// it came from an already-booted reserve (its frontend listeners are
-/// live, so an event can be emitted to it immediately) or a freshly built
-/// window (still cold-starting — only the registry-backed
+/// fresh window at the given screen geometry — the mechanics behind
+/// `tear_off_window`. Returns the label and whether it came from an
+/// already-booted reserve (its frontend listeners are live, so an event
+/// can be emitted to it immediately) or a freshly built window (still
+/// cold-starting — only the registry-backed
 /// `list_tabs_for_window`/`bootstrap_window` discovery path reaches it
 /// reliably, not a live emit).
 fn pop_or_build_tear_off_window(
@@ -410,66 +397,16 @@ fn pop_or_build_tear_off_window(
     Ok((label, false))
 }
 
-#[tauri::command]
-pub fn tear_off_tab(
-    app: AppHandle,
-    registry: State<'_, SharedRegistry>,
-    counter: State<'_, SharedWindowCounter>,
-    pending: State<'_, SharedPendingHydration>,
-    pool: State<'_, SharedWindowPool>,
-    args: TearOffArgs,
-) -> AppResult<String> {
-    let (label, from_reserve) = pop_or_build_tear_off_window(
-        &app,
-        &registry,
-        &counter,
-        &pool,
-        args.screen_x,
-        args.screen_y,
-        args.width,
-        args.height,
-    )?;
-
-    registry.set_window(args.tab_id, label.clone())?;
-
-    if from_reserve {
-        // Emit the same attach event tabs use when dragged into an
-        // existing window. The reserve's frontend already finished
-        // bootstrap (otherwise pop_for_tear_off would have returned
-        // None), so its onTabAttached listener is installed. The
-        // frontend dedups by tab id, so even if bootstrap_window also
-        // returns this tab via tabs_in_window, the second add is a
-        // no-op.
-        if let Some(info) = registry.info(args.tab_id) {
-            let _ = app.emit_to(
-                EventTarget::webview_window(&label),
-                "window:tab_attached",
-                info,
-            );
-        }
-    } else {
-        // Stash the hydration list so the frontend's first call to
-        // list_tabs_for_window (after the fresh webview boots) sees this
-        // tab — a live attach event would arrive before its listeners
-        // are installed and be lost.
-        pending
-            .0
-            .lock()
-            .entry(label.clone())
-            .or_default()
-            .push(args.tab_id);
-    }
-
-    Ok(label)
-}
-
-/// Label-only counterpart of `tear_off_tab`: creates (or pops a reserve
-/// for) a window positioned/sized for a tear-off drop, without attaching
-/// any tab to it. Used by whole-workspace cross-window moves
-/// (`src/state/drag.ts::moveWorkspaceOut`) — a multi-pane workspace has no
-/// single backend id to hand `tear_off_tab`, so the frontend needs the
-/// target label up front and then attaches each pane's backend id itself
-/// via `attach_tab`.
+/// Creates (or pops a reserve for) a window positioned/sized for a
+/// tear-off drop, without attaching any tab to it. Every cross-window move
+/// (whole tab, one pane, or a fresh "+"-button spawn — see
+/// `src/state/drag.ts`'s `moveOut`) learns the target label from this, then
+/// attaches each backend id itself via `attach_tab`. A cold (non-reserve)
+/// target is still safe: `attach_tab` calls `registry.set_window()`
+/// synchronously, well before the freshly-built window's JS gets around to
+/// calling `bootstrap_window`, so `list_tabs_for_window`'s registry-backed
+/// union recovers it even if the live `window:tab_attached`/`xdrag:*` emit
+/// is lost to the boot race.
 #[tauri::command]
 pub fn tear_off_window(
     app: AppHandle,

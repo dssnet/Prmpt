@@ -42,21 +42,19 @@ import {
 } from "../state/workspace";
 import NotificationCenter from "./NotificationCenter.vue";
 import UpdateIcon from "./UpdateIcon.vue";
-import {
-  commitPanelWorkspaceDrop,
-  commitWorkspaceDrop,
-  pointOverTerminal,
-} from "../state/terminal";
+import { pointOverTerminal } from "../state/terminal";
 import {
   barInsertPoint,
   beginCrossDrag,
   clearDragAffordances,
+  commitLocalPanelDrop,
+  commitLocalTabDrop,
   DRAG_START_PX,
   dragAffordances,
-  dropNewPanelOut,
-  dropTabOut,
   endCrossDrag,
   moveCrossDrag,
+  moveNewPanelOut,
+  moveTabOut,
   registerBarDropResolver,
   shouldLeaveWindow,
   unregisterBarDropResolver,
@@ -110,10 +108,12 @@ function tabPaneCount(t: TabState): number {
 }
 
 /** True when a multi-pane tab has no terminal leaf at all (built entirely
- *  from split panel panes) — the one shape `dropTabOut`'s whole-workspace
- *  cross-window move can't carry, since it needs at least one backend id to
- *  learn the target window's label from. Single-pane tabs (terminal or
- *  panel-only) always move fine regardless of this check. */
+ *  from split panel panes) — the one shape `moveOut`'s whole-tab move can't
+ *  safely tear off into a *new* window, since it needs at least one backend
+ *  id for the target to recover the payload if the live event loses the
+ *  boot race (see the block comment above `MoveSource` in `state/drag.ts`).
+ *  Single-pane tabs (terminal or panel-only) always move fine regardless of
+ *  this check. */
 function tabIsAllPanel(t: TabState): boolean {
   void workspaceTick.value;
   if (t.kind !== "workspace") return false;
@@ -421,17 +421,17 @@ function onDragUp(e: MouseEvent): void {
   // Released over this window's terminal area → workspace split/merge.
   if (pointOverTerminal(e.clientX, e.clientY)) {
     endCrossDrag();
-    commitWorkspaceDrop(d.tabId, e.clientX, e.clientY);
+    commitLocalTabDrop(d.tabId, e.clientX, e.clientY);
     return;
   }
   // Otherwise → leave the window: attach to the one under the cursor, or
-  // tear off past the threshold. dropTabOut ends the cross-drag state.
+  // tear off past the threshold. moveTabOut ends the cross-drag state.
   if (d.noTearOff) return; // all-panel multi-pane tree — can't cross windows
   if (!shouldLeaveWindow(e, d.startScreenX, d.startScreenY)) {
     endCrossDrag();
     return;
   }
-  void dropTabOut(d.tabId, e.screenX, e.screenY);
+  void moveTabOut(d.tabId, e.screenX, e.screenY);
 }
 
 // The + button (and the panel options in its right-click menu) share the tabs'
@@ -514,17 +514,17 @@ function onSpawnUp(e: MouseEvent): void {
   if (pointOverTerminal(e.clientX, e.clientY)) {
     endCrossDrag();
     if (kind === "terminal") emit("newTabWorkspace", e.clientX, e.clientY, sameCwd);
-    else commitPanelWorkspaceDrop(kind, e.clientX, e.clientY);
+    else commitLocalPanelDrop(kind, e.clientX, e.clientY);
     return;
   }
   // Leaving the window (over another Prmpt window, or far enough out for a
   // new one) → open there.
   if (shouldLeaveWindow(e, d.startScreenX, d.startScreenY)) {
     if (kind === "terminal") {
-      // App spawns the shell, then hands it to the shared dropTabOut.
+      // App spawns the shell, then hands it to the shared moveTabOut.
       emit("newTabWindow", e.screenX, e.screenY, sameCwd);
     } else {
-      dropNewPanelOut(kind, e.screenX, e.screenY);
+      moveNewPanelOut(kind, e.screenX, e.screenY);
     }
     return;
   }
