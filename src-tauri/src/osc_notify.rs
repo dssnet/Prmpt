@@ -161,19 +161,23 @@ impl OscNotifyScanner {
                 kind: ColorQueryKind::Background,
                 bel_terminated,
             }),
-            "9" => match rest.strip_prefix("9;") {
+            "9" => match rest.split_once(';') {
                 // OSC 9 subcommand 9 is ConEmu/Windows Terminal "report
                 // cwd", not a notification. Windows Terminal's canonical
                 // pwsh snippet wraps the path in double quotes.
-                Some(path) => {
+                Some(("9", path)) => {
                     let path = path.trim_matches('"');
                     if !path.is_empty() {
                         out.cwd = Some(path.to_string());
                     }
                 }
+                // OSC 9 subcommand 4 is ConEmu/Windows Terminal progress
+                // reporting (`9;4;state;percent` — Cargo emits it during
+                // builds). Not a notification; ignored.
+                Some(("4", _)) => {}
                 // Anything else after `OSC 9;` is a notification message
                 // (semicolons included).
-                None => out.notifications.push(OscNotification {
+                _ => out.notifications.push(OscNotification {
                     title: None,
                     body: Some(rest.to_string()),
                 }),
@@ -387,6 +391,22 @@ mod tests {
         // Unquoted works too.
         let got = s.scan(b"\x1b]9;9;D:\\src\x1b\\");
         assert_eq!(got.cwd.as_deref(), Some("D:\\src"));
+    }
+
+    #[test]
+    fn osc94_progress_is_not_a_notification() {
+        let mut s = OscNotifyScanner::new();
+        // Cargo's build progress: state 1 (normal), 62%.
+        let got = s.scan(b"\x1b]9;4;1;62\x1b\\");
+        assert!(got.notifications.is_empty());
+        assert_eq!(got.cwd, None);
+        // Progress-clear (state 0) too, and BEL-terminated.
+        assert!(s.scan(b"\x1b]9;4;0;\x07").notifications.is_empty());
+        // A real iTerm2-style notification still gets through.
+        assert_eq!(
+            s.scan(b"\x1b]9;done\x07").notifications,
+            vec![note(None, Some("done"))]
+        );
     }
 
     #[test]
