@@ -249,11 +249,19 @@ export class WebGLRenderer implements Renderer {
   resize(pxWidth: number, pxHeight: number, cols: number, rows: number): void {
     const w = Math.max(1, Math.round(pxWidth * this.m.dpr));
     const h = Math.max(1, Math.round(pxHeight * this.m.dpr));
-    this.canvas.width = w;
-    this.canvas.height = h;
+    // Reassigning canvas.width/height forces the browser to tear down and
+    // reallocate the GPU drawing-buffer even when the size is unchanged.
+    // Skip it when nothing moved — this is called on every workspaceTick,
+    // including once per animation frame during a pane-divider drag, and
+    // the repeated reallocation churn is a real source of GPU-process
+    // memory growth on Windows (ANGLE/D3D11).
+    if (this.canvas.width !== w || this.canvas.height !== h) {
+      this.canvas.width = w;
+      this.canvas.height = h;
+      this.gl.viewport(0, 0, w, h);
+    }
     this.canvas.style.width = `${pxWidth}px`;
     this.canvas.style.height = `${pxHeight}px`;
-    this.gl.viewport(0, 0, w, h);
     this.ensureCapacity(cols * rows);
   }
 

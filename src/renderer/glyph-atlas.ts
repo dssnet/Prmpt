@@ -97,10 +97,17 @@ export class GlyphAtlas {
       this.rowH = 0;
     }
     if (this.nextY + h > ATLAS_SIZE) {
-      console.warn("glyph atlas exhausted; reusing slot 0");
+      console.warn("glyph atlas exhausted; clearing and re-baking from slot 0");
+      // Recycling the pixel space without clearing `slots` left old entries
+      // pointing at atlas UVs that later bakes silently overwrite (stale
+      // glyphs) and let the Map grow without bound for the renderer's
+      // lifetime. Clear the index along with the pixel cursor so both stay
+      // in sync.
+      this.slots.clear();
       this.nextX = 0;
       this.nextY = 0;
       this.rowH = 0;
+      this.ctx.clearRect(0, 0, ATLAS_SIZE, ATLAS_SIZE);
     }
     const x = this.nextX;
     const y = this.nextY;
