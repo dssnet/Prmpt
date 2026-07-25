@@ -706,10 +706,20 @@ pub fn configure_new_window<R: Runtime>(window: &WebviewWindow<R>) {
     let label = window.label().to_string();
     let app = window.app_handle().clone();
     window.on_window_event(move |event| {
-        if matches!(event, WindowEvent::Focused(true)) {
-            let mut order = FOCUS_ORDER.lock();
-            order.retain(|l| l != &label);
-            order.insert(0, label.clone());
+        if let WindowEvent::Focused(focused) = event {
+            if *focused {
+                let mut order = FOCUS_ORDER.lock();
+                order.retain(|l| l != &label);
+                order.insert(0, label.clone());
+            }
+            // Backgrounded windows don't paint (WKWebView pauses rAF while
+            // hidden/occluded), so back off each of this window's tabs'
+            // render-emit rate while unfocused — otherwise heavy PTY output
+            // (e.g. a coding agent running unattended) floods the webview's
+            // IPC decode with a backlog that only drains after refocus,
+            // which is what shows up as a temporary freeze/low-FPS stretch.
+            let registry = app.state::<tab::SharedRegistry>();
+            registry.set_focused(&label, *focused);
         }
         if matches!(event, WindowEvent::Destroyed) {
             FOCUS_ORDER.lock().retain(|l| l != &label);

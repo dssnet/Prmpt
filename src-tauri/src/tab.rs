@@ -118,6 +118,15 @@ pub enum TabCmd {
         reply: Sender<String>,
     },
     SetWindow(String),
+    /// The owning window's focus state changed. Backgrounded/occluded
+    /// windows don't paint anything (WKWebView pauses rAF while hidden),
+    /// but nothing stopped the tab loop from still emitting full-grid
+    /// snapshots at full rate — under heavy PTY output that floods the
+    /// webview's IPC decode with a backlog it only drains after refocus,
+    /// which is what causes the temporary freeze/low-FPS stretch. Slows
+    /// the emit debounce while unfocused and forces one immediate emit on
+    /// refocus so the resumed view is up to date right away.
+    SetFocused(bool),
     /// Ask which process group is in the PTY's foreground right now, for the
     /// confirm-on-close guard. Replies `Some` only when that group differs
     /// from the shell we spawned (i.e. a program is running); SSH backends
@@ -742,6 +751,19 @@ impl TabRegistry {
             .map(|(id, _)| *id)
             .collect()
     }
+
+    /// Notify every tab currently owned by `label` of the window's new
+    /// focus state (see `TabCmd::SetFocused`). Best-effort — a tab whose
+    /// thread already exited just drops the send.
+    pub fn set_focused(&self, label: &str, focused: bool) {
+        let ids = self.tabs_in_window(label);
+        let guard = self.inner.lock();
+        for id in ids {
+            if let Some(h) = guard.get(&id) {
+                let _ = h.cmd_tx.send(TabCmd::SetFocused(focused));
+            }
+        }
+    }
 }
 
 /// Encode one mouse event against the terminal's live tracking mode + output
@@ -920,7 +942,13 @@ fn run_tab_loop(
     let mut pending_emit = false;
     let mut emit_count: u64 = 0;
     let mut last_emit = Instant::now();
-    let debounce = Duration::from_millis(8);
+    // Backgrounded/occluded windows don't paint (rAF is paused), so a
+    // focused tab keeps the snappy 8ms debounce while an unfocused one
+    // backs off hard — nothing is consuming the intermediate frames, and
+    // emitting them anyway just floods the webview's IPC decode with a
+    // backlog it has to drain after refocus. TabCmd::SetFocused toggles
+    // this and forces one immediate emit on refocus.
+    let mut focused = true;
 
     let timeout_tick = Duration::from_millis(5);
     loop {
@@ -1027,6 +1055,12 @@ fn run_tab_loop(
                 Ok(TabCmd::SetWindow(label)) => {
                     owner_window = label;
                     pending_emit = true;
+                }
+                Ok(TabCmd::SetFocused(f)) => {
+                    focused = f;
+                    if f {
+                        pending_emit = true;
+                    }
                 }
                 Ok(TabCmd::Scroll(kind)) => {
                     let sv = match kind {
@@ -1295,6 +1329,11 @@ fn run_tab_loop(
             }
         }
 
+        let debounce = if focused {
+            Duration::from_millis(8)
+        } else {
+            Duration::from_millis(500)
+        };
         if pending_emit && last_emit.elapsed() >= debounce {
             generation += 1;
             let theme = config.lock().theme.clone();
