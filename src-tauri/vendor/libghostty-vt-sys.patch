@@ -1,8 +1,8 @@
 diff --git a/crates/libghostty-vt-sys/build.rs b/crates/libghostty-vt-sys/build.rs
-index 4a54faf..60ab624 100644
+index 4a54faf..e3817c0 100644
 --- a/crates/libghostty-vt-sys/build.rs
 +++ b/crates/libghostty-vt-sys/build.rs
-@@ -2,6 +2,27 @@ use std::env;
+@@ -2,6 +2,30 @@ use std::env;
  use std::path::{Path, PathBuf};
  use std::process::Command;
  
@@ -19,6 +19,9 @@ index 4a54faf..60ab624 100644
 +//     the common user floor; without this pin Zig's compiler-rt picks
 +//     instructions (SVE2 on aarch64, AVX on x86_64) that SIGILL on
 +//     Apple Silicon under Linux, Raspberry Pi 4 / Cortex-A72, etc.
++//   * Windows native builds pass `-Dcpu=baseline` for the same reason
++//     (0xc000001d in ghostty-vt.dll on user machines otherwise); they
++//     keep native target detection so the DLL's ABI/CRT is unchanged.
 +//   * iOS links a self-contained static archive: `merge_ios_cpp_deps`
 +//     folds simdutf/highway/utfcpp into `libghostty-vt-ios.a`.
 +//   * Re-exports `cargo:libdir` / `cargo:lib_filename` so prmpt's own
@@ -30,7 +33,7 @@ index 4a54faf..60ab624 100644
  /// Pinned ghostty commit. Update this to pull a newer version.
  const GHOSTTY_REPO: &str = "https://github.com/ghostty-org/ghostty.git";
  const GHOSTTY_COMMIT: &str = "6590196661f769dd8f2b3e85d6c98262c4ec5b3b";
-@@ -156,11 +177,34 @@ fn build_vendored(link_mode: LinkMode) {
+@@ -156,11 +180,47 @@ fn build_vendored(link_mode: LinkMode) {
              .arg(&zig_global_cache_dir);
      }
  
@@ -45,9 +48,10 @@ index 4a54faf..60ab624 100644
 +    // Zig auto-detect `-mcpu=native` then bakes those into compiler-rt
 +    // (e.g. `memset`) and the binary SIGILLs on user machines. Passing
 +    // -Dtarget without -Dcpu makes Zig default to `baseline`, which is
-+    // the safe portable floor. For native macOS / Windows we keep the
-+    // upstream auto-detect behavior — the runner/user CPU floors there
-+    // overlap closely.
++    // the safe portable floor. Native macOS keeps the upstream
++    // auto-detect behavior — Ghostty itself pins mac builds to a
++    // generic CPU model, and releases cross-compile via
++    // `--target universal-apple-darwin` anyway.
 +    if target != host || target.contains("linux") {
          let zig_target = zig_target(&target);
          build.arg(format!("-Dtarget={zig_target}"));
@@ -65,10 +69,22 @@ index 4a54faf..60ab624 100644
 +        ) {
 +            build.arg("-Dcpu=apple_a14");
 +        }
++    } else if target.contains("windows") {
++        // Native Windows builds keep Zig's host target detection (that
++        // preserves today's ABI/CRT choice for ghostty-vt.dll) but must
++        // pin the CPU: the windows-latest / windows-11-arm release
++        // runners have server CPUs (AVX-512-capable Xeons, Neoverse-N2
++        // with SVE2) whose features consumer hardware lacks — even
++        // current gaming CPUs (Intel 12th–14th gen fuse AVX-512 off).
++        // Without the pin the DLL dies with STATUS_ILLEGAL_INSTRUCTION
++        // (0xc000001d) on user machines. `-Dcpu` alone changes only the
++        // CPU model, unlike `-Dtarget`, which would flip the detected
++        // gnu ABI to msvc.
++        build.arg("-Dcpu=baseline");
      }
  
      run(build, "zig build");
-@@ -169,22 +213,21 @@ fn build_vendored(link_mode: LinkMode) {
+@@ -169,22 +229,21 @@ fn build_vendored(link_mode: LinkMode) {
      let include_dir = install_prefix.join("include");
      warn_unused_xcframework(&lib_dir);
  
@@ -105,7 +121,7 @@ index 4a54faf..60ab624 100644
          link_mode.artifact_kind(),
          lib_dir.display()
      );
-@@ -195,11 +238,132 @@ fn build_vendored(link_mode: LinkMode) {
+@@ -195,11 +254,132 @@ fn build_vendored(link_mode: LinkMode) {
      );
  
      println!("cargo:rustc-link-search=native={}", lib_dir.display());
@@ -241,7 +257,7 @@ index 4a54faf..60ab624 100644
  }
  
  fn warn_unused_xcframework(lib_dir: &Path) {
-@@ -364,6 +528,23 @@ fn zig_target(target: &str) -> String {
+@@ -364,6 +544,23 @@ fn zig_target(target: &str) -> String {
          "aarch64-unknown-linux-musl" => "aarch64-linux-musl",
          "aarch64-apple-darwin" => "aarch64-macos-none",
          "x86_64-apple-darwin" => "x86_64-macos-none",
