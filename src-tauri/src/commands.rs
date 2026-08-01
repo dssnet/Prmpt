@@ -3,8 +3,6 @@ use tauri::{
     WebviewWindow, WebviewWindowBuilder,
 };
 
-use crossbeam_channel::unbounded;
-
 use crate::{
     activate_blank_window, configure_new_window,
     config::{Config, TerminalPrefs, Theme, UiPrefs},
@@ -721,7 +719,11 @@ pub fn connect_ssh_host(
     let disable_ssh = args.config.disable_ssh;
 
     let id = registry.next_tab_id();
-    let (pty_tx, pty_rx) = unbounded::<PtyEvent>();
+    // Bounded like the local-PTY queue (see tab::PTY_EVENT_QUEUE_CAP): a
+    // remote flood otherwise piles up in process memory just the same. The
+    // SSH channel loop parks on the full queue, which stops window
+    // replenishment and lets the SSH flow control throttle the server.
+    let (pty_tx, pty_rx) = crossbeam_channel::bounded::<PtyEvent>(crate::tab::PTY_EVENT_QUEUE_CAP);
     let out_tx = pool.acquire_shell(&app, args.config, pty_tx, cols, rows);
 
     registry.start_ssh_tab(

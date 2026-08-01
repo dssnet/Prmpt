@@ -63,6 +63,16 @@ const INTERRUPT_FLUSH_BACKLOG: usize = 64;
 /// alternate-screen app. Caps a fast flick so it can't flood the PTY.
 const WHEEL_ARROW_CAP: u32 = 50;
 
+/// Capacity of the reader → tab-thread `PtyEvent` queue (chunks, ≤8 KB each
+/// for local PTYs). Bounded on purpose: with an unbounded queue the reader
+/// slurped a flooding child's output into process memory faster than the VT
+/// thread could drain it (gigabytes within minutes). Full queue → the
+/// reader's blocking send parks it → the kernel PTY buffer fills → the
+/// child's `write()` blocks. That's the same output throttling every native
+/// terminal applies, restored end to end. Keep this above
+/// `INTERRUPT_FLUSH_BACKLOG` so Ctrl+C flood detection still triggers.
+pub(crate) const PTY_EVENT_QUEUE_CAP: usize = 128;
+
 /// Minimum gap between `terminal:notification` emits per tab. A program
 /// that spams BEL (`cat /dev/urandom` hits them constantly) costs one
 /// event per second instead of flooding the webview with chimes.
@@ -461,7 +471,9 @@ impl TabRegistry {
             .map_err(|e| AppError::Pty(e.to_string()))?;
 
         let (cmd_tx, cmd_rx) = unbounded::<TabCmd>();
-        let (pty_tx, pty_rx) = unbounded::<PtyEvent>();
+        // Bounded: see PTY_EVENT_QUEUE_CAP. The reader thread's blocking send
+        // is the backpressure that ultimately throttles a flooding child.
+        let (pty_tx, pty_rx) = bounded::<PtyEvent>(PTY_EVENT_QUEUE_CAP);
 
         let pty_tx_for_reader = pty_tx.clone();
         thread::Builder::new()
@@ -905,10 +917,20 @@ fn run_tab_loop(
             })
             .map_err(|e| AppError::Other(format!("spawn writer thread: {e}")))?;
     }
+    // libghostty's `max_scrollback` is a BYTE budget, not a line count —
+    // Screen.zig: "maximum size of scrollback in bytes. Zero means
+    // unlimited" (the Rust wrapper's "number of lines" doc is wrong).
+    // Passing the raw line count capped scrollback at ~10 KB. Convert with
+    // a generous per-line estimate (covers wide windows and per-cell
+    // styling); `.max(1)` keeps a configured 0 meaning "no scrollback"
+    // instead of ghostty's 0 == unlimited.
+    const SCROLLBACK_BYTES_PER_LINE: usize = 2 * 1024;
     let mut terminal = Terminal::new(TerminalOptions {
         cols,
         rows,
-        max_scrollback: scrollback_lines,
+        max_scrollback: scrollback_lines
+            .saturating_mul(SCROLLBACK_BYTES_PER_LINE)
+            .max(1),
     })?;
     {
         let tx = write_tx.clone();

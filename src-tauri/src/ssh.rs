@@ -490,12 +490,20 @@ async fn drive_channel_loop(
             msg = channel.wait() => {
                 match msg {
                     Some(ChannelMsg::Data { data }) => {
-                        if pty_tx.send(PtyEvent::Data(data.to_vec())).is_err() {
+                        // The queue is bounded (tab::PTY_EVENT_QUEUE_CAP) and
+                        // this send blocks when the VT thread is behind —
+                        // that's the backpressure that stops a remote flood
+                        // from piling up in memory. block_in_place keeps the
+                        // parked wait from starving the shared runtime's
+                        // other tasks (multi-thread runtime, see lib.rs).
+                        let ev = PtyEvent::Data(data.to_vec());
+                        if tokio::task::block_in_place(|| pty_tx.send(ev)).is_err() {
                             return SessionOutcome::LocalClose;
                         }
                     }
                     Some(ChannelMsg::ExtendedData { data, .. }) => {
-                        if pty_tx.send(PtyEvent::Data(data.to_vec())).is_err() {
+                        let ev = PtyEvent::Data(data.to_vec());
+                        if tokio::task::block_in_place(|| pty_tx.send(ev)).is_err() {
                             return SessionOutcome::LocalClose;
                         }
                     }
