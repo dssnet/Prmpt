@@ -13,6 +13,7 @@ import {
   onMenuPaste,
   onMenuSelectAll,
   onRender,
+  ackRender,
   onSshConnectError,
   onSshConnected,
   onSshHostKeyFirstConnect,
@@ -538,6 +539,10 @@ onMounted(async () => {
   unlisteners.push(await onRender((p) => {
     handleRender(p);
     applyTerminalBg(p.default_bg);
+    // Ack from the event handler (not the rAF paint path): decode+apply is
+    // the cost the backend must pace itself against, and handlers still run
+    // while the window is backgrounded — rAF doesn't.
+    ackRender(p.tab_id, p.generation);
   }));
   unlisteners.push(await onExit((p) => {
     // Was this an SSH tab/pane? If so, give the matching `ssh:connect_error`

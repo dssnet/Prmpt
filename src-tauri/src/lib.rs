@@ -248,6 +248,7 @@ pub fn run() {
             commands::resize_tab,
             commands::scroll_tab,
             commands::wheel_scroll,
+            commands::ack_render,
             commands::copy_selection_text,
             commands::list_tabs,
             commands::get_config,

@@ -185,6 +185,14 @@ pub fn scroll_tab(
 /// reports when the app has mouse tracking on, else arrow keys for an
 /// alternate-screen app, else a viewport scroll. Separate from `scroll_tab` so
 /// the scrollbar/keyboard/selection paths keep pure viewport-scroll semantics.
+/// Webview → backend ack that the render frame with `generation` has been
+/// applied. Drives the tab loop's emit backpressure (`MAX_INFLIGHT_FRAMES`);
+/// fire-and-forget on the frontend, so no error surface here.
+#[tauri::command]
+pub fn ack_render(registry: State<'_, SharedRegistry>, tab_id: u64, generation: u64) {
+    registry.ack_render(tab_id, generation);
+}
+
 #[tauri::command]
 pub fn wheel_scroll(
     registry: State<'_, SharedRegistry>,

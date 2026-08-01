@@ -374,6 +374,17 @@ export function onRender(handler: (payload: RenderPayload) => void): Promise<Unl
   return listenScoped<RenderPayload>("terminal:render", handler);
 }
 
+/// Tell the tab loop this frame has been applied. Backpressure: the backend
+/// keeps at most 2 unacked frames in flight per tab, which hard-bounds the
+/// webview-side IPC backlog a PTY flood can build. Fire-and-forget.
+export function ackRender(tabId: number, generation: number): void {
+  invoke("ack_render", { tabId, generation }).catch(() => {
+    // Ack for a just-closed tab or during teardown — the backend treats a
+    // missing ack as "webview is slow" and falls back to a 1s cadence, so
+    // a lost ack is never more than a cosmetic slowdown.
+  });
+}
+
 export function onExit(handler: (payload: ExitPayload) => void): Promise<UnlistenFn> {
   return listenScoped<ExitPayload>("terminal:exit", handler);
 }

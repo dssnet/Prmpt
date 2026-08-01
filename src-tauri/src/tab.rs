@@ -68,6 +68,19 @@ const WHEEL_ARROW_CAP: u32 = 50;
 /// event per second instead of flooding the webview with chimes.
 const NOTIFY_THROTTLE: Duration = Duration::from_secs(1);
 
+/// Max render frames emitted ahead of the webview's acks. Frames are full
+/// snapshots, so skipping intermediates is lossless — this hard-bounds the
+/// webview-side backlog that fire-and-forget emits used to build during a
+/// PTY flood (each emit lands as an `ExecuteScript` whose IPC buffer sits
+/// in the renderer until decoded; a stalled renderer accumulated gigabytes
+/// and either OOM-killed itself or ghosted the window).
+const MAX_INFLIGHT_FRAMES: u64 = 2;
+
+/// Emit despite missing acks after this long. A webview that never acks
+/// (mid-reload, listener not yet installed during window boot, a dropped
+/// invoke) degrades to this cadence instead of freezing the picture.
+const ACK_STALL_FALLBACK: Duration = Duration::from_secs(1);
+
 #[derive(Clone, Copy, Debug)]
 pub enum ScrollKind {
     Top,
@@ -134,6 +147,12 @@ pub enum TabCmd {
     QueryForeground {
         reply: Sender<Option<ForegroundProcess>>,
     },
+    /// The webview finished applying the render frame with this generation.
+    /// Backpressure for `emit_render`: the loop keeps at most
+    /// `MAX_INFLIGHT_FRAMES` unacked frames in flight and otherwise holds
+    /// `pending_emit` until an ack (or `ACK_STALL_FALLBACK`) lets the next —
+    /// always freshest — snapshot through.
+    RenderAck(u64),
     Shutdown,
 }
 
@@ -644,6 +663,15 @@ impl TabRegistry {
         Ok(())
     }
 
+    /// Webview ack for a rendered frame (see `TabCmd::RenderAck`). Infallible
+    /// by design: an ack racing a tab close is expected traffic, not an error.
+    pub fn ack_render(&self, id: u64, generation: u64) {
+        let guard = self.inner.lock();
+        if let Some(h) = guard.get(&id) {
+            let _ = h.cmd_tx.send(TabCmd::RenderAck(generation));
+        }
+    }
+
     /// Ask the tab thread for the text of a screen-absolute range (inclusive),
     /// blocking on a reply channel. The terminal lives on the tab thread, so we
     /// round-trip a `TabCmd::CopyText` rather than touching it here.
@@ -942,6 +970,9 @@ fn run_tab_loop(
     let mut pending_emit = false;
     let mut emit_count: u64 = 0;
     let mut last_emit = Instant::now();
+    // Highest generation the webview acked (ack_render). Emits are gated on
+    // `generation - last_acked_gen` — see MAX_INFLIGHT_FRAMES.
+    let mut last_acked_gen: u64 = 0;
     // Backgrounded/occluded windows don't paint (rAF is paused), so a
     // focused tab keeps the snappy 8ms debounce while an unfocused one
     // backs off hard — nothing is consuming the intermediate frames, and
@@ -1210,6 +1241,11 @@ fn run_tab_loop(
                     let text = extract_screen_text(&terminal, start, end, cols);
                     let _ = reply.send(text);
                 }
+                Ok(TabCmd::RenderAck(gen)) => {
+                    // max(): acks can arrive out of order across the invoke
+                    // boundary; only ever move forward.
+                    last_acked_gen = last_acked_gen.max(gen);
+                }
                 Ok(TabCmd::Shutdown) | Err(_) => {
                     // PTY children are killed + reaped after the loop (all exit
                     // paths share that); only SSH needs an explicit close here.
@@ -1334,7 +1370,13 @@ fn run_tab_loop(
         } else {
             Duration::from_millis(500)
         };
-        if pending_emit && last_emit.elapsed() >= debounce {
+        // Backpressure gate: with MAX_INFLIGHT_FRAMES unacked, hold the frame
+        // (pending_emit stays set — the freshest snapshot goes out on the ack
+        // that wakes this loop, or after ACK_STALL_FALLBACK). Frames are full
+        // snapshots, so the held-back intermediates are never missed.
+        let inflight_ok = generation.saturating_sub(last_acked_gen) < MAX_INFLIGHT_FRAMES
+            || last_emit.elapsed() >= ACK_STALL_FALLBACK;
+        if pending_emit && inflight_ok && last_emit.elapsed() >= debounce {
             generation += 1;
             let theme = config.lock().theme.clone();
             match emit_render(
