@@ -420,6 +420,19 @@ export async function closeCurrentWindow(): Promise<void> {
   await getCurrentWebviewWindow().close();
 }
 
+/** Tell the backend this window's teardown is committed to, so its tabs stop
+ *  pushing render frames into a webview WebKit is about to destroy (see
+ *  `TabRegistry::mark_window_closing`). Await this before `destroy()`; it must
+ *  never be called for a close the user can still cancel. Best-effort: a
+ *  failure here must not block the close. */
+export async function prepareWindowClose(): Promise<void> {
+  try {
+    await invoke("prepare_window_close", { label: currentWindowLabel() });
+  } catch (e) {
+    console.error("prepare_window_close failed:", e);
+  }
+}
+
 export async function attachTab(tabId: number, targetLabel: string): Promise<void> {
   await invoke("attach_tab", { tabId, targetLabel });
 }

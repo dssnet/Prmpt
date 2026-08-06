@@ -309,6 +309,11 @@ pub struct TabHandle {
 pub struct TabRegistry {
     inner: Mutex<HashMap<u64, TabHandle>>,
     windows: Mutex<HashMap<u64, String>>,
+    /// Labels of windows whose teardown has been committed to (see
+    /// `mark_window_closing`). Never pruned — window labels are handed out
+    /// from a monotonic counter and a destroyed one is never reused, so the
+    /// set stays bounded by the number of windows opened this session.
+    closing: Mutex<std::collections::HashSet<String>>,
     next_id: AtomicU64,
 }
 
@@ -317,6 +322,7 @@ impl TabRegistry {
         Self {
             inner: Mutex::new(HashMap::new()),
             windows: Mutex::new(HashMap::new()),
+            closing: Mutex::new(std::collections::HashSet::new()),
             next_id: AtomicU64::new(1),
         }
     }
@@ -790,6 +796,28 @@ impl TabRegistry {
             .filter(|(_, l)| l.as_str() == label)
             .map(|(id, _)| *id)
             .collect()
+    }
+
+    /// Mark `label` as being torn down: from here on its tabs stop emitting
+    /// render frames (see `is_window_closing`). Called the moment a close is
+    /// *committed to* — after the confirm guard has passed, right before the
+    /// webview is destroyed — never on a mere `CloseRequested`, which the
+    /// user can still cancel.
+    ///
+    /// Why: destroying a window drops its NSWindow while the WKWebView and
+    /// its WebContent process are still live and painting, and Tauri keeps
+    /// delivering events to that webview until the runtime reaps it. Frames
+    /// pushed into that gap keep WebKit committing layer trees for a page
+    /// that is about to go away — the UI-process teardown crash in
+    /// `RemoteLayerTreeDrawingAreaProxy::commitLayerTree`. Quiescing first
+    /// lets the webview go idle before it's destroyed.
+    pub fn mark_window_closing(&self, label: &str) {
+        self.closing.lock().insert(label.to_string());
+    }
+
+    /// Whether `label` is closing and its tabs should stop emitting.
+    pub fn is_window_closing(&self, label: &str) -> bool {
+        self.closing.lock().contains(label)
     }
 
     /// Notify every tab currently owned by `label` of the window's new
@@ -1398,7 +1426,12 @@ fn run_tab_loop(
         // snapshots, so the held-back intermediates are never missed.
         let inflight_ok = generation.saturating_sub(last_acked_gen) < MAX_INFLIGHT_FRAMES
             || last_emit.elapsed() >= ACK_STALL_FALLBACK;
-        if pending_emit && inflight_ok && last_emit.elapsed() >= debounce {
+        // Never push a frame into a webview that is being torn down (window
+        // close or app quit) — see `TabRegistry::mark_window_closing`. The
+        // tab is about to be closed anyway, so dropping these is free.
+        let alive = !crate::SHUTTING_DOWN.load(std::sync::atomic::Ordering::Relaxed)
+            && !tauri::Manager::state::<SharedRegistry>(&app).is_window_closing(&owner_window);
+        if pending_emit && alive && inflight_ok && last_emit.elapsed() >= debounce {
             generation += 1;
             let theme = config.lock().theme.clone();
             match emit_render(

@@ -24,6 +24,7 @@ import {
   onTerminalNotification,
   onWindowActivateBlank,
   openNewWindow,
+  prepareWindowClose,
   scrollTab,
   writeKey,
   writePaste,
@@ -681,11 +682,16 @@ onMounted(async () => {
       if (msg) {
         ev.preventDefault();
         pendingClose.value = { kind: "window", message: msg };
+        return;
       }
     } catch (err) {
       // On any guard failure, let the close proceed — never wedge the window.
       console.error("close guard failed:", err);
     }
+    // Not prevented: Tauri destroys the webview as soon as this handler
+    // resolves. Quiesce the render stream first so WebKit isn't still
+    // committing layer trees for a page that's being torn down.
+    await prepareWindowClose();
   }));
 
   // Bootstrap: ask the backend whether this window is a pre-warmed

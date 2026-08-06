@@ -1212,3 +1212,13 @@ pub fn prepare_for_update(app: AppHandle, current_label: String) {
         let _ = window.destroy();
     }
 }
+
+/// Called by the frontend immediately before it destroys its own window, so
+/// the window's tabs stop emitting render frames while WebKit tears the
+/// webview down. See `TabRegistry::mark_window_closing` for why that matters.
+/// Idempotent, and deliberately *not* called for a `CloseRequested` the user
+/// can still cancel — only once the close is committed to.
+#[tauri::command]
+pub fn prepare_window_close(registry: State<'_, SharedRegistry>, label: String) {
+    registry.mark_window_closing(&label);
+}

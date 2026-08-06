@@ -14,7 +14,11 @@
 import { ref } from "vue";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 
-import { closeCurrentWindow, tabForegroundProcess } from "../ipc";
+import {
+  closeCurrentWindow,
+  prepareWindowClose,
+  tabForegroundProcess,
+} from "../ipc";
 import { confirmCloseRunning } from "./uiPrefs";
 import {
   closePanelLeaf,
@@ -181,8 +185,9 @@ export function confirmPendingClose(): void {
   } else if (p.kind === "window") {
     // destroy(), not close(): close() would re-fire onCloseRequested and
     // re-run this guard. The Destroyed handler on the backend still reaps
-    // the window's tabs.
-    void getCurrentWebviewWindow().destroy();
+    // the window's tabs. Quiesce the render stream first (see
+    // prepareWindowClose) — the close is committed to at this point.
+    void prepareWindowClose().then(() => getCurrentWebviewWindow().destroy());
   }
 }
 

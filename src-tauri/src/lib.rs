@@ -307,6 +307,7 @@ pub fn run() {
             commands::secret_set,
             commands::secret_remove,
             commands::prepare_for_update,
+            commands::prepare_window_close,
             backup::export_backup,
             backup::import_backup,
             sync::sync_webdav_test,
@@ -725,6 +726,10 @@ pub fn configure_new_window<R: Runtime>(window: &WebviewWindow<R>) {
         if matches!(event, WindowEvent::Destroyed) {
             FOCUS_ORDER.lock().retain(|l| l != &label);
             let registry = app.state::<tab::SharedRegistry>();
+            // Backstop for closes the frontend didn't announce via
+            // `prepare_window_close` (an update teardown, a native path):
+            // the webview is gone, so nothing may emit into it any more.
+            registry.mark_window_closing(&label);
             for tab_id in registry.tabs_in_window(&label) {
                 let _ = registry.close(tab_id);
             }
