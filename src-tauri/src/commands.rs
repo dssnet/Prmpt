@@ -14,6 +14,7 @@ use crate::{
     },
     schedule_refill,
     ssh::{self, SftpConsumers, SharedPool, SshConnectConfig},
+    warn_on_err,
     stronghold::{self, StrongholdUnlock},
     tab::{PtyEvent, ScrollKind, SftpReq, SharedRegistry},
     window_pool::WindowMode,
@@ -249,6 +250,11 @@ pub fn default_terminal_config() -> Config {
 
 #[tauri::command]
 pub fn set_theme(config: State<'_, SharedConfig>, theme: Theme) -> AppResult<()> {
+    let mut theme = theme;
+    // The colors go straight onto the VT thread (every render frame, plus the
+    // PTY-triggered color-query replies) — reject malformed ones here rather
+    // than letting them reach the parser. See `Theme::sanitize`.
+    theme.sanitize();
     let mut guard = config.lock();
     guard.theme = theme;
     guard.save()
@@ -351,10 +357,14 @@ fn pop_or_build_tear_off_window(
             for existing_id in registry.tabs_in_window(&label) {
                 let _ = registry.close(existing_id);
             }
-            let _ = window.set_size(LogicalSize::new(width, height));
-            let _ = window.set_position(LogicalPosition::new(pos_x, pos_y));
-            let _ = window.show();
-            let _ = window.set_focus();
+            warn_on_err("set_size", &label, window.set_size(LogicalSize::new(width, height)));
+            warn_on_err(
+                "set_position",
+                &label,
+                window.set_position(LogicalPosition::new(pos_x, pos_y)),
+            );
+            warn_on_err("show", &label, window.show());
+            warn_on_err("set_focus", &label, window.set_focus());
             // Defer the replacement build off the command thread.
             // Otherwise `WebviewWindowBuilder::build` runs back-to-back
             // with the show()/focus() we just issued, and on macOS the

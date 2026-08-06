@@ -72,6 +72,20 @@ pub static SHUTTING_DOWN: AtomicBool = AtomicBool::new(false);
 /// and drop hit-testing in `window_drag_targets`).
 pub static FOCUS_ORDER: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
+/// Log-and-continue for OS window operations we can't meaningfully recover
+/// from (`show`, `set_focus`, `set_size`, `set_position`, `close`).
+///
+/// Each of these was a bare `let _ = …`, which is defensible per call — the
+/// window may legitimately be gone — but in aggregate meant nothing anywhere
+/// could ever notice "I told the OS to surface a window and it silently
+/// didn't". That is exactly the blind spot the refocus-freeze reports live
+/// in, so at minimum it leaves a trace.
+pub(crate) fn warn_on_err<T, E: std::fmt::Display>(what: &str, label: &str, r: Result<T, E>) {
+    if let Err(e) = r {
+        eprintln!("[window {label}] {what} failed: {e}");
+    }
+}
+
 /// Tab IDs queued for hydration into a window that hasn't yet booted
 /// its frontend. The frontend drains its entry via
 /// `list_tabs_for_window` on init.
@@ -478,8 +492,8 @@ pub(crate) fn activate_blank_window(app: &AppHandle, panel: Option<PanelSpawn>) 
                 "window:activate-blank",
                 payload,
             );
-            let _ = window.show();
-            let _ = window.set_focus();
+            warn_on_err("show", &label, window.show());
+            warn_on_err("set_focus", &label, window.set_focus());
             schedule_refill(app);
             return;
         }

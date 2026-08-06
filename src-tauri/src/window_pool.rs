@@ -196,7 +196,7 @@ impl WindowPool {
         // `configure_new_window` calls `note_destroyed`, which resets the
         // slot back to Empty.
         if SHUTTING_DOWN.load(Ordering::SeqCst) {
-            let _ = window.close();
+            crate::warn_on_err("close", label, window.close());
         }
         Ok(())
     }

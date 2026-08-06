@@ -567,22 +567,40 @@ impl TabRegistry {
         thread::Builder::new()
             .name(format!("tab-{id}-main"))
             .spawn(move || {
-                let status = match run_tab_loop(
-                    id,
-                    app_for_tab.clone(),
-                    owner_for_thread,
-                    cmd_rx,
-                    pty_rx,
-                    tab_io,
-                    cols,
-                    rows,
-                    scrollback_lines,
-                    config,
-                    osc_cwd,
-                ) {
-                    Ok(status) => status,
-                    Err(e) => {
+                // Panic boundary. Without it a panic anywhere in the loop
+                // unwinds straight out of this closure, so `terminal:exit`
+                // never fires and the frontend keeps a tab alive that has no
+                // thread behind it — an invisible failure. `AssertUnwindSafe`
+                // is sound here: the `!Send` `Terminal` and every other piece
+                // of loop state live entirely inside the unwound frame, so
+                // nothing out here can observe a torn value. The child
+                // process is reaped by `ChildReaper`'s `Drop` during the
+                // unwind.
+                let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    run_tab_loop(
+                        id,
+                        app_for_tab.clone(),
+                        owner_for_thread,
+                        cmd_rx,
+                        pty_rx,
+                        tab_io,
+                        cols,
+                        rows,
+                        scrollback_lines,
+                        config,
+                        osc_cwd,
+                    )
+                }));
+                let status = match outcome {
+                    Ok(Ok(status)) => status,
+                    Ok(Err(e)) => {
                         eprintln!("[tab {id}] crashed: {e}");
+                        -1
+                    }
+                    Err(_) => {
+                        // The default panic hook already printed the payload
+                        // and location; this line ties it to the tab.
+                        eprintln!("[tab {id}] panicked — tab thread terminated");
                         -1
                     }
                 };
@@ -881,6 +899,49 @@ fn encode_and_send_mouse(
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Owns the local PTY child so it is killed and reaped on *every* exit path
+/// out of `run_tab_loop` — normal return, a `?` early-exit, and a panic
+/// unwinding through the frame. Before this was a `Drop` guard the reap sat
+/// at the tail of the loop function, so any panic (see `parse_hex`'s former
+/// char-boundary slice) left the user's shell running forever with nothing
+/// left to reap it.
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
+struct ChildReaper {
+    child: Option<Box<dyn portable_pty::Child + Send + Sync>>,
+}
+
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
+impl ChildReaper {
+    /// Kill + wait, yielding the real exit code. Idempotent — a second call
+    /// (including the one `Drop` makes after an explicit `reap`) returns 0
+    /// without touching anything.
+    ///
+    /// `kill()` is harmless if the child already exited; without the `wait()`
+    /// the process stays a zombie until app exit. `std::process::Child` caches
+    /// the status, so `wait()` after `kill()`'s internal `try_wait` still
+    /// yields the real exit code.
+    fn reap(&mut self) -> i32 {
+        match self.child.take() {
+            Some(mut child) => {
+                let _ = child.kill();
+                child.wait().map(|s| s.exit_code() as i32).unwrap_or(0)
+            }
+            None => 0,
+        }
+    }
+
+    fn process_id(&self) -> Option<u32> {
+        self.child.as_ref().and_then(|c| c.process_id())
+    }
+}
+
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
+impl Drop for ChildReaper {
+    fn drop(&mut self) {
+        let _ = self.reap();
+    }
+}
+
 fn run_tab_loop(
     tab_id: u64,
     app: AppHandle,
@@ -899,7 +960,7 @@ fn run_tab_loop(
         #[cfg(not(any(target_os = "ios", target_os = "android")))]
         Pty {
             master: Box<dyn portable_pty::MasterPty + Send>,
-            child: Box<dyn portable_pty::Child + Send + Sync>,
+            reaper: ChildReaper,
         },
         Ssh {
             out_tx: tokio::sync::mpsc::Sender<SshIoCmd>,
@@ -912,7 +973,13 @@ fn run_tab_loop(
             writer,
             master,
             child,
-        } => (writer, Backend::Pty { master, child }),
+        } => (
+            writer,
+            Backend::Pty {
+                master,
+                reaper: ChildReaper { child: Some(child) },
+            },
+        ),
         TabIo::Ssh { out_tx } => {
             let w: Box<dyn Write + Send> = Box::new(SshWriter {
                 tx: out_tx.clone(),
@@ -1272,9 +1339,9 @@ fn run_tab_loop(
                     // foreground. Unix-only — portable-pty doesn't expose
                     // the equivalent on Windows.
                     #[cfg(all(unix, not(any(target_os = "ios", target_os = "android"))))]
-                    if let Backend::Pty { master, child } = &backend {
+                    if let Backend::Pty { master, reaper } = &backend {
                         if let (Some(leader), Some(shell_pid)) =
-                            (master.process_group_leader(), child.process_id())
+                            (master.process_group_leader(), reaper.process_id())
                         {
                             if leader > 0 && leader as u32 != shell_pid {
                                 fg = Some(ForegroundProcess {
@@ -1458,16 +1525,12 @@ fn run_tab_loop(
         }
     }
 
-    // Reap the child on every exit path. kill() is harmless if it already
-    // exited; without the wait() the process stays a zombie until app exit.
-    // std::process::Child caches the status, so wait() after kill()'s internal
-    // try_wait still yields the real exit code.
+    // Normal exit: reap explicitly so we can report the real status. Every
+    // other exit path (a `?` above, or a panic unwinding out of this frame)
+    // is covered by `ChildReaper`'s `Drop`, which this call makes a no-op.
     let status = match &mut backend {
         #[cfg(not(any(target_os = "ios", target_os = "android")))]
-        Backend::Pty { child, .. } => {
-            let _ = child.kill();
-            child.wait().map(|s| s.exit_code() as i32).unwrap_or(0)
-        }
+        Backend::Pty { reaper, .. } => reaper.reap(),
         Backend::Ssh { .. } => 0,
     };
     Ok(status)
@@ -1613,24 +1676,43 @@ fn resolve_style_color(sc: StyleColor, palette: &[RgbColor; 256]) -> Option<RgbC
     }
 }
 
+/// Hex value of one ASCII hex digit, or `None` for anything else.
+fn hex_nibble(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
+}
+
+/// Parse `#rrggbb` / `#rgb` (with or without the `#`) into an RGB triple.
+/// Anything malformed yields black.
+///
+/// Operates on **bytes**, never on `&str` slices: the length check is a byte
+/// count, so slicing `&t[0..2]` on a string whose second character is
+/// multi-byte panicked on a char boundary. That panic ran on the VT thread —
+/// every render frame via `build_themed_colors`, and inside the PTY-triggered
+/// `on_color_scheme` / OSC 10;11 reply paths — and `Theme`'s fields are plain
+/// unvalidated strings reachable from `set_theme` and from a hand-edited
+/// `config.toml`. See also `Theme::sanitized`, which rejects such values at
+/// the boundary; this function is the second line of defence.
 fn parse_hex(s: &str) -> RgbColor {
-    let t = s.trim().trim_start_matches('#');
-    let bytes = t.as_bytes();
-    let (r, g, b) = match bytes.len() {
-        6 => {
-            let r = u8::from_str_radix(&t[0..2], 16).unwrap_or(0);
-            let g = u8::from_str_radix(&t[2..4], 16).unwrap_or(0);
-            let b = u8::from_str_radix(&t[4..6], 16).unwrap_or(0);
-            (r, g, b)
-        }
-        3 => {
-            let r = u8::from_str_radix(&t[0..1], 16).unwrap_or(0);
-            let g = u8::from_str_radix(&t[1..2], 16).unwrap_or(0);
-            let b = u8::from_str_radix(&t[2..3], 16).unwrap_or(0);
-            (r * 17, g * 17, b * 17)
-        }
-        _ => (0, 0, 0),
+    let t = s.trim().trim_start_matches('#').as_bytes();
+    let nib = |i: usize| t.get(i).copied().and_then(hex_nibble);
+    let parsed = match t.len() {
+        6 => (|| {
+            Some((
+                nib(0)? << 4 | nib(1)?,
+                nib(2)? << 4 | nib(3)?,
+                nib(4)? << 4 | nib(5)?,
+            ))
+        })(),
+        // #rgb shorthand: each nibble doubled (f → ff), i.e. × 17.
+        3 => (|| Some((nib(0)? * 17, nib(1)? * 17, nib(2)? * 17)))(),
+        _ => None,
     };
+    let (r, g, b) = parsed.unwrap_or((0, 0, 0));
     RgbColor { r, g, b }
 }
 
@@ -1966,5 +2048,47 @@ fn handle_to_info(h: &TabHandle) -> TabInfo {
         host_label: h.host_label.clone(),
         disable_sftp: h.disable_sftp,
         disable_ssh: h.disable_ssh,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_hex;
+
+    fn rgb(s: &str) -> (u8, u8, u8) {
+        let c = parse_hex(s);
+        (c.r, c.g, c.b)
+    }
+
+    #[test]
+    fn parses_long_and_short_hex_with_and_without_hash() {
+        assert_eq!(rgb("#1e1e2e"), (0x1e, 0x1e, 0x2e));
+        assert_eq!(rgb("1e1e2e"), (0x1e, 0x1e, 0x2e));
+        assert_eq!(rgb("  #A6E3A1  "), (0xa6, 0xe3, 0xa1));
+        // #rgb shorthand doubles each nibble.
+        assert_eq!(rgb("#f0a"), (0xff, 0x00, 0xaa));
+    }
+
+    /// Regression: the length check counts BYTES, so a 6-byte string whose
+    /// characters aren't all single-byte used to panic slicing `&t[0..2]` on
+    /// a char boundary — on the VT thread, which killed the tab silently and
+    /// leaked its shell process.
+    #[test]
+    fn multibyte_input_does_not_panic() {
+        assert_eq!(rgb("héllo"), (0, 0, 0)); // 6 bytes, é spans bytes 1..3
+        assert_eq!(rgb("#äöü"), (0, 0, 0)); // 6 bytes, all boundaries split
+        assert_eq!(rgb("ｆｆｆ"), (0, 0, 0)); // 9 bytes, wrong length
+        assert_eq!(rgb("aé"), (0, 0, 0)); // 3 bytes, é straddles 1..3
+    }
+
+    #[test]
+    fn malformed_input_is_black_not_partial() {
+        assert_eq!(rgb(""), (0, 0, 0));
+        assert_eq!(rgb("#"), (0, 0, 0));
+        assert_eq!(rgb("#zzzzzz"), (0, 0, 0));
+        // A single bad nibble invalidates the whole color rather than
+        // silently contributing a zero channel.
+        assert_eq!(rgb("#ff00zz"), (0, 0, 0));
+        assert_eq!(rgb("#12345"), (0, 0, 0));
     }
 }

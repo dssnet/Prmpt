@@ -143,6 +143,41 @@ impl Default for Theme {
     }
 }
 
+/// `#rgb` / `#rrggbb`, with or without the leading `#`, ASCII hex only.
+fn is_hex_color(s: &str) -> bool {
+    let t = s.trim().trim_start_matches('#').as_bytes();
+    matches!(t.len(), 3 | 6) && t.iter().all(u8::is_ascii_hexdigit)
+}
+
+impl Theme {
+    /// Replace any color that isn't a well-formed hex triple with the default
+    /// theme's value for that slot, reporting what was dropped.
+    ///
+    /// Both entry points call this — `Config::load` (a hand-edited
+    /// `config.toml`) and the `set_theme` command (the webview). Colors flow
+    /// from here onto the VT thread, where they are parsed every render frame
+    /// and inside PTY-triggered callbacks; a malformed value used to be able
+    /// to panic that thread (`parse_hex`, tab.rs), which killed the tab
+    /// silently. `parse_hex` no longer panics, but keeping garbage out of the
+    /// config is the difference between "your theme is the default" and
+    /// "your terminal is black on black".
+    pub fn sanitize(&mut self) {
+        let def = Theme::default();
+        let fix = |what: &str, slot: &mut String, fallback: &str| {
+            if !is_hex_color(slot) {
+                eprintln!("[config] theme.{what}: {slot:?} is not a hex color; using {fallback}");
+                *slot = fallback.to_string();
+            }
+        };
+        fix("background", &mut self.background, &def.background);
+        fix("foreground", &mut self.foreground, &def.foreground);
+        fix("cursor", &mut self.cursor, &def.cursor);
+        for (i, slot) in self.palette.iter_mut().enumerate() {
+            fix(&format!("palette[{i}]"), slot, &def.palette[i]);
+        }
+    }
+}
+
 fn config_path() -> AppResult<PathBuf> {
     Ok(paths::ensure_app_data_dir()?.join("config.toml"))
 }
@@ -172,7 +207,12 @@ impl Config {
             return Ok(default);
         }
         let s = fs::read_to_string(&path)?;
-        toml::from_str(&s).map_err(|e| AppError::Config(format!("parse {}: {e}", path.display())))
+        let mut cfg: Self = toml::from_str(&s)
+            .map_err(|e| AppError::Config(format!("parse {}: {e}", path.display())))?;
+        // In-memory only — the file is rewritten just when the user changes
+        // something, so a typo'd color doesn't silently edit their config.
+        cfg.theme.sanitize();
+        Ok(cfg)
     }
 
     pub fn save(&self) -> AppResult<()> {
@@ -184,5 +224,48 @@ impl Config {
             .map_err(|e| AppError::Config(format!("serialize: {e}")))?;
         fs::write(&path, s)?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{is_hex_color, Theme};
+
+    #[test]
+    fn accepts_the_forms_the_vt_thread_can_parse() {
+        for s in ["#1e1e2e", "1e1e2e", "#F0A", "f0a", "  #abcdef  "] {
+            assert!(is_hex_color(s), "{s:?} should be accepted");
+        }
+    }
+
+    #[test]
+    fn rejects_everything_else() {
+        for s in ["", "#", "#12345", "#1234567", "#zzzzzz", "héllo", "rgb(1,2,3)", "red"] {
+            assert!(!is_hex_color(s), "{s:?} should be rejected");
+        }
+    }
+
+    #[test]
+    fn sanitize_replaces_only_the_bad_slots() {
+        let def = Theme::default();
+        let mut t = Theme::default();
+        t.background = "not a color".into();
+        t.palette[3] = "héllo".into(); // 6 bytes, multi-byte — the panic case
+        t.sanitize();
+        assert_eq!(t.background, def.background);
+        assert_eq!(t.palette[3], def.palette[3]);
+        // Untouched slots keep the user's value.
+        assert_eq!(t.foreground, def.foreground);
+        assert_eq!(t.palette[0], def.palette[0]);
+    }
+
+    #[test]
+    fn sanitize_keeps_valid_custom_colors() {
+        let mut t = Theme::default();
+        t.background = "#000".into();
+        t.palette[7] = "ABCDEF".into();
+        t.sanitize();
+        assert_eq!(t.background, "#000");
+        assert_eq!(t.palette[7], "ABCDEF");
     }
 }
