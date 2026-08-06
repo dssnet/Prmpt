@@ -35,22 +35,22 @@ import {
   useTabs,
   type TabHydrateInfo,
 } from "./tabs";
-import {
-  allocPanelLeafId,
-  panelTitle,
-  type PanelDesc,
-  type PanelKind,
-} from "./panels";
+import { panelTitle, type PanelDesc, type PanelKind } from "./panels";
 import { showToast } from "./toasts";
 import {
   findLeafByTabId,
   getWorkspace,
-  isPanelLeaf,
-  makeLeaf,
-  makeSplit,
   type SplitDir,
-  type WorkspaceNode,
+  type TabOrigin,
 } from "./workspace";
+import {
+  buildWorkspaceFromWire,
+  toWireNode,
+  wireTermIds,
+  type CrossTreeDropPayload,
+  type WholeTabMeta,
+  type WireNode,
+} from "./wire";
 
 // The drag module. Every drag in the app — a tab pill, the + button, a pane
 // titlebar — shares the same anatomy, and this module owns all of it:
@@ -106,39 +106,6 @@ interface CrossHoverPayload {
   x: number;
   y: number;
   label: string;
-}
-
-/** TabState-level fields that only apply when a `MoveSource` is a whole tab
- *  (not a lone pane peeled off a still-live workspace) — SSH host identity
- *  rides on the tab, not on any one leaf's `TabOrigin`. */
-interface WholeTabMeta {
-  title: string;
-  hostLabel?: string;
-  hostId?: number;
-  disableSftp?: boolean;
-}
-
-/** Cross-window wire form of a pane tree: split dirs/ratios are explicit
- *  (not resolved from cursor geometry), panel leaves carry their desc/title
- *  by value, and terminal leaves carry just their backend id — the target
- *  derives their origin from the `TabHydrateInfo` its own `attach_tab` call
- *  delivers. See the `MoveSource` block comment below. */
-type WireNode =
-  | { kind: "term"; tabId: number; focused: boolean }
-  | { kind: "panel"; desc: PanelDesc; title: string; focused: boolean }
-  | { kind: "split"; dir: SplitDir; ratio: number; a: WireNode; b: WireNode };
-
-/** `xdrag:drop_tree` — a `MoveSource` released over this window. `x`/`y` are
- *  null for an append-only drop (tear-off into a new window, or a fallback
- *  attach with no resolved hover point); otherwise they resolve to a bar
- *  slot or a pane split target via `resolvePlacement`, same as a local
- *  drop. */
-interface CrossTreeDropPayload {
-  x: number | null;
-  y: number | null;
-  tree: WireNode;
-  termIds: number[];
-  whole?: WholeTabMeta;
 }
 
 // ---- Shared constants ----------------------------------------------------
@@ -364,70 +331,19 @@ export function shouldLeaveWindow(
   return dx * dx + dy * dy >= DRAG_OUT_THRESHOLD * DRAG_OUT_THRESHOLD;
 }
 
-// ---- Wire tree helpers ------------------------------------------------------
-
-/** `focusedTabId` doesn't survive to the wire (panel leaf ids are
- *  process-local and get replaced on arrival), so the focused leaf marks
- *  itself instead. */
-function toWireNode(node: WorkspaceNode, focusedTabId: number): WireNode {
-  if (node.kind === "split") {
-    return {
-      kind: "split",
-      dir: node.dir,
-      ratio: node.ratio,
-      a: toWireNode(node.a, focusedTabId),
-      b: toWireNode(node.b, focusedTabId),
-    };
-  }
-  const focused = node.tabId === focusedTabId;
-  return isPanelLeaf(node)
-    ? {
-        kind: "panel",
-        desc: { ...node.origin.panel! },
-        title: node.origin.title,
-        focused,
-      }
-    : { kind: "term", tabId: node.tabId, focused };
-}
-
-function wireTermIds(node: WireNode, out: number[] = []): number[] {
-  if (node.kind === "split") {
-    wireTermIds(node.a, out);
-    wireTermIds(node.b, out);
-  } else if (node.kind === "term") {
-    out.push(node.tabId);
-  }
-  return out;
-}
-
-/** Rebuild a workspace tree from its wire shape, resolving each terminal
- *  leaf's origin from the `TabHydrateInfo` its attach delivered and
- *  allocating a fresh local id for each panel leaf. Tracks the id marked
- *  `focused` in the wire tree as it goes (leaf ids are reassigned for
- *  panels, so the wire can't just carry the original focused id). */
-function buildWorkspaceFromWire(
-  node: WireNode,
+/** Terminal-leaf origin resolver for `buildWorkspaceFromWire`. A leaf whose
+ *  attach info never arrived falls back to a plain terminal origin instead of
+ *  throwing — losing a pane's title is recoverable, losing the whole tree
+ *  mid-assembly is not. */
+function originResolver(
   attached: Map<number, TabHydrateInfo>,
-  focusRef: { id: number },
-): WorkspaceNode {
-  if (node.kind === "split") {
-    return makeSplit(
-      node.dir,
-      buildWorkspaceFromWire(node.a, attached, focusRef),
-      buildWorkspaceFromWire(node.b, attached, focusRef),
-      node.ratio,
-    );
-  }
-  const leaf =
-    node.kind === "panel"
-      ? makeLeaf(allocPanelLeafId(), {
-          kind: "panel",
-          title: node.title,
-          panel: node.desc,
-        })
-      : makeLeaf(node.tabId, originFromHydrateInfo(attached.get(node.tabId)!));
-  if (node.focused) focusRef.id = leaf.tabId;
-  return leaf;
+): (tabId: number) => TabOrigin {
+  return (tabId) => {
+    const info = attached.get(tabId);
+    return info
+      ? originFromHydrateInfo(info)
+      : { kind: "terminal", title: `Terminal ${tabId}` };
+  };
 }
 
 // ---- Move sources -----------------------------------------------------------
@@ -810,7 +726,7 @@ export function tryAbsorbIntoMoveBatch(info: TabHydrateInfo): boolean {
 function materializeTree(batch: PendingMoveBatch): void {
   const p = batch.payload;
   const focusRef = { id: -1 };
-  const root = buildWorkspaceFromWire(p.tree, batch.attached, focusRef);
+  const root = buildWorkspaceFromWire(p.tree, originResolver(batch.attached), focusRef);
   const soleTermInfo =
     p.termIds.length === 1 ? batch.attached.get(p.termIds[0]) : undefined;
   const meta = p.whole

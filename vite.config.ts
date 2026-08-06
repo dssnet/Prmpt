@@ -9,6 +9,14 @@ const host = process.env.TAURI_DEV_HOST;
 export default defineConfig(async () => ({
   plugins: [vue(), tailwindcss()],
 
+  // Unit tests (`bun run test`). Only the pure modules under src/state are
+  // covered — anything that touches the Tauri API at module scope needs
+  // mocks and is deliberately out of scope for now.
+  test: {
+    include: ["src/**/*.test.ts"],
+    environment: "node",
+  },
+
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`
   //
   // 1. prevent Vite from obscuring rust errors
