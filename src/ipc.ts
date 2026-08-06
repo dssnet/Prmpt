@@ -457,10 +457,6 @@ export async function tearOffWindow(args: {
   });
 }
 
-export async function listTabsForWindow(label: string): Promise<TabInfo[]> {
-  return await invoke<TabInfo[]>("list_tabs_for_window", { label });
-}
-
 export type WindowMode = "reserve" | "normal";
 
 export interface WindowBootstrap {

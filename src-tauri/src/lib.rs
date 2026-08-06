@@ -22,7 +22,6 @@ mod tab;
 mod window_pool;
 
 use std::{
-    collections::HashMap,
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
         Arc,
@@ -86,14 +85,7 @@ pub(crate) fn warn_on_err<T, E: std::fmt::Display>(what: &str, label: &str, r: R
     }
 }
 
-/// Tab IDs queued for hydration into a window that hasn't yet booted
-/// its frontend. The frontend drains its entry via
-/// `list_tabs_for_window` on init.
-#[derive(Default)]
-pub struct PendingHydration(pub Mutex<HashMap<String, Vec<u64>>>);
-
 pub type SharedWindowCounter = Arc<WindowCounter>;
-pub type SharedPendingHydration = Arc<PendingHydration>;
 pub use window_pool::SharedWindowPool;
 
 /// Conservative default terminal geometry for a tab the backend
@@ -183,7 +175,6 @@ pub fn run() {
     let registry: tab::SharedRegistry = Arc::new(TabRegistry::new());
     let cfg: SharedConfig = Arc::new(Mutex::new(Config::load_or_default()));
     let window_counter: SharedWindowCounter = Arc::new(WindowCounter::default());
-    let pending: SharedPendingHydration = Arc::new(PendingHydration::default());
     let window_pool: SharedWindowPool = Arc::new(window_pool::WindowPool::new());
     let db_url = paths::db_url().expect("resolve db url");
 
@@ -243,7 +234,6 @@ pub fn run() {
         .manage(registry)
         .manage(cfg)
         .manage(window_counter)
-        .manage(pending)
         .manage(window_pool)
         .manage(ssh::ConnectionPool::new(runtime.clone()))
         .manage(runtime)
@@ -275,7 +265,6 @@ pub fn run() {
             commands::frontend_log,
             commands::tear_off_window,
             commands::attach_tab,
-            commands::list_tabs_for_window,
             commands::bootstrap_window,
             commands::open_new_window,
             commands::open_panel_window,
@@ -556,10 +545,10 @@ fn open_blank_window(app: &AppHandle) -> tauri::Result<()> {
 /// Fork the user's shell for `label` *before* its webview finishes
 /// booting, so rc-file execution (oh-my-zsh / Powerlevel10k, …) overlaps
 /// the frontend's font/WebGL bring-up instead of being serialized after
-/// it. The tab is stashed in `PendingHydration` so the frontend hydrates
-/// it via `list_tabs_for_window` instead of issuing its own `spawn_tab`.
-/// On any failure we log and bail; the frontend's fallback `spawnNewTab`
-/// still produces a working terminal.
+/// it. `spawn` registers the tab under `label`, so the frontend picks it up
+/// from `bootstrap_window` instead of issuing its own `spawn_tab`. On any
+/// failure we log and bail; the frontend's fallback `spawnNewTab` still
+/// produces a working terminal.
 fn prespawn_tab_for_window(app: &AppHandle, label: &str) {
     let registry = app.state::<tab::SharedRegistry>();
     let config = app.state::<SharedConfig>();
@@ -583,15 +572,9 @@ fn prespawn_tab_for_window(app: &AppHandle, label: &str) {
         config.inner().clone(),
         None,
     ) {
-        Ok(id) => {
-            let pending = app.state::<SharedPendingHydration>();
-            pending
-                .0
-                .lock()
-                .entry(label.to_string())
-                .or_default()
-                .push(id);
-        }
+        // The tab is registered under `label` by `spawn` itself, so the
+        // window's `bootstrap_window` finds it — no side ledger needed.
+        Ok(_) => {}
         Err(e) => eprintln!("prespawn: failed to spawn tab for {label}: {e}"),
     }
 }
@@ -753,9 +736,6 @@ pub fn configure_new_window<R: Runtime>(window: &WebviewWindow<R>) {
             let conn_pool = app.state::<ssh::SharedPool>();
             let consumers = app.state::<ssh::SftpConsumers>();
             conn_pool.release_window(consumers.inner(), &label);
-            let pending = app.state::<SharedPendingHydration>();
-            pending.0.lock().remove(&label);
-
             // Keep the reserve pool in sync. Skip during shutdown so we
             // don't try to build a replacement window while the app is
             // tearing down.

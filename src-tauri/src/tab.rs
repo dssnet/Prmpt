@@ -807,6 +807,15 @@ impl TabRegistry {
         self.windows.lock().get(&id).cloned()
     }
 
+    /// `TabInfo` for every tab this window owns, ordered by id. Tab ids come
+    /// from a monotonic counter, so that is spawn order — which is what makes
+    /// a window's hydration deterministic.
+    pub fn tabs_for_window_info(&self, label: &str) -> Vec<TabInfo> {
+        let mut ids = self.tabs_in_window(label);
+        ids.sort_unstable();
+        ids.into_iter().filter_map(|id| self.info(id)).collect()
+    }
+
     pub fn tabs_in_window(&self, label: &str) -> Vec<u64> {
         self.windows
             .lock()

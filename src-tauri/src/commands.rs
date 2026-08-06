@@ -14,12 +14,11 @@ use crate::{
     },
     schedule_refill,
     ssh::{self, SftpConsumers, SharedPool, SshConnectConfig},
-    warn_on_err,
     stronghold::{self, StrongholdUnlock},
     tab::{PtyEvent, ScrollKind, SftpReq, SharedRegistry},
+    warn_on_err,
     window_pool::WindowMode,
-    DbUrl, SharedConfig, SharedPendingHydration, SharedRuntime, SharedWindowCounter,
-    SharedWindowPool,
+    DbUrl, SharedConfig, SharedRuntime, SharedWindowCounter, SharedWindowPool,
 };
 
 #[cfg(target_os = "macos")]
@@ -478,12 +477,9 @@ pub fn open_panel_window(
 #[tauri::command]
 pub fn bootstrap_window(
     registry: State<'_, SharedRegistry>,
-    pending: State<'_, SharedPendingHydration>,
     pool: State<'_, SharedWindowPool>,
     label: String,
 ) -> WindowBootstrap {
-    use std::collections::BTreeSet;
-
     match pool.mode_for(&label) {
         WindowMode::Reserve => {
             pool.mark_ready(&label);
@@ -492,21 +488,10 @@ pub fn bootstrap_window(
                 tabs: Vec::new(),
             }
         }
-        WindowMode::Normal => {
-            let drained = pending.0.lock().remove(&label).unwrap_or_default();
-            let mut ids: BTreeSet<u64> = drained.into_iter().collect();
-            for id in registry.tabs_in_window(&label) {
-                ids.insert(id);
-            }
-            let tabs = ids
-                .into_iter()
-                .filter_map(|id| registry.info(id))
-                .collect();
-            WindowBootstrap {
-                mode: WindowMode::Normal,
-                tabs,
-            }
-        }
+        WindowMode::Normal => WindowBootstrap {
+            mode: WindowMode::Normal,
+            tabs: registry.tabs_for_window_info(&label),
+        },
     }
 }
 
@@ -538,24 +523,6 @@ pub fn attach_tab(
     )
     .map_err(|e| AppError::Other(e.to_string()))?;
     Ok(())
-}
-
-#[tauri::command]
-pub fn list_tabs_for_window(
-    registry: State<'_, SharedRegistry>,
-    pending: State<'_, SharedPendingHydration>,
-    label: String,
-) -> Vec<TabInfo> {
-    use std::collections::BTreeSet;
-
-    let drained = pending.0.lock().remove(&label).unwrap_or_default();
-    let mut ids: BTreeSet<u64> = drained.into_iter().collect();
-    for id in registry.tabs_in_window(&label) {
-        ids.insert(id);
-    }
-    ids.into_iter()
-        .filter_map(|id| registry.info(id))
-        .collect()
 }
 
 #[tauri::command]
