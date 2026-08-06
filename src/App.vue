@@ -20,7 +20,6 @@ import {
   onSshHostKeyMismatch,
   onSshPortForwardError,
   onSshReconnecting,
-  onTabAttached,
   onTerminalNotification,
   onWindowActivateBlank,
   openNewWindow,
@@ -34,7 +33,6 @@ import {
   type SshHostKeyMismatch,
 } from "./ipc";
 import {
-  attachTab as attachTabLocal,
   clearSshReconnecting,
   closeWorkspacePane,
   dropTabIntoTarget,
@@ -55,7 +53,6 @@ import {
   openPanelOnActive,
   openPanelTab,
   useTabs,
-  type TabHydrateInfo,
 } from "./state/tabs";
 import {
   applyTerminalBg,
@@ -92,7 +89,6 @@ import {
 import {
   installCrossDragTarget,
   moveTabOut,
-  tryAbsorbIntoMoveBatch,
 } from "./state/drag";
 import { notify, notifyBell } from "./state/notifications";
 import { startupView } from "./state/uiPrefs";
@@ -201,8 +197,8 @@ async function spawnNewTab(sameCwd = false): Promise<void> {
 // activate-blank could otherwise pile a fresh shell on top of the attached
 // torn-off tab).
 //
-// The `hasAdoptedTab` flag is sticky: once a tab has been attached via the
-// onTabAttached path (tear-off into this window), the activate-blank
+// The `hasAdoptedTab` flag is sticky: once a move has landed here via
+// `window:tabs_attached` (a tear-off into this window), the activate-blank
 // listener must NEVER spawn an extra shell on top, even if it fires later
 // due to a stale handler or replay. The in-flight flag covers the rapid
 // double-fire case where the synchronous `tabs.value.some` guard is read
@@ -565,24 +561,16 @@ onMounted(async () => {
     if (wasSsh) window.setTimeout(maybeCloseWindow, 200);
     else maybeCloseWindow();
   }));
-  unlisteners.push(await onTabAttached((p) => {
-    // Sticky: once a tab was attached here, never let a stray
-    // activate-blank fire spawn an extra shell on top.
-    hasAdoptedTab = true;
-    // A moved tab (or workspace tree) crossing windows attaches its panes
-    // one backend id at a time; each one lands here first. If this id is
-    // part of such a pending move batch, absorb it there instead of
-    // hydrating it as its own standalone tab — the batch assembles, places,
-    // and reflows the whole tree once every id it names has arrived.
-    if (tryAbsorbIntoMoveBatch(p as TabHydrateInfo)) return;
-    attachTabLocal(p as TabHydrateInfo);
-    // Resize newly-attached tabs to this window's geometry; their dims were
-    // sized for the source window and likely no longer match.
-    reflowActive(active.value);
-  }));
-  // Receiving side of cross-window tab drags (hover preview + drop placement
-  // forwarded by the source window).
-  unlisteners.push(...(await installCrossDragTarget()));
+  // Receiving side of cross-window moves: the hover preview forwarded by the
+  // source window, and the single `window:tabs_attached` that delivers a whole
+  // move (every tab's info plus the wire tree) in one message. The callback is
+  // the sticky "this window has a purpose" flag — once a move landed here, a
+  // stray activate-blank must not spawn an extra shell on top.
+  unlisteners.push(
+    ...(await installCrossDragTarget(() => {
+      hasAdoptedTab = true;
+    })),
+  );
   // Activation for a previously-reserve window: spawn the first tab now
   // that the user has actually claimed this webview. Must be installed
   // before bootstrapWindow returns so a pop_for_blank firing immediately
@@ -713,7 +701,7 @@ onMounted(async () => {
       await autoSpawnInitialTab();
     }
   }
-  // mode === "reserve": stay idle. onTabAttached + onWindowActivateBlank
+  // mode === "reserve": stay idle. onTabsAttached + onWindowActivateBlank
   // (installed above) handle whichever activation fires.
 
   // Updater: silent check on launch, then on a recurring interval.

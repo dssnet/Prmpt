@@ -10,24 +10,22 @@
 //! activation. This mirrors the existing tear-off contract (one tab per
 //! torn-off window) without wasting a shell process per reserve.
 //!
-//! Race-prevention design:
-//! - The slot is flipped to `Building(label)` *before* the slow
-//!   `WebviewWindowBuilder::build()` runs, while the lock is still held. A
-//!   second concurrent `ensure_filled` therefore sees a non-`Empty` slot and
-//!   bails out — without this, both callers would race past the check,
-//!   build two hidden windows, and the second's slot write would orphan the
-//!   first (a hidden WKWebView nobody can pop or destroy).
-//! - `Building → Ready` is flipped by the reserve's frontend calling
-//!   `bootstrap_window`. Until then `pop_*` returns `None` and the caller
-//!   falls back to building a fresh window — same behavior as today.
+//! **This module owns no state.** The reserve slot used to be a second mutex
+//! here (`Empty → Building → Ready → Empty`) that could disagree with the
+//! registry's view of the same windows — a `Ready` label naming a window that
+//! had since been destroyed, and every popper carrying its own "did it
+//! actually still exist?" fallback. The slot is now just a window's `kind` in
+//! `ownership.rs`, so "is a reserve already claimed?" and "claim it" happen in
+//! one lock acquisition, and a destroyed reserve frees the slot by virtue of
+//! being `Gone`. What is left here is the builder chain.
 
 use std::sync::{atomic::Ordering, Arc};
 
-use parking_lot::Mutex;
 use serde::Serialize;
 use tauri::{AppHandle, Manager, Runtime, WebviewUrl, WebviewWindowBuilder};
 
-use crate::{configure_new_window, SharedWindowCounter, SHUTTING_DOWN};
+use crate::ownership::WindowKind;
+use crate::{configure_new_window, tab::SharedRegistry, SharedWindowCounter, SHUTTING_DOWN};
 
 #[cfg(target_os = "macos")]
 use crate::platform;
@@ -42,130 +40,35 @@ pub enum WindowMode {
     Normal,
 }
 
-/// Reserve-pool slot lifecycle. Transitions:
-///   `Empty` → `Building(label)` → `Ready(label)` → `Empty`
-///
-/// The slot is moved into `Building` while the lock is still held in
-/// `ensure_filled`, so a second concurrent caller observes a non-`Empty`
-/// slot and skips its own build. `Ready` is the only state `pop_*` will
-/// take from; `note_destroyed` resets the slot if the destroyed label
-/// matches the slot's current label.
 #[derive(Default)]
-enum ReserveSlot {
-    #[default]
-    Empty,
-    Building(String),
-    Ready(String),
-}
-
-impl ReserveSlot {
-    fn label(&self) -> Option<&str> {
-        match self {
-            ReserveSlot::Empty => None,
-            ReserveSlot::Building(l) | ReserveSlot::Ready(l) => Some(l.as_str()),
-        }
-    }
-}
-
-#[derive(Default)]
-pub struct WindowPool {
-    slot: Mutex<ReserveSlot>,
-}
+pub struct WindowPool;
 
 pub type SharedWindowPool = Arc<WindowPool>;
 
 impl WindowPool {
     pub fn new() -> Self {
-        Self::default()
+        Self
     }
 
-    /// What the frontend should do on bootstrap. Returns `Reserve` only for
-    /// the label currently held in the pool (either still Building or
-    /// already Ready); everything else (main, torn-off fresh windows,
-    /// already-activated reserves) is `Normal`.
-    pub fn mode_for(&self, label: &str) -> WindowMode {
-        if self.slot.lock().label() == Some(label) {
-            WindowMode::Reserve
-        } else {
-            WindowMode::Normal
-        }
-    }
-
-    /// Flip the reserve from `Building` to `Ready`. Called when its frontend
-    /// invokes `bootstrap_window` (which is also the moment we know all the
-    /// reserve's event listeners are installed and it can receive activation
-    /// events / tab attachments without losing them). No-op if the slot's
-    /// label doesn't match (e.g., already popped, or this is a different
-    /// reserve from a later refill cycle).
-    pub fn mark_ready(&self, label: &str) {
-        let mut slot = self.slot.lock();
-        if let ReserveSlot::Building(l) = &*slot {
-            if l == label {
-                *slot = ReserveSlot::Ready(label.to_string());
-            }
-        }
-    }
-
-    /// Take a reserve for a blank-window activation (dock-click or Cmd+N).
-    /// Returns the label only if a `Ready` reserve exists; otherwise None
-    /// and the caller falls back to building fresh.
-    pub fn pop_for_blank(&self) -> Option<String> {
-        self.pop_ready()
-    }
-
-    /// Take a reserve for a tab tear-off activation.
-    pub fn pop_for_tear_off(&self) -> Option<String> {
-        self.pop_ready()
-    }
-
-    fn pop_ready(&self) -> Option<String> {
-        let mut slot = self.slot.lock();
-        if !matches!(*slot, ReserveSlot::Ready(_)) {
-            return None;
-        }
-        match std::mem::take(&mut *slot) {
-            ReserveSlot::Ready(label) => Some(label),
-            _ => unreachable!(),
-        }
-    }
-
-    /// Clear the slot if the destroyed window was the one we were tracking.
-    /// Does NOT spawn a replacement — `ensure_filled` is the caller's
-    /// responsibility. (Kept separate so the Destroyed handler can skip
-    /// respawn during shutdown.)
-    pub fn note_destroyed(&self, label: &str) {
-        let mut slot = self.slot.lock();
-        if slot.label() == Some(label) {
-            *slot = ReserveSlot::Empty;
-        }
-    }
-
-    /// Idempotent: spawn one reserve if the pool is empty and we're not
-    /// shutting down. The slot is claimed (set to `Building(label)`) while
-    /// the lock is still held, so two concurrent callers cannot both kick
-    /// off `spawn_reserve` and orphan one of the resulting hidden windows.
-    /// Tolerant of build failures — logs, rolls the slot back to `Empty`,
-    /// and bails so the next trigger can retry.
+    /// Idempotent: build one reserve if none is claimed and we aren't shutting
+    /// down. `claim_reserve` both tests and claims under the registry lock, so
+    /// two concurrent callers can't each build a hidden window and orphan one
+    /// of them. Tolerant of build failures — logs, releases the claim, and
+    /// bails so the next trigger can retry.
     pub fn ensure_filled<R: Runtime>(&self, app: &AppHandle<R>) {
         if SHUTTING_DOWN.load(Ordering::SeqCst) {
             return;
         }
-        let label = {
-            let mut slot = self.slot.lock();
-            if !matches!(*slot, ReserveSlot::Empty) {
-                return;
-            }
-            let counter = app.state::<SharedWindowCounter>();
-            let label = format!("window-{}", counter.next());
-            *slot = ReserveSlot::Building(label.clone());
-            label
-        };
+        let registry = app.state::<SharedRegistry>();
+        let label = format!("window-{}", app.state::<SharedWindowCounter>().next());
+        if !registry.claim_reserve(&label) {
+            return;
+        }
         if let Err(e) = self.spawn_reserve(app, &label) {
             eprintln!("window_pool: failed to spawn reserve: {e}");
-            let mut slot = self.slot.lock();
-            if matches!(&*slot, ReserveSlot::Building(l) if l == &label) {
-                *slot = ReserveSlot::Empty;
-            }
+            // Release the claim so the next trigger can retry. `mark_window_gone`
+            // is the same thing the Destroyed handler would have done.
+            registry.mark_window_gone(&label);
         }
     }
 
@@ -189,12 +92,13 @@ impl WindowPool {
         #[cfg(target_os = "windows")]
         let builder = builder.decorations(false);
         let window = builder.visible(false).build()?;
-        configure_new_window(&window);
+        // Re-registers the label the claim above already staked out; same
+        // kind, so this is idempotent.
+        configure_new_window(&window, WindowKind::ReserveBuilding);
 
         // If shutdown fired during the (slow) build, tear the just-built
         // window down. The Destroyed handler installed by
-        // `configure_new_window` calls `note_destroyed`, which resets the
-        // slot back to Empty.
+        // `configure_new_window` frees the reserve slot.
         if SHUTTING_DOWN.load(Ordering::SeqCst) {
             crate::warn_on_err("close", label, window.close());
         }

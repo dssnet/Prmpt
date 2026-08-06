@@ -8,13 +8,15 @@ import {
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 
 import {
-  attachTab,
+  attachTabs,
   closeCurrentWindow,
+  onTabsAttached as onTabsAttachedEvent,
   openPanelWindow,
   tearOffWindow,
   windowAtScreenPoint,
   windowDragTargets,
   type DragTargetInfo,
+  type TabsAttachedPayload,
 } from "../ipc";
 import {
   clearWorkspaceDragPreview,
@@ -442,27 +444,30 @@ async function resolveHitTestTarget(
   return label ? { label, x: -1, y: -1 } : null;
 }
 
-/** Ship a `MoveSource` to an already-known window: the wire payload first,
- *  awaited before any `attach_tab` call — mirrors the ordering the old
- *  single-pane path documented as `commitCrossDrop`: the target must know
- *  this payload exists before the first matching `window:tab_attached`
- *  lands, since Tauri delivers events to a given target in the order this
- *  window issued them. Then attach every terminal leaf's backend (0, 1, or
- *  N — same loop either way). */
+/** Ship a `MoveSource` to an already-known window. One call: either every
+ *  backend id moved and the target received the whole tree in a single
+ *  message, or nothing moved at all.
+ *
+ *  This replaces an emit-then-attach-N-times sequence whose failure modes were
+ *  the reason `moveOut`'s "leaves source state untouched on any failure"
+ *  promise wasn't true — a throw partway left some panes moved on the backend
+ *  and all of them still drawn here. It also retires the ordering dance that
+ *  sequence needed: the wire tree rides through the backend as an opaque blob
+ *  and comes back beside the `TabInfo`s, so there are no two events left to
+ *  order. */
 async function shipTo(
   label: string,
   x: number | null,
   y: number | null,
   source: MoveSource,
 ): Promise<void> {
-  await emitTo(targetOf(label), "xdrag:drop_tree", {
+  await attachTabs(source.termIds, label, {
     x,
     y,
     tree: source.tree,
     termIds: source.termIds,
     whole: source.whole,
   } satisfies CrossTreeDropPayload);
-  for (const id of source.termIds) await attachTab(id, label);
 }
 
 /** The one "move a subtree out of this window" primitive — every drag
@@ -667,84 +672,61 @@ function onForeignHover(p: CrossHoverPayload): void {
   else updateWorkspaceDragPreview(p.x, p.y);
 }
 
-/** A `MoveSource`'s wire payload, buffered here (keyed by every terminal id
- *  it names) until each one's `window:tab_attached` has landed. A pure
- *  panel tree (`termIds.length === 0`) never registers a batch — there's
- *  nothing to wait for, so it materializes immediately in
- *  `onForeignTreeDrop` itself. N=1 is just "the batch happens to need
- *  exactly one id" — no separate fast path. TTL'd so an attach that never
- *  arrives (source-side failure) can't replay onto an unrelated future
- *  tab. */
-interface PendingMoveBatch {
-  at: number;
-  payload: CrossTreeDropPayload;
-  attached: Map<number, TabHydrateInfo>;
-  placement: DropPlacement | null;
-}
-const pendingMoveBatches = new Map<number, PendingMoveBatch>();
-const MOVE_BATCH_TTL_MS = 8000;
-
-function onForeignTreeDrop(p: CrossTreeDropPayload): void {
+/** A cross-window move landing here: every moved tab's info plus the mover's
+ *  wire tree, in one message.
+ *
+ *  This used to be a buffering problem. The mover emitted its wire tree
+ *  window-to-window and then attached each backend id separately, so the
+ *  receiver had to key a pending batch by every id it expected, swallow the
+ *  per-id attach events, and assemble only once the count matched — with an
+ *  8s TTL as the only escape. If the mover died partway, the batch never
+ *  completed and never expired (the TTL was only checked on the *next* attach
+ *  for that batch, which by then could not arrive), so the tabs that had
+ *  already attached became invisible backend zombies in this window. The
+ *  backend now moves them transactionally and delivers one event, so there is
+ *  nothing to buffer, join, or time out. */
+function onTabsAttached(p: TabsAttachedPayload<CrossTreeDropPayload>): void {
   clearDragAffordances();
-  // Resolved *now*, before the tree is even assembled: `resolveDropAt`
-  // reads the currently active tab, which is what the drop's hover preview
-  // was actually shown against.
-  const placement = p.x != null && p.y != null ? resolvePlacement(p.x, p.y) : null;
-  if (p.termIds.length === 0) {
-    materializeTree({ at: performance.now(), payload: p, attached: new Map(), placement });
-    return;
-  }
-  const batch: PendingMoveBatch = {
-    at: performance.now(),
-    payload: p,
-    attached: new Map(),
-    placement,
-  };
-  for (const id of p.termIds) pendingMoveBatches.set(id, batch);
-}
+  const attached = new Map(p.tabs.map((t) => [t.id, t as TabHydrateInfo]));
+  const wire = p.payload;
+  // Resolved now, against the currently active tab — which is what the drop's
+  // hover preview was actually shown against.
+  const placement =
+    wire.x != null && wire.y != null ? resolvePlacement(wire.x, wire.y) : null;
 
-/** Intercept a `window:tab_attached` event for a leaf that's part of a
- *  pending move batch — called from App.vue's onTabAttached *before* its
- *  normal one-tab-per-attach hydration. Returns true once absorbed (the
- *  caller must skip normal hydration for it); assembles the whole tree
- *  into one new tab once every leaf named in the batch has arrived. */
-export function tryAbsorbIntoMoveBatch(info: TabHydrateInfo): boolean {
-  const batch = pendingMoveBatches.get(info.id);
-  if (!batch) return false;
-  if (performance.now() - batch.at > MOVE_BATCH_TTL_MS) {
-    for (const id of batch.payload.termIds) pendingMoveBatches.delete(id);
-    return false;
-  }
-  batch.attached.set(info.id, info);
-  if (batch.attached.size === batch.payload.termIds.length) {
-    for (const id of batch.payload.termIds) pendingMoveBatches.delete(id);
-    materializeTree(batch);
-  }
-  return true;
-}
-
-function materializeTree(batch: PendingMoveBatch): void {
-  const p = batch.payload;
   const focusRef = { id: -1 };
-  const root = buildWorkspaceFromWire(p.tree, originResolver(batch.attached), focusRef);
+  const root = buildWorkspaceFromWire(wire.tree, originResolver(attached), focusRef);
   const soleTermInfo =
-    p.termIds.length === 1 ? batch.attached.get(p.termIds[0]) : undefined;
-  const meta = p.whole
-    ? { hostLabel: p.whole.hostLabel, hostId: p.whole.hostId, disableSftp: p.whole.disableSftp }
+    wire.termIds.length === 1 ? attached.get(wire.termIds[0]) : undefined;
+  const meta = wire.whole
+    ? {
+        hostLabel: wire.whole.hostLabel,
+        hostId: wire.whole.hostId,
+        disableSftp: wire.whole.disableSftp,
+      }
     : soleTermInfo
       ? metaFromHydrateInfo(soleTermInfo)
       : undefined;
-  const title = p.whole?.title ?? (root.kind === "leaf" ? root.origin.title : "Terminal");
+  const title = wire.whole?.title ?? (root.kind === "leaf" ? root.origin.title : "Terminal");
   const slotId = addRestoredWorkspace(title, root, focusRef.id, meta);
-  applyTabPlacement(slotId, batch.placement);
+  applyTabPlacement(slotId, placement);
   // The panes were sized for the source window; re-tile/resize them (and
-  // their backend PTYs) to this one's geometry, same as a plain attach.
+  // their backend PTYs) to this one's geometry.
   reflowActive(useTabs().active.value);
+  onAdopt?.();
 }
+
+/** Called once a move has actually landed here, so App.vue can set its
+ *  sticky "this window has a purpose" flag and stop a later activate-blank
+ *  from piling an extra shell on top. */
+let onAdopt: (() => void) | null = null;
 
 /** Install this window's receiving side. Returns the unlisteners for App.vue's
  *  HMR-safe teardown list. */
-export async function installCrossDragTarget(): Promise<UnlistenFn[]> {
+export async function installCrossDragTarget(
+  adopted: () => void,
+): Promise<UnlistenFn[]> {
+  onAdopt = adopted;
   return await Promise.all([
     listen<CrossHoverPayload>("xdrag:hover", (e) => onForeignHover(e.payload), {
       target: MY_TARGET,
@@ -752,10 +734,6 @@ export async function installCrossDragTarget(): Promise<UnlistenFn[]> {
     listen<null>("xdrag:leave", () => clearDragAffordances(), {
       target: MY_TARGET,
     }),
-    listen<CrossTreeDropPayload>(
-      "xdrag:drop_tree",
-      (e) => onForeignTreeDrop(e.payload),
-      { target: MY_TARGET },
-    ),
+    onTabsAttachedEvent<CrossTreeDropPayload>(onTabsAttached),
   ]);
 }

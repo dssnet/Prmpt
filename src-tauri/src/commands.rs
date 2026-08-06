@@ -5,6 +5,7 @@ use tauri::{
 
 use crate::{
     activate_blank_window, configure_new_window,
+    ownership::WindowKind,
     config::{Config, TerminalPrefs, Theme, UiPrefs},
     error::{AppError, AppResult},
     git, localfs,
@@ -18,7 +19,7 @@ use crate::{
     tab::{PtyEvent, ScrollKind, SftpReq, SharedRegistry},
     warn_on_err,
     window_pool::WindowMode,
-    DbUrl, SharedConfig, SharedRuntime, SharedWindowCounter, SharedWindowPool,
+    DbUrl, SharedConfig, SharedRuntime, SharedWindowCounter,
 };
 
 #[cfg(target_os = "macos")]
@@ -332,7 +333,6 @@ fn pop_or_build_tear_off_window(
     app: &AppHandle,
     registry: &SharedRegistry,
     counter: &SharedWindowCounter,
-    pool: &SharedWindowPool,
     screen_x: f64,
     screen_y: f64,
     width: f64,
@@ -344,16 +344,14 @@ fn pop_or_build_tear_off_window(
     let pos_x = screen_x - width / 2.0;
     let pos_y = screen_y - height / 2.0;
 
-    if let Some(label) = pool.pop_for_tear_off() {
+    // Yields only a Live window, and hands back any tabs it had somehow
+    // accumulated in the same lock acquisition. A reserve should have none;
+    // if something attached one earlier, kill it before adopting the torn-off
+    // tab(s) so the activated window shows just what the caller attaches (the
+    // terminal:exit event removes the stale pill from its frontend state).
+    if let Some((label, stragglers)) = registry.take_ready_reserve() {
         if let Some(window) = app.get_webview_window(&label) {
-            // Defensive: a reserve should have no tabs in the registry.
-            // If something accidentally attached one earlier (e.g., an
-            // older build's hit-test that didn't skip hidden reserves),
-            // kill it before adopting the torn-off tab(s) so the activated
-            // window shows just what the caller attaches. The
-            // terminal:exit event removes any matching pill from the
-            // reserve's frontend state.
-            for existing_id in registry.tabs_in_window(&label) {
+            for existing_id in stragglers {
                 let _ = registry.close(existing_id);
             }
             warn_on_err("set_size", &label, window.set_size(LogicalSize::new(width, height)));
@@ -373,7 +371,6 @@ fn pop_or_build_tear_off_window(
             schedule_refill(app);
             return Ok((label, true));
         }
-        pool.note_destroyed(&label);
     }
 
     let label = format!("window-{}", counter.next());
@@ -401,7 +398,7 @@ fn pop_or_build_tear_off_window(
         .build()
         .map_err(|e| AppError::Other(format!("build window: {e}")))?;
 
-    configure_new_window(&window);
+    configure_new_window(&window, WindowKind::Normal);
 
     // Top the pool back up after spending a fallback build slot too —
     // building the fresh window already happened, but the pool itself
@@ -427,14 +424,12 @@ pub fn tear_off_window(
     app: AppHandle,
     registry: State<'_, SharedRegistry>,
     counter: State<'_, SharedWindowCounter>,
-    pool: State<'_, SharedWindowPool>,
     args: TearOffWindowArgs,
 ) -> AppResult<String> {
     let (label, _from_reserve) = pop_or_build_tear_off_window(
         &app,
         &registry,
         &counter,
-        &pool,
         args.screen_x,
         args.screen_y,
         args.width,
@@ -477,58 +472,80 @@ pub fn open_panel_window(
 #[tauri::command]
 pub fn bootstrap_window(
     registry: State<'_, SharedRegistry>,
-    pool: State<'_, SharedWindowPool>,
     label: String,
 ) -> WindowBootstrap {
-    match pool.mode_for(&label) {
-        WindowMode::Reserve => {
-            pool.mark_ready(&label);
+    match registry.is_reserve(&label) {
+        true => {
+            // Reaching this command means the frontend's listeners are up, so
+            // the reserve is safe to pop: Building → Ready.
+            registry.mark_reserve_ready(&label);
             WindowBootstrap {
                 mode: WindowMode::Reserve,
                 tabs: Vec::new(),
             }
         }
-        WindowMode::Normal => WindowBootstrap {
+        false => WindowBootstrap {
             mode: WindowMode::Normal,
             tabs: registry.tabs_for_window_info(&label),
         },
     }
 }
 
+#[derive(serde::Deserialize)]
+pub struct AttachTabsArgs {
+    pub tab_ids: Vec<u64>,
+    pub target_label: String,
+    /// The mover's wire pane tree — opaque here, echoed verbatim in the
+    /// emitted event (same contract as `open_panel_window`'s `desc`). Riding
+    /// through the backend is what lets the whole move land in the target as
+    /// *one* message: it used to be a separate window-to-window event racing N
+    /// per-tab attach events, which the target had to buffer and re-join by
+    /// hand.
+    pub payload: serde_json::Value,
+}
+
+#[derive(serde::Serialize, Clone, Debug)]
+pub struct TabsAttachedPayload {
+    pub tabs: Vec<TabInfo>,
+    pub payload: serde_json::Value,
+}
+
+/// Move tabs into another window — all of them, or none.
+///
+/// The target is validated (live, normal, known — never a hidden reserve) and
+/// every id checked *before* anything moves; if the notification then fails,
+/// the transfer is rolled back exactly. The previous per-tab command mutated
+/// first and reported afterwards, so a target window that closed mid-drag left
+/// tabs owned by a dead label: live threads, live shells, reachable from no
+/// window at all.
+///
+/// An empty `tab_ids` is a legal no-op that still validates the target — that
+/// is how an all-panel move (which names no backend tab) finally gets a
+/// liveness check.
 #[tauri::command]
-pub fn attach_tab(
+pub fn attach_tabs(
     app: AppHandle,
     registry: State<'_, SharedRegistry>,
-    pool: State<'_, SharedWindowPool>,
-    tab_id: u64,
-    target_label: String,
-) -> AppResult<()> {
-    // Belt to window_at_screen_point's suspenders: refuse to attach into a
-    // reserve. If a reserve ever leaked past the hit-test (older client
-    // builds, races, custom callers), it would silently pile tabs onto a
-    // hidden window — visible only after a future tear-off pops it.
-    if pool.mode_for(&target_label) == WindowMode::Reserve {
-        return Err(AppError::Other(format!(
-            "cannot attach to reserve window {target_label}"
-        )));
-    }
-    registry.set_window(tab_id, target_label.clone())?;
-    let info = registry
-        .info(tab_id)
-        .ok_or(AppError::UnknownTab(tab_id))?;
-    app.emit_to(
-        EventTarget::webview_window(&target_label),
-        "window:tab_attached",
-        info,
-    )
-    .map_err(|e| AppError::Other(e.to_string()))?;
-    Ok(())
+    args: AttachTabsArgs,
+) -> AppResult<Vec<TabInfo>> {
+    let (infos, ()) = registry.attach_all(&args.tab_ids, &args.target_label, |infos| {
+        app.emit_to(
+            EventTarget::webview_window(&args.target_label),
+            "window:tabs_attached",
+            TabsAttachedPayload {
+                tabs: infos.to_vec(),
+                payload: args.payload.clone(),
+            },
+        )
+        .map_err(|e| AppError::Other(e.to_string()))
+    })?;
+    Ok(infos)
 }
 
 #[tauri::command]
 pub fn window_at_screen_point(
     app: AppHandle,
-    pool: State<'_, SharedWindowPool>,
+    registry: State<'_, SharedRegistry>,
     x: f64,
     y: f64,
     exclude: String,
@@ -548,7 +565,7 @@ pub fn window_at_screen_point(
         // or with extra phantom tabs. Skip via the pool first (definitive,
         // unlike `is_visible` which can briefly misreport on a freshly
         // built hidden window) and is_visible second.
-        if pool.mode_for(&label) == WindowMode::Reserve {
+        if !registry.is_attachable(&label) {
             continue;
         }
         if !window.is_visible().unwrap_or(false) {
@@ -600,7 +617,7 @@ pub struct DragTargetInfo {
 #[tauri::command]
 pub fn window_drag_targets(
     app: AppHandle,
-    pool: State<'_, SharedWindowPool>,
+    registry: State<'_, SharedRegistry>,
     exclude: String,
 ) -> Vec<DragTargetInfo> {
     let order = crate::FOCUS_ORDER.lock().clone();
@@ -611,7 +628,7 @@ pub fn window_drag_targets(
         if label == exclude {
             continue;
         }
-        if pool.mode_for(&label) == WindowMode::Reserve {
+        if !registry.is_attachable(&label) {
             continue;
         }
         if !window.is_visible().unwrap_or(false) || window.is_minimized().unwrap_or(false) {

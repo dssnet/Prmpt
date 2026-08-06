@@ -10,6 +10,7 @@ mod localfs;
 #[cfg(target_os = "macos")]
 mod macos;
 mod osc_notify;
+mod ownership;
 mod paths;
 mod platform;
 mod protocol;
@@ -30,6 +31,7 @@ use std::{
 
 use config::Config;
 use parking_lot::Mutex;
+use ownership::WindowKind;
 use tab::TabRegistry;
 #[cfg(target_os = "macos")]
 use tauri::menu::{IconMenuItemBuilder, MenuBuilder, MenuItemBuilder, PredefinedMenuItem, SubmenuBuilder};
@@ -264,7 +266,7 @@ pub fn run() {
             commands::forget_tab,
             commands::frontend_log,
             commands::tear_off_window,
-            commands::attach_tab,
+            commands::attach_tabs,
             commands::bootstrap_window,
             commands::open_new_window,
             commands::open_panel_window,
@@ -382,7 +384,7 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             install_app_menu(app.handle())?;
             if let Some(window) = app.get_webview_window("main") {
-                configure_new_window(&window);
+                configure_new_window(&window, WindowKind::Normal);
                 // Fork the shell now so its rc files run while the
                 // webview/font/WebGL bootstrap is still in flight,
                 // instead of after it. The frontend hydrates this tab
@@ -461,8 +463,14 @@ pub(crate) struct PanelSpawn {
 /// a terminal; it only flows through the reserve path (the fresh-build
 /// fallback prespawns a terminal and ignores it — a rare cold-pool case).
 pub(crate) fn activate_blank_window(app: &AppHandle, panel: Option<PanelSpawn>) {
-    let pool = app.state::<SharedWindowPool>();
-    if let Some(label) = pool.pop_for_blank() {
+    let registry = app.state::<tab::SharedRegistry>();
+    // `take_ready_reserve` only yields a Live window, so the old "pool said
+    // Ready but it vanished" fallback below is gone — that state can't exist
+    // now that the slot and the window record are the same thing.
+    if let Some((label, stragglers)) = registry.take_ready_reserve() {
+        for id in stragglers {
+            let _ = registry.close(id);
+        }
         if let Some(window) = app.get_webview_window(&label) {
             let payload = match panel {
                 Some(p) => ActivateBlankPayload {
@@ -486,9 +494,6 @@ pub(crate) fn activate_blank_window(app: &AppHandle, panel: Option<PanelSpawn>) 
             schedule_refill(app);
             return;
         }
-        // Pool said Ready but the window vanished (shouldn't normally
-        // happen). Clean up and fall through to the fresh-build path.
-        pool.note_destroyed(&label);
     }
     if let Err(e) = open_blank_window(app) {
         eprintln!("activate_blank_window: fallback build failed: {e}");
@@ -537,7 +542,7 @@ fn open_blank_window(app: &AppHandle) -> tauri::Result<()> {
     #[cfg(not(any(target_os = "ios", target_os = "android")))]
     let builder = builder.focused(true);
     let win = builder.visible(true).build()?;
-    configure_new_window(&win);
+    configure_new_window(&win, WindowKind::Normal);
     prespawn_tab_for_window(app, &label);
     Ok(())
 }
@@ -665,11 +670,17 @@ fn install_app_menu<R: tauri::Runtime>(
 }
 
 /// Per-window setup that must run for every webview window we create —
-/// both the initial "main" window and any tear-off windows. Disables
-/// macOS Writing Tools (which otherwise hijack right-clicks) and
-/// installs a Destroyed handler so the window's tabs are reaped when
-/// it closes.
-pub fn configure_new_window<R: Runtime>(window: &WebviewWindow<R>) {
+/// both the initial "main" window and any tear-off windows. Registers the
+/// window with the tab registry (which is what makes "unknown label ⇒ not a
+/// legal target" safe rather than a guess), disables macOS Writing Tools
+/// (which otherwise hijack right-clicks), and installs a Destroyed handler so
+/// the window's tabs are reaped when it closes.
+pub fn configure_new_window<R: Runtime>(window: &WebviewWindow<R>, kind: WindowKind) {
+    window
+        .app_handle()
+        .state::<tab::SharedRegistry>()
+        .register_window(window.label(), kind);
+
     #[cfg(target_os = "macos")]
     {
         let _ = window.with_webview(|webview| {
@@ -723,11 +734,13 @@ pub fn configure_new_window<R: Runtime>(window: &WebviewWindow<R>) {
         if matches!(event, WindowEvent::Destroyed) {
             FOCUS_ORDER.lock().retain(|l| l != &label);
             let registry = app.state::<tab::SharedRegistry>();
-            // Backstop for closes the frontend didn't announce via
-            // `prepare_window_close` (an update teardown, a native path):
-            // the webview is gone, so nothing may emit into it any more.
-            registry.mark_window_closing(&label);
-            for tab_id in registry.tabs_in_window(&label) {
+            // Flip to Gone and take the orphan list in one lock acquisition:
+            // separately, an attach could land between the two and hand this
+            // window a tab that nothing would ever reap. Also the backstop for
+            // closes the frontend didn't announce via `prepare_window_close`
+            // (an update teardown, a native path) — the webview is gone, so
+            // nothing may emit into it any more.
+            for tab_id in registry.mark_window_gone(&label) {
                 let _ = registry.close(tab_id);
             }
             // File-browser SFTP consumers have no backend tab to reap above;
@@ -736,11 +749,9 @@ pub fn configure_new_window<R: Runtime>(window: &WebviewWindow<R>) {
             let conn_pool = app.state::<ssh::SharedPool>();
             let consumers = app.state::<ssh::SftpConsumers>();
             conn_pool.release_window(consumers.inner(), &label);
-            // Keep the reserve pool in sync. Skip during shutdown so we
-            // don't try to build a replacement window while the app is
-            // tearing down.
-            let pool = app.state::<SharedWindowPool>();
-            pool.note_destroyed(&label);
+            // Top the reserve pool back up (the slot this window may have
+            // held was freed by `mark_window_gone`). Skipped during shutdown
+            // so we don't build a replacement while the app tears down.
             if !SHUTTING_DOWN.load(Ordering::SeqCst) {
                 schedule_refill(&app);
             }

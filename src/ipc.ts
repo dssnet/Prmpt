@@ -407,10 +407,14 @@ export interface TabInfo {
   disable_ssh: boolean;
 }
 
-/** The `window:tab_attached` event used to carry just `{ tab_id }`; it now
- *  carries the full `TabInfo` so the receiving window can restore the
- *  tab's kind + host metadata without an extra round-trip. */
-export type TabAttachedPayload = TabInfo;
+/** `window:tabs_attached` — one message per cross-window move, carrying every
+ *  moved tab's `TabInfo` plus the mover's opaque wire payload. It used to be N
+ *  separate `window:tab_attached` events racing a window-to-window
+ *  `xdrag:drop_tree`, which the receiver had to buffer and re-join by hand. */
+export interface TabsAttachedPayload<P = unknown> {
+  tabs: TabInfo[];
+  payload: P;
+}
 
 export function currentWindowLabel(): string {
   return getCurrentWebviewWindow().label;
@@ -433,14 +437,25 @@ export async function prepareWindowClose(): Promise<void> {
   }
 }
 
-export async function attachTab(tabId: number, targetLabel: string): Promise<void> {
-  await invoke("attach_tab", { tabId, targetLabel });
+/** Move tabs into another window — all of them or none. Rejects if the target
+ *  isn't a live, ordinary window or if any id is unknown, without having moved
+ *  anything. `payload` is opaque to the backend and comes back verbatim in the
+ *  target's `window:tabs_attached`. An empty `tabIds` is legal (an all-panel
+ *  move) and still validates the target. */
+export async function attachTabs<P>(
+  tabIds: number[],
+  targetLabel: string,
+  payload: P,
+): Promise<TabInfo[]> {
+  return await invoke<TabInfo[]>("attach_tabs", {
+    args: { tab_ids: tabIds, target_label: targetLabel, payload },
+  });
 }
 
 /** Creates (or pops a reserve for) a window positioned/sized for a tear-off
  *  drop, without attaching any tab to it — every cross-window move (whole
  *  tab, one pane, or a fresh "+"-button spawn) learns the target label from
- *  this, then attaches each backend id itself via `attachTab`. */
+ *  this, then moves its backend ids there itself via `attachTabs`. */
 export async function tearOffWindow(args: {
   screenX: number;
   screenY: number;
@@ -545,10 +560,10 @@ export async function windowDragTargets(exclude: string): Promise<DragTargetInfo
   return await invoke<DragTargetInfo[]>("window_drag_targets", { exclude });
 }
 
-export function onTabAttached(
-  handler: (payload: TabAttachedPayload) => void,
+export function onTabsAttached<P>(
+  handler: (payload: TabsAttachedPayload<P>) => void,
 ): Promise<UnlistenFn> {
-  return listenScoped<TabAttachedPayload>("window:tab_attached", handler);
+  return listenScoped<TabsAttachedPayload<P>>("window:tabs_attached", handler);
 }
 
 // ---------------- SSH connect (the only secret-touching Rust command) ----------------

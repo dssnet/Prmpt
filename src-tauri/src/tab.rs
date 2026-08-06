@@ -30,6 +30,7 @@ use parking_lot::Mutex;
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use tauri::{AppHandle, Emitter, EventTarget};
 
+use crate::ownership::{Ownership, WindowKind};
 use crate::{
     config::Theme,
     error::{AppError, AppResult},
@@ -140,7 +141,12 @@ pub enum TabCmd {
         end: (u16, u32),
         reply: Sender<String>,
     },
-    SetWindow(String),
+    /// This tab's owning window changed. Carries no label — the tab thread
+    /// reads its current owner out of the registry each frame
+    /// (`Ownership::emit_target`), so a cached copy here could only ever
+    /// disagree with it. All this does is force an immediate repaint so a
+    /// moved tab shows up in its new window without waiting for output.
+    OwnerChanged,
     /// The owning window's focus state changed. Backgrounded/occluded
     /// windows don't paint anything (WKWebView pauses rAF while hidden),
     /// but nothing stopped the tab loop from still emitting full-grid
@@ -307,22 +313,17 @@ pub struct TabHandle {
 }
 
 pub struct TabRegistry {
-    inner: Mutex<HashMap<u64, TabHandle>>,
-    windows: Mutex<HashMap<u64, String>>,
-    /// Labels of windows whose teardown has been committed to (see
-    /// `mark_window_closing`). Never pruned — window labels are handed out
-    /// from a monotonic counter and a destroyed one is never reused, so the
-    /// set stays bounded by the number of windows opened this session.
-    closing: Mutex<std::collections::HashSet<String>>,
+    /// One lock over the whole ownership picture — tabs, their owning
+    /// windows, and those windows' lifecycle state. See `ownership.rs` for
+    /// why these can't be separate maps.
+    state: Mutex<Ownership>,
     next_id: AtomicU64,
 }
 
 impl TabRegistry {
     pub fn new() -> Self {
         Self {
-            inner: Mutex::new(HashMap::new()),
-            windows: Mutex::new(HashMap::new()),
-            closing: Mutex::new(std::collections::HashSet::new()),
+            state: Mutex::new(Ownership::default()),
             next_id: AtomicU64::new(1),
         }
     }
@@ -357,23 +358,10 @@ impl TabRegistry {
     ) -> AppResult<()> {
         let (cmd_tx, cmd_rx) = unbounded::<TabCmd>();
         let osc_cwd = Arc::new(Mutex::new(None));
-        self.start_tab_thread(
-            id,
-            app,
-            owner_window.clone(),
-            cmd_rx,
-            pty_rx,
-            TabIo::Ssh {
-                out_tx: out_tx.clone(),
-            },
-            cols,
-            rows,
-            scrollback_lines,
-            config,
-            osc_cwd.clone(),
-        )?;
-        self.inner.lock().insert(
-            id,
+        // Register *before* the thread starts: the loop asks the registry
+        // where to send every frame, so a tab that isn't in it yet would
+        // silently drop its first frames. Rolled back if the spawn fails.
+        self.state.lock().insert_tab(
             TabHandle {
                 id,
                 cmd_tx,
@@ -383,10 +371,27 @@ impl TabRegistry {
                 disable_sftp,
                 disable_ssh,
                 shell_pid: None,
-                osc_cwd,
+                osc_cwd: osc_cwd.clone(),
             },
+            owner_window,
         );
-        self.windows.lock().insert(id, owner_window);
+        if let Err(e) = self.start_tab_thread(
+            id,
+            app,
+            cmd_rx,
+            pty_rx,
+            TabIo::Ssh {
+                out_tx: out_tx.clone(),
+            },
+            cols,
+            rows,
+            scrollback_lines,
+            config,
+            osc_cwd,
+        ) {
+            self.state.lock().remove_tab(id);
+            return Err(e);
+        }
         Ok(())
     }
 
@@ -510,10 +515,24 @@ impl TabRegistry {
             .map_err(|e| AppError::Other(format!("spawn reader thread: {e}")))?;
 
         let osc_cwd = Arc::new(Mutex::new(None));
-        self.start_tab_thread(
+        // Registered before the thread starts — see `start_ssh_tab` for why.
+        self.state.lock().insert_tab(
+            TabHandle {
+                id,
+                cmd_tx,
+                kind: TabKind::Local,
+                host_id: None,
+                host_label: None,
+                disable_sftp: false,
+                disable_ssh: false,
+                shell_pid,
+                osc_cwd: osc_cwd.clone(),
+            },
+            owner_window,
+        );
+        if let Err(e) = self.start_tab_thread(
             id,
             app,
-            owner_window.clone(),
             cmd_rx,
             pty_rx,
             TabIo::LocalPty {
@@ -525,23 +544,11 @@ impl TabRegistry {
             rows,
             scrollback_lines,
             config,
-            osc_cwd.clone(),
-        )?;
-        self.inner.lock().insert(
-            id,
-            TabHandle {
-                id,
-                cmd_tx,
-                kind: TabKind::Local,
-                host_id: None,
-                host_label: None,
-                disable_sftp: false,
-                disable_ssh: false,
-                shell_pid,
-                osc_cwd,
-            },
-        );
-        self.windows.lock().insert(id, owner_window);
+            osc_cwd,
+        ) {
+            self.state.lock().remove_tab(id);
+            return Err(e);
+        }
         Ok(id)
     }
 
@@ -550,7 +557,6 @@ impl TabRegistry {
         self: &Arc<Self>,
         id: u64,
         app: AppHandle,
-        owner_window: String,
         cmd_rx: Receiver<TabCmd>,
         pty_rx: Receiver<PtyEvent>,
         tab_io: TabIo,
@@ -562,8 +568,6 @@ impl TabRegistry {
     ) -> AppResult<()> {
         let app_for_tab = app.clone();
         let registry_for_tab: Arc<Self> = self.clone();
-        let owner_for_thread = owner_window;
-
         thread::Builder::new()
             .name(format!("tab-{id}-main"))
             .spawn(move || {
@@ -580,7 +584,6 @@ impl TabRegistry {
                     run_tab_loop(
                         id,
                         app_for_tab.clone(),
-                        owner_for_thread,
                         cmd_rx,
                         pty_rx,
                         tab_io,
@@ -625,8 +628,8 @@ impl TabRegistry {
     }
 
     pub fn write_input(&self, id: u64, bytes: Vec<u8>) -> AppResult<()> {
-        let guard = self.inner.lock();
-        let h = guard.get(&id).ok_or(AppError::UnknownTab(id))?;
+        let guard = self.state.lock();
+        let h = guard.handle(id).ok_or(AppError::UnknownTab(id))?;
         h.cmd_tx
             .send(TabCmd::Write(bytes))
             .map_err(|_| AppError::UnknownTab(id))?;
@@ -634,8 +637,8 @@ impl TabRegistry {
     }
 
     pub fn write_key(&self, id: u64, event: KeyEventWire) -> AppResult<()> {
-        let guard = self.inner.lock();
-        let h = guard.get(&id).ok_or(AppError::UnknownTab(id))?;
+        let guard = self.state.lock();
+        let h = guard.handle(id).ok_or(AppError::UnknownTab(id))?;
         h.cmd_tx
             .send(TabCmd::Key(event))
             .map_err(|_| AppError::UnknownTab(id))?;
@@ -643,8 +646,8 @@ impl TabRegistry {
     }
 
     pub fn write_paste(&self, id: u64, bytes: Vec<u8>) -> AppResult<()> {
-        let guard = self.inner.lock();
-        let h = guard.get(&id).ok_or(AppError::UnknownTab(id))?;
+        let guard = self.state.lock();
+        let h = guard.handle(id).ok_or(AppError::UnknownTab(id))?;
         h.cmd_tx
             .send(TabCmd::Paste(bytes))
             .map_err(|_| AppError::UnknownTab(id))?;
@@ -659,8 +662,8 @@ impl TabRegistry {
         cell_width_px: u32,
         cell_height_px: u32,
     ) -> AppResult<()> {
-        let guard = self.inner.lock();
-        let h = guard.get(&id).ok_or(AppError::UnknownTab(id))?;
+        let guard = self.state.lock();
+        let h = guard.handle(id).ok_or(AppError::UnknownTab(id))?;
         h.cmd_tx
             .send(TabCmd::Resize {
                 cols,
@@ -673,8 +676,8 @@ impl TabRegistry {
     }
 
     pub fn scroll(&self, id: u64, kind: ScrollKind) -> AppResult<()> {
-        let guard = self.inner.lock();
-        let h = guard.get(&id).ok_or(AppError::UnknownTab(id))?;
+        let guard = self.state.lock();
+        let h = guard.handle(id).ok_or(AppError::UnknownTab(id))?;
         h.cmd_tx
             .send(TabCmd::Scroll(kind))
             .map_err(|_| AppError::UnknownTab(id))?;
@@ -682,8 +685,8 @@ impl TabRegistry {
     }
 
     pub fn wheel_scroll(&self, id: u64, rows: i32, col: u16, row: u16) -> AppResult<()> {
-        let guard = self.inner.lock();
-        let h = guard.get(&id).ok_or(AppError::UnknownTab(id))?;
+        let guard = self.state.lock();
+        let h = guard.handle(id).ok_or(AppError::UnknownTab(id))?;
         h.cmd_tx
             .send(TabCmd::Wheel { rows, col, row })
             .map_err(|_| AppError::UnknownTab(id))?;
@@ -691,8 +694,8 @@ impl TabRegistry {
     }
 
     pub fn write_mouse(&self, id: u64, ev: MouseEventWire) -> AppResult<()> {
-        let guard = self.inner.lock();
-        let h = guard.get(&id).ok_or(AppError::UnknownTab(id))?;
+        let guard = self.state.lock();
+        let h = guard.handle(id).ok_or(AppError::UnknownTab(id))?;
         h.cmd_tx
             .send(TabCmd::Mouse(ev))
             .map_err(|_| AppError::UnknownTab(id))?;
@@ -702,8 +705,8 @@ impl TabRegistry {
     /// Webview ack for a rendered frame (see `TabCmd::RenderAck`). Infallible
     /// by design: an ack racing a tab close is expected traffic, not an error.
     pub fn ack_render(&self, id: u64, generation: u64) {
-        let guard = self.inner.lock();
-        if let Some(h) = guard.get(&id) {
+        let guard = self.state.lock();
+        if let Some(h) = guard.handle(id) {
             let _ = h.cmd_tx.send(TabCmd::RenderAck(generation));
         }
     }
@@ -714,8 +717,8 @@ impl TabRegistry {
     pub fn copy_text(&self, id: u64, start: (u16, u32), end: (u16, u32)) -> AppResult<String> {
         let (reply_tx, reply_rx) = bounded::<String>(1);
         {
-            let guard = self.inner.lock();
-            let h = guard.get(&id).ok_or(AppError::UnknownTab(id))?;
+            let guard = self.state.lock();
+            let h = guard.handle(id).ok_or(AppError::UnknownTab(id))?;
             h.cmd_tx
                 .send(TabCmd::CopyText {
                     start,
@@ -735,8 +738,8 @@ impl TabRegistry {
     pub fn foreground_process(&self, id: u64) -> Option<ForegroundProcess> {
         let (reply_tx, reply_rx) = bounded::<Option<ForegroundProcess>>(1);
         {
-            let guard = self.inner.lock();
-            let h = guard.get(&id)?;
+            let guard = self.state.lock();
+            let h = guard.handle(id)?;
             h.cmd_tx
                 .send(TabCmd::QueryForeground { reply: reply_tx })
                 .ok()?;
@@ -750,8 +753,8 @@ impl TabRegistry {
     /// the shell pid. `None` for SSH tabs and when neither source knows.
     pub fn local_cwd(&self, id: u64) -> Option<String> {
         let (osc_cwd, shell_pid) = {
-            let guard = self.inner.lock();
-            let h = guard.get(&id)?;
+            let guard = self.state.lock();
+            let h = guard.handle(id)?;
             if h.kind != TabKind::Local {
                 return None;
             }
@@ -764,72 +767,72 @@ impl TabRegistry {
     }
 
     pub fn close(&self, id: u64) -> AppResult<()> {
-        let mut guard = self.inner.lock();
-        if let Some(h) = guard.remove(&id) {
-            let _ = h.cmd_tx.send(TabCmd::Shutdown);
+        if let Some(rec) = self.state.lock().remove_tab(id) {
+            let _ = rec.handle.cmd_tx.send(TabCmd::Shutdown);
         }
-        self.windows.lock().remove(&id);
         Ok(())
     }
 
     pub fn list(&self) -> Vec<TabInfo> {
-        self.inner
-            .lock()
-            .values()
-            .map(handle_to_info)
-            .collect()
-    }
-
-    pub fn info(&self, id: u64) -> Option<TabInfo> {
-        self.inner.lock().get(&id).map(handle_to_info)
+        self.state.lock().all_infos()
     }
 
     pub fn forget(&self, id: u64) {
-        self.inner.lock().remove(&id);
-        self.windows.lock().remove(&id);
+        self.state.lock().remove_tab(id);
     }
 
-    pub fn set_window(&self, id: u64, label: String) -> AppResult<()> {
-        // Update the map first (source of truth for command routing), then
-        // notify the tab thread so its cached label is in sync for the
-        // next render emit.
-        let guard = self.inner.lock();
-        let h = guard.get(&id).ok_or(AppError::UnknownTab(id))?;
-        h.cmd_tx
-            .send(TabCmd::SetWindow(label.clone()))
-            .map_err(|_| AppError::UnknownTab(id))?;
-        drop(guard);
-        self.windows.lock().insert(id, label);
-        Ok(())
+    /// Move tabs into `target`, all or nothing. See
+    /// [`Ownership::attach_all`]; `f` runs after the transfer has been
+    /// applied and, if it fails, the transfer is rolled back exactly.
+    pub fn attach_all<T>(
+        &self,
+        ids: &[u64],
+        target: &str,
+        f: impl FnOnce(&[TabInfo]) -> AppResult<T>,
+    ) -> AppResult<(Vec<TabInfo>, T)> {
+        // The lock is released before `f` runs: it emits, and an emit must
+        // never happen under the ownership lock.
+        let txn = self.state.lock().attach_all(ids, target)?;
+        match f(&txn.infos) {
+            Ok(v) => Ok((txn.infos, v)),
+            Err(e) => {
+                self.state.lock().rollback_attach(&txn);
+                Err(e)
+            }
+        }
+    }
+
+    /// Where this tab's frames should go, or `None` when it has no owner or
+    /// its owner can no longer take them (closing / destroyed).
+    pub fn emit_target(&self, id: u64) -> Option<String> {
+        self.state.lock().emit_target(id)
     }
 
     pub fn window_of(&self, id: u64) -> Option<String> {
-        self.windows.lock().get(&id).cloned()
+        self.state.lock().owner_of(id).map(str::to_string)
     }
 
-    /// `TabInfo` for every tab this window owns, ordered by id. Tab ids come
-    /// from a monotonic counter, so that is spawn order — which is what makes
-    /// a window's hydration deterministic.
+    /// `TabInfo` for every tab this window owns, in spawn order.
     pub fn tabs_for_window_info(&self, label: &str) -> Vec<TabInfo> {
-        let mut ids = self.tabs_in_window(label);
-        ids.sort_unstable();
-        ids.into_iter().filter_map(|id| self.info(id)).collect()
-    }
-
-    pub fn tabs_in_window(&self, label: &str) -> Vec<u64> {
-        self.windows
-            .lock()
-            .iter()
-            .filter(|(_, l)| l.as_str() == label)
-            .map(|(id, _)| *id)
+        let guard = self.state.lock();
+        guard
+            .tabs_for_window(label)
+            .into_iter()
+            .filter_map(|id| guard.info(id))
             .collect()
     }
 
+    /// Register a webview window. Called by `configure_new_window` for every
+    /// window we build, which is what makes "unknown label ⇒ not a legal
+    /// target" a safe default rather than a guess.
+    pub fn register_window(&self, label: &str, kind: WindowKind) {
+        self.state.lock().register_window(label, kind);
+    }
+
     /// Mark `label` as being torn down: from here on its tabs stop emitting
-    /// render frames (see `is_window_closing`). Called the moment a close is
-    /// *committed to* — after the confirm guard has passed, right before the
-    /// webview is destroyed — never on a mere `CloseRequested`, which the
-    /// user can still cancel.
+    /// render frames. Called the moment a close is *committed to* — after the
+    /// confirm guard has passed, right before the webview is destroyed —
+    /// never on a mere `CloseRequested`, which the user can still cancel.
     ///
     /// Why: destroying a window drops its NSWindow while the WKWebView and
     /// its WebContent process are still live and painting, and Tauri keeps
@@ -839,22 +842,48 @@ impl TabRegistry {
     /// `RemoteLayerTreeDrawingAreaProxy::commitLayerTree`. Quiescing first
     /// lets the webview go idle before it's destroyed.
     pub fn mark_window_closing(&self, label: &str) {
-        self.closing.lock().insert(label.to_string());
+        self.state.lock().mark_window_closing(label);
     }
 
-    /// Whether `label` is closing and its tabs should stop emitting.
-    pub fn is_window_closing(&self, label: &str) -> bool {
-        self.closing.lock().contains(label)
+    /// The window is gone; returns the tabs it still owned so the caller can
+    /// reap them. Flip and snapshot happen under one lock, so an attach can't
+    /// land in between and strand a tab on a dead window.
+    pub fn mark_window_gone(&self, label: &str) -> Vec<u64> {
+        self.state.lock().mark_window_gone(label)
+    }
+
+    /// May a tab be moved into this window? The one predicate — a window that
+    /// is live, normal, and known.
+    pub fn is_attachable(&self, label: &str) -> bool {
+        self.state.lock().is_attachable(label)
+    }
+
+    /// Reserve-pool transitions. The window table *is* the pool's slot, so
+    /// "is one already claimed" and "claim it" are a single atomic step.
+    pub fn claim_reserve(&self, label: &str) -> bool {
+        self.state.lock().claim_reserve(label)
+    }
+
+    pub fn mark_reserve_ready(&self, label: &str) -> bool {
+        self.state.lock().mark_reserve_ready(label)
+    }
+
+    pub fn take_ready_reserve(&self) -> Option<(String, Vec<u64>)> {
+        self.state.lock().take_ready_reserve()
+    }
+
+    pub fn is_reserve(&self, label: &str) -> bool {
+        self.state.lock().is_reserve(label)
     }
 
     /// Notify every tab currently owned by `label` of the window's new
     /// focus state (see `TabCmd::SetFocused`). Best-effort — a tab whose
     /// thread already exited just drops the send.
     pub fn set_focused(&self, label: &str, focused: bool) {
-        let ids = self.tabs_in_window(label);
-        let guard = self.inner.lock();
-        for id in ids {
-            if let Some(h) = guard.get(&id) {
+        let mut guard = self.state.lock();
+        guard.set_focused(label, focused);
+        for id in guard.tabs_for_window(label) {
+            if let Some(h) = guard.handle(id) {
                 let _ = h.cmd_tx.send(TabCmd::SetFocused(focused));
             }
         }
@@ -954,7 +983,6 @@ impl Drop for ChildReaper {
 fn run_tab_loop(
     tab_id: u64,
     app: AppHandle,
-    mut owner_window: String,
     cmd_rx: Receiver<TabCmd>,
     pty_rx: Receiver<PtyEvent>,
     tab_io: TabIo,
@@ -1045,9 +1073,8 @@ fn run_tab_loop(
         })?;
     }
     // BEL detection for `terminal:notification`. The callback runs
-    // synchronously inside `vt_write`, where it must not block and where
-    // `owner_window` may be stale (it mutates via TabCmd::SetWindow) — so
-    // it only flips a flag that the loop drains after `vt_write` returns.
+    // synchronously inside `vt_write`, where it must not block — so it only
+    // flips a flag that the loop drains after `vt_write` returns.
     let bell_pending = Rc::new(Cell::new(false));
     {
         let pending = bell_pending.clone();
@@ -1209,8 +1236,10 @@ fn run_tab_loop(
                     let _ = terminal.resize(cols, rows, cell_width_px, cell_height_px);
                     pending_emit = true;
                 }
-                Ok(TabCmd::SetWindow(label)) => {
-                    owner_window = label;
+                Ok(TabCmd::OwnerChanged) => {
+                    // Repaint at once so a moved tab shows up in its new
+                    // window without waiting for the child to produce output.
+                    // The label itself is read from the registry below.
                     pending_emit = true;
                 }
                 Ok(TabCmd::SetFocused(f)) => {
@@ -1444,11 +1473,15 @@ fn run_tab_loop(
                                 body: None,
                             },
                         };
-                        let _ = app.emit_to(
-                            EventTarget::webview_window(owner_window.as_str()),
-                            "terminal:notification",
-                            payload,
-                        );
+                        if let Some(owner) = tauri::Manager::state::<SharedRegistry>(&app)
+                            .emit_target(tab_id)
+                        {
+                            let _ = app.emit_to(
+                                EventTarget::webview_window(owner.as_str()),
+                                "terminal:notification",
+                                payload,
+                            );
+                        }
                     }
                 }
                 Ok(PtyEvent::Eof) | Err(_) => {
@@ -1502,12 +1535,24 @@ fn run_tab_loop(
         // snapshots, so the held-back intermediates are never missed.
         let inflight_ok = generation.saturating_sub(last_acked_gen) < MAX_INFLIGHT_FRAMES
             || last_emit.elapsed() >= ACK_STALL_FALLBACK;
-        // Never push a frame into a webview that is being torn down (window
-        // close or app quit) — see `TabRegistry::mark_window_closing`. The
-        // tab is about to be closed anyway, so dropping these is free.
-        let alive = !crate::SHUTTING_DOWN.load(std::sync::atomic::Ordering::Relaxed)
-            && !tauri::Manager::state::<SharedRegistry>(&app).is_window_closing(&owner_window);
-        if pending_emit && alive && inflight_ok && last_emit.elapsed() >= debounce {
+        // Where the frame goes — and whether it goes at all. One registry
+        // query answers both, from one lock acquisition, so the gate and the
+        // target can't disagree (they used to: the gate checked a label the
+        // tab thread had cached, updated asynchronously by a channel message).
+        // `None` means no owner, or an owner that is closing or gone: pushing
+        // frames at a window being torn down is what kept WebKit committing
+        // layer trees for a dying page. `pending_emit` stays set, so the tab
+        // repaints as soon as it lands somewhere live again.
+        let target = if crate::SHUTTING_DOWN.load(std::sync::atomic::Ordering::Relaxed) {
+            None
+        } else {
+            tauri::Manager::state::<SharedRegistry>(&app).emit_target(tab_id)
+        };
+        if let (true, true, Some(owner_window)) = (
+            pending_emit && inflight_ok,
+            last_emit.elapsed() >= debounce,
+            target,
+        ) {
             generation += 1;
             let theme = config.lock().theme.clone();
             match emit_render(
@@ -2048,7 +2093,7 @@ fn hyperlink_uri_at(
 
 pub type SharedRegistry = Arc<TabRegistry>;
 
-fn handle_to_info(h: &TabHandle) -> TabInfo {
+pub(crate) fn handle_to_info(h: &TabHandle) -> TabInfo {
     TabInfo {
         id: h.id,
         title: h.host_label.clone().unwrap_or_default(),

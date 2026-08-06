@@ -721,11 +721,6 @@ export function hydrateTabs(infos: TabHydrateInfo[]): void {
   }
 }
 
-export function attachTab(info: TabHydrateInfo): void {
-  const t = hydrateOne(info);
-  if (t) activeId.value = t.id;
-}
-
 /** The `TabOrigin` a hydrated backend tab gets, from its attach/boot info
  *  alone — the origin-construction half of `hydrateOne`, split out so a
  *  whole-workspace cross-window move (`state/drag.ts`) can build each leaf's

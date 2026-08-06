@@ -4,6 +4,10 @@ use serde::{Serialize, Serializer};
 pub enum AppError {
     #[error("tab {0} not found")]
     UnknownTab(u64),
+    /// The window named is closing, gone, or a hidden reserve — see
+    /// `ownership::Ownership::is_attachable`.
+    #[error("window {0} is not available")]
+    WindowUnavailable(String),
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
     #[error("pty error: {0}")]
