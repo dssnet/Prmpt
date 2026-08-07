@@ -39,6 +39,7 @@ import {
 } from "./workspace";
 import { allocPanelLeafId, panelTitle } from "./panels";
 import { getSavedWorkspace, type SavedNode } from "./savedWorkspaces";
+import type { PaneId } from "./ids";
 import { showToast } from "./toasts";
 
 export async function resolveAuth(host: SshHostRow): Promise<SshAuthConfig> {
@@ -185,7 +186,7 @@ interface RestoreMetrics {
 async function buildLiveNode(
   node: SavedNode,
   metrics: RestoreMetrics,
-  spawned: number[],
+  spawned: PaneId[],
 ): Promise<WorkspaceNode> {
   if (node.kind === "split") {
     const a = await buildLiveNode(node.a, metrics, spawned);
@@ -256,7 +257,7 @@ export async function loadSavedWorkspace(id: number): Promise<void> {
     cellWidthPx: Math.round(cellWidthPx * dpr),
     cellHeightPx: Math.round(cellHeightPx * dpr),
   };
-  const spawned: number[] = [];
+  const spawned: PaneId[] = [];
   let root: WorkspaceNode;
   try {
     root = await buildLiveNode(saved.root, metrics, spawned);

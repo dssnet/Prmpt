@@ -13,6 +13,7 @@ import { ref } from "vue";
 import { onSftpTransferProgress } from "../ipc";
 import { isAway, notify } from "./notifications";
 import { consumerLabel } from "./sftpConsumers";
+import type { PaneId } from "./ids";
 
 export interface Transfer {
   id: number;
@@ -24,7 +25,7 @@ export interface Transfer {
   /** Tab the operation belongs to (connection tab for `sftp:` keys, the
    *  hosting tab for local columns) — rings that tab's bell when it finishes
    *  in the background. */
-  tabId: number;
+  tabId: PaneId;
   name: string;
   dir: "up" | "down" | "del";
   /** Bytes for up/down; removed-entry count for del. */
@@ -62,7 +63,7 @@ function hostForKey(key: string): string {
 /** Add a row and return its transfer id (pass it to the backend command). */
 export function trackTransfer(
   key: string,
-  tabId: number,
+  tabId: PaneId,
   name: string,
   dir: Transfer["dir"],
   total: number | null = null,

@@ -2,6 +2,8 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type EventTarget as TauriEventTarget, type UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 
+import type { PaneId } from "./state/ids";
+
 // In Tauri 2, the bare `listen(event, handler)` registers a listener with
 // target=`Any`, which matches every emit regardless of its `emit_to` target.
 // That means a hidden reserve window would receive `window:tab_attached`
@@ -46,7 +48,7 @@ export interface LinkSpanWire {
 }
 
 export interface RenderPayload {
-  tab_id: number;
+  tab_id: PaneId;
   cols: number;
   rows: number;
   default_fg: number;
@@ -77,7 +79,10 @@ export interface RenderPayload {
 }
 
 export interface ExitPayload {
-  tab_id: number;
+  /** Normally a backend pane id. A pooled SSH connection registered under a
+   *  frontend slot id reports its exit under *that* id instead — the one
+   *  place the two domains meet on the wire; `handleExit` narrows it. */
+  tab_id: PaneId;
   status: number;
 }
 
@@ -121,7 +126,7 @@ export interface MouseEventWire {
  *  9 / OSC 777 desktop notification (how Claude Code announces a finished
  *  task). Throttled to one per second per tab on the backend. */
 export interface NotifyPayload {
-  tab_id: number;
+  tab_id: PaneId;
   source: "bell" | "osc";
   title: string | null;
   body: string | null;
@@ -187,8 +192,8 @@ export async function spawnTab(args: {
   cellHeightPx: number;
   /** Optional initial working directory (saved-workspace restore). */
   cwd?: string;
-}): Promise<number> {
-  return await invoke<number>("spawn_tab", {
+}): Promise<PaneId> {
+  return await invoke<PaneId>("spawn_tab", {
     args: {
       cols: args.cols,
       rows: args.rows,
@@ -199,11 +204,11 @@ export async function spawnTab(args: {
   });
 }
 
-export async function closeTab(tabId: number): Promise<void> {
+export async function closeTab(tabId: PaneId): Promise<void> {
   await invoke("close_tab", { tabId });
 }
 
-export async function forgetTab(tabId: number): Promise<void> {
+export async function forgetTab(tabId: PaneId): Promise<void> {
   await invoke("forget_tab", { tabId });
 }
 
@@ -223,19 +228,19 @@ export async function tabForegroundProcess(
   });
 }
 
-export async function writeInput(tabId: number, bytes: Uint8Array): Promise<void> {
+export async function writeInput(tabId: PaneId, bytes: Uint8Array): Promise<void> {
   await invoke("write_input", { tabId, bytes: Array.from(bytes) });
 }
 
 /** Forward a keyboard event for backend-side encoding (legacy sequences,
  *  DECCKM, kitty keyboard protocol — whatever the terminal's modes say). */
-export async function writeKey(tabId: number, event: KeyEventWire): Promise<void> {
+export async function writeKey(tabId: PaneId, event: KeyEventWire): Promise<void> {
   await invoke("write_key", { tabId, event });
 }
 
 /** Paste text; the backend wraps it in bracketed-paste markers when the
  *  application enabled DEC mode 2004. */
-export async function writePaste(tabId: number, text: string): Promise<void> {
+export async function writePaste(tabId: PaneId, text: string): Promise<void> {
   await invoke("write_paste", { tabId, bytes: Array.from(new TextEncoder().encode(text)) });
 }
 
@@ -264,7 +269,7 @@ export type ScrollKind =
   | { kind: "page_down" }
   | { kind: "delta"; delta: number };
 
-export async function scrollTab(tabId: number, kind: ScrollKind): Promise<void> {
+export async function scrollTab(tabId: PaneId, kind: ScrollKind): Promise<void> {
   await invoke("scroll_tab", { tabId, kind });
 }
 
@@ -285,7 +290,7 @@ export async function wheelScroll(
  *  backend encodes it against the app's live mouse mode; a no-op when the app
  *  isn't reporting that event. Only called when an app has mouse tracking on
  *  and Shift isn't held. */
-export async function writeMouse(tabId: number, ev: MouseEventWire): Promise<void> {
+export async function writeMouse(tabId: PaneId, ev: MouseEventWire): Promise<void> {
   await invoke("write_mouse", { tabId, ev });
 }
 
@@ -377,7 +382,7 @@ export function onRender(handler: (payload: RenderPayload) => void): Promise<Unl
 /// Tell the tab loop this frame has been applied. Backpressure: the backend
 /// keeps at most 2 unacked frames in flight per tab, which hard-bounds the
 /// webview-side IPC backlog a PTY flood can build. Fire-and-forget.
-export function ackRender(tabId: number, generation: number): void {
+export function ackRender(tabId: PaneId, generation: number): void {
   invoke("ack_render", { tabId, generation }).catch(() => {
     // Ack for a just-closed tab or during teardown — the backend treats a
     // missing ack as "webview is slow" and falls back to a 1s cadence, so
@@ -396,7 +401,7 @@ export function onTerminalNotification(
 }
 
 export interface TabInfo {
-  id: number;
+  id: PaneId;
   title: string;
   kind: "terminal" | "ssh";
   host_id: number | null;
@@ -608,8 +613,8 @@ export interface SshConnectArgs {
   cellHeightPx: number;
 }
 
-export async function connectSshHost(args: SshConnectArgs): Promise<number> {
-  return await invoke<number>("connect_ssh_host", {
+export async function connectSshHost(args: SshConnectArgs): Promise<PaneId> {
+  return await invoke<PaneId>("connect_ssh_host", {
     args: {
       config: args.config,
       cols: args.cols,
@@ -972,7 +977,7 @@ export interface GitCommit {
 /** Working directory of a local tab's shell process, queried from the OS
  *  (follows `cd`, no shell integration needed). Null for SSH tabs, dead
  *  shells, and Windows (no public cwd API) — fall back to the file browser. */
-export async function terminalCwd(tabId: number): Promise<string | null> {
+export async function terminalCwd(tabId: PaneId): Promise<string | null> {
   return await invoke<string | null>("terminal_cwd", { tabId });
 }
 

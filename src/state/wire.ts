@@ -18,6 +18,7 @@
  * origin arrives as a callback rather than as an import of `tabs.ts`.
  */
 
+import type { PaneId } from "./ids";
 import { allocPanelLeafId, type PanelDesc } from "./panels";
 import {
   isPanelLeaf,
@@ -31,7 +32,7 @@ import {
 /** Split dirs/ratios are explicit here (not re-derived from cursor geometry
  *  on arrival), so a multi-pane tree lands laid out the way it left. */
 export type WireNode =
-  | { kind: "term"; tabId: number; focused: boolean }
+  | { kind: "term"; tabId: PaneId; focused: boolean }
   | { kind: "panel"; desc: PanelDesc; title: string; focused: boolean }
   | { kind: "split"; dir: SplitDir; ratio: number; a: WireNode; b: WireNode };
 
@@ -53,11 +54,11 @@ export interface CrossTreeDropPayload {
   x: number | null;
   y: number | null;
   tree: WireNode;
-  termIds: number[];
+  termIds: PaneId[];
   whole?: WholeTabMeta;
 }
 
-export function toWireNode(node: WorkspaceNode, focusedTabId: number): WireNode {
+export function toWireNode(node: WorkspaceNode, focusedTabId: PaneId): WireNode {
   if (node.kind === "split") {
     return {
       kind: "split",
@@ -80,7 +81,7 @@ export function toWireNode(node: WorkspaceNode, focusedTabId: number): WireNode 
 
 /** Backend ids named by the tree, left to right — the set the receiver must
  *  see attached before it can assemble the tree. */
-export function wireTermIds(node: WireNode, out: number[] = []): number[] {
+export function wireTermIds(node: WireNode, out: PaneId[] = []): PaneId[] {
   if (node.kind === "split") {
     wireTermIds(node.a, out);
     wireTermIds(node.b, out);
@@ -97,8 +98,8 @@ export function wireTermIds(node: WireNode, out: number[] = []): number[] {
  *  sentinel the caller recognizes, since a tree need not mark one. */
 export function buildWorkspaceFromWire(
   node: WireNode,
-  resolveTerm: (tabId: number) => TabOrigin,
-  focusRef: { id: number },
+  resolveTerm: (tabId: PaneId) => TabOrigin,
+  focusRef: { id: PaneId },
 ): WorkspaceNode {
   if (node.kind === "split") {
     return makeSplit(

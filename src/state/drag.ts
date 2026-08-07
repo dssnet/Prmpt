@@ -37,6 +37,7 @@ import {
   useTabs,
   type TabHydrateInfo,
 } from "./tabs";
+import type { PaneId, SlotId } from "./ids";
 import { panelTitle, type PanelDesc, type PanelKind } from "./panels";
 import { showToast } from "./toasts";
 import {
@@ -147,7 +148,7 @@ export const barInsertPoint = ref<{ x: number; y: number } | null>(null);
  *  the tab-bar insertion point, and cross-window hover forwarding. */
 export function dragAffordances(
   e: MouseEvent,
-  opts: { label: string; draggedId?: number; barInsert?: boolean },
+  opts: { label: string; draggedId?: PaneId | SlotId; barInsert?: boolean },
 ): void {
   dragGhost.value = { x: e.clientX, y: e.clientY, label: opts.label };
   updateWorkspaceDragPreview(e.clientX, e.clientY, opts.draggedId);
@@ -167,7 +168,7 @@ export function clearDragAffordances(): void {
  *  outside the tab bar, otherwise the slot the drop would insert before
  *  (null beforeId = append). Registered by the mounted TabBar — module code
  *  can't reach its DOM. */
-type BarDropResolver = (x: number, y: number) => { beforeId: number | null } | null;
+type BarDropResolver = (x: number, y: number) => { beforeId: SlotId | null } | null;
 let barResolver: BarDropResolver | null = null;
 
 export function registerBarDropResolver(fn: BarDropResolver): void {
@@ -183,7 +184,7 @@ export function unregisterBarDropResolver(fn: BarDropResolver): void {
 export function resolveBarDrop(
   x: number,
   y: number,
-): { beforeId: number | null } | null {
+): { beforeId: SlotId | null } | null {
   return barResolver?.(x, y) ?? null;
 }
 
@@ -338,8 +339,8 @@ export function shouldLeaveWindow(
  *  throwing — losing a pane's title is recoverable, losing the whole tree
  *  mid-assembly is not. */
 function originResolver(
-  attached: Map<number, TabHydrateInfo>,
-): (tabId: number) => TabOrigin {
+  attached: Map<PaneId, TabHydrateInfo>,
+): (tabId: PaneId) => TabOrigin {
   return (tabId) => {
     const info = attached.get(tabId);
     return info
@@ -362,18 +363,18 @@ function originResolver(
 // A tree with no terminal leaf at all (an all-panel multi-pane workspace)
 // can still be *shipped* to an existing window here (nothing about that
 // needs a backend id), but can't safely tear off into a genuinely new one —
-// `attach_tab` registers a moved terminal's backend id in the Rust tab
-// registry, which is what lets a cold-starting window recover a lost
-// `xdrag:drop_tree` emit via its own boot-time query; a pure panel payload
-// has no such id and thus no safety net. `TabBar.vue`'s `tabIsAllPanel`
-// guard keeps that shape from reaching `moveOut` via tear-off at all.
+// a moved terminal's backend id is registered in the Rust tab registry,
+// which is what lets a cold-starting window recover from a lost event via
+// its own boot-time query; a pure panel payload has no such id and thus no
+// safety net. `TabBar.vue`'s `tabIsAllPanel` guard keeps that shape from
+// reaching `moveOut` via tear-off at all.
 
 interface MoveSource {
   tree: WireNode;
   /** Backend ids of every terminal leaf in `tree` — 0 (pure panel tree), 1,
-   *  or N. Order doesn't matter; the target buffers by id, not arrival
-   *  order. */
-  termIds: number[];
+   *  or N. Order doesn't matter: they move in one transaction and arrive in
+   *  one message. */
+  termIds: PaneId[];
   /** Present only when the whole source tab is moving — the target then
    *  wraps the assembled tree in a new tab carrying these fields. Absent
    *  for a lone leaf peeled off a still-live workspace: the target instead
@@ -390,7 +391,7 @@ interface MoveSource {
 /** Tab pill drag, or a titlebar drag of a workspace's sole pane (same tab,
  *  different handle). Null if the tab/workspace vanished from under the
  *  drag (defensive — always run `endCrossDrag()` if this returns null). */
-function buildTabMoveSource(slotId: number): MoveSource | null {
+function buildTabMoveSource(slotId: SlotId): MoveSource | null {
   const ws = getWorkspace(slotId);
   const tab = useTabs().tabs.value.find((t) => t.id === slotId);
   if (!ws || !tab) return null;
@@ -409,7 +410,7 @@ function buildTabMoveSource(slotId: number): MoveSource | null {
 }
 
 /** One pane of a multi-pane workspace, dragged out by its own titlebar. */
-function buildLeafMoveSource(slotId: number, tabId: number): MoveSource | null {
+function buildLeafMoveSource(slotId: SlotId, tabId: PaneId): MoveSource | null {
   const ws = getWorkspace(slotId);
   const leaf = ws ? findLeafByTabId(ws.root, tabId) : null;
   if (!leaf) return null;
@@ -527,7 +528,7 @@ export async function moveOut(
  *  spawn-outs (after the backend is spawned), and a workspace's sole pane
  *  dragged by its titlebar (same tab, different handle). */
 export async function moveTabOut(
-  slotId: number,
+  slotId: SlotId,
   screenX: number,
   screenY: number,
 ): Promise<void> {
@@ -542,8 +543,8 @@ export async function moveTabOut(
 /** One pane of a multi-pane workspace leaves this window, dragged by its
  *  own titlebar. */
 export function moveLeafOut(
-  slotId: number,
-  tabId: number,
+  slotId: SlotId,
+  tabId: PaneId,
   screenX: number,
   screenY: number,
 ): void {
@@ -568,11 +569,11 @@ export function moveNewPanelOut(
 // ---- Placement resolution (shared by local and cross-window drops) --------
 
 type DropPlacement =
-  | { kind: "bar"; beforeId: number | null }
+  | { kind: "bar"; beforeId: SlotId | null }
   | {
       kind: "pane";
-      slotId: number;
-      targetPaneTabId: number;
+      slotId: SlotId;
+      targetPaneTabId: PaneId;
       dir: SplitDir;
       placeDraggedFirst: boolean;
     };
@@ -585,7 +586,7 @@ type DropPlacement =
 function resolvePlacement(
   x: number,
   y: number,
-  draggedId?: number,
+  draggedId?: PaneId | SlotId,
 ): DropPlacement | null {
   const bar = barResolver?.(x, y);
   if (bar) return { kind: "bar", beforeId: bar.beforeId };
@@ -605,7 +606,7 @@ function resolvePlacement(
  *  reorder it in the bar, or graft its whole tree (one leaf or many, same
  *  either way) into the target pane, consuming it. No-op for a null
  *  placement (plain-append — the tab is already right where it landed). */
-function applyTabPlacement(slotId: number, placement: DropPlacement | null): void {
+function applyTabPlacement(slotId: SlotId, placement: DropPlacement | null): void {
   if (!placement) return;
   if (placement.kind === "bar") {
     moveTab(slotId, placement.beforeId);
@@ -624,7 +625,7 @@ function applyTabPlacement(slotId: number, placement: DropPlacement | null): voi
  *  a split into the pane under it. Returns true if it landed in a
  *  workspace (caller should then skip tear-off). */
 export function commitLocalTabDrop(
-  draggedId: number,
+  draggedId: SlotId,
   clientX: number,
   clientY: number,
 ): boolean {
@@ -694,7 +695,7 @@ function onTabsAttached(p: TabsAttachedPayload<CrossTreeDropPayload>): void {
   const placement =
     wire.x != null && wire.y != null ? resolvePlacement(wire.x, wire.y) : null;
 
-  const focusRef = { id: -1 };
+  const focusRef = { id: -1 as PaneId };
   const root = buildWorkspaceFromWire(wire.tree, originResolver(attached), focusRef);
   const soleTermInfo =
     wire.termIds.length === 1 ? attached.get(wire.termIds[0]) : undefined;

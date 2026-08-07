@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import type { SlotId } from "../state/ids";
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import {
   Asterisk,
@@ -148,7 +149,7 @@ function onMiddleClose(t: TabState): void {
 // carry/reorder physics below are tab-bar specific.
 
 interface DragState {
-  tabId: number;
+  tabId: SlotId;
   label: string;
   startScreenX: number;
   startScreenY: number;
@@ -177,15 +178,17 @@ let pinnedEl: HTMLElement | null = null;
 // Live ordered list of currently-rendered visible tab elements, skipping any
 // mid leave-transition so a closing tab doesn't poison hit testing. DOM order
 // matches visibleTabs order.
-function visibleTabEls(): { id: number; el: HTMLElement }[] {
+function visibleTabEls(): { id: SlotId; el: HTMLElement }[] {
   const root = stripEl.value?.$el ?? null;
   if (!root) return [];
-  const out: { id: number; el: HTMLElement }[] = [];
+  const out: { id: SlotId; el: HTMLElement }[] = [];
   for (const el of Array.from(
     root.querySelectorAll<HTMLElement>("[data-tab-id]"),
   )) {
     if (el.classList.contains("tab-leave-active")) continue;
-    const id = Number(el.dataset.tabId);
+    // The DOM is a boundary: `data-tab-id` came from a `TabState.id`, so
+    // reading it back mints a slot id.
+    const id = Number(el.dataset.tabId) as SlotId;
     if (Number.isFinite(id)) out.push({ id, el });
   }
   return out;
@@ -208,7 +211,7 @@ function pointInTabBar(cx: number, cy: number): boolean {
 
 // Once-per-slot guard: only call moveTab when the target slot actually
 // changes, so the .tab-move animation doesn't thrash on every mousemove.
-let lastReorderBeforeId: number | null | undefined = undefined;
+let lastReorderBeforeId: SlotId | null | undefined = undefined;
 
 // The carried tab's left edge, clamped to the strip. The strip no longer
 // clips (the enter/move overshoot needs to paint past the edges), so the
@@ -306,7 +309,7 @@ function stopPin(settle: boolean): void {
 // so the outermost slots remain reachable. Only the leading edge is checked;
 // after a swap the neighbor's layout slot moves away, which gives natural
 // hysteresis instead of flip-flopping at the threshold.
-function computeReorderBeforeId(): number | null {
+function computeReorderBeforeId(): SlotId | null {
   if (!drag) return null;
   const left = clampedDragLeft();
   const edge = dragDirRight ? left + drag.width : left;
@@ -547,7 +550,7 @@ function spawnNewTabHere(kind: SpawnKind, sameCwd = false): void {
 
 /** The slot a bar drop at x would insert before (null = append) — same
  *  half-over rule as local reorders, minus the carried-width offset. */
-function barDropBeforeId(x: number): number | null {
+function barDropBeforeId(x: number): SlotId | null {
   for (const { id, el } of visibleTabEls()) {
     const r = el.getBoundingClientRect();
     if (x < r.left + r.width / 2) return id;
@@ -558,7 +561,7 @@ function barDropBeforeId(x: number): number | null {
 function barDropResolver(
   x: number,
   y: number,
-): { beforeId: number | null } | null {
+): { beforeId: SlotId | null } | null {
   if (!pointInTabBar(x, y)) return null;
   return { beforeId: barDropBeforeId(x) };
 }
@@ -647,7 +650,7 @@ async function confirmDelete(): Promise<void> {
 
 // Save flow: name dialog seeded with the tab's current title.
 const saveDialogOpen = ref(false);
-const saveSlotId = ref<number | null>(null);
+const saveSlotId = ref<SlotId | null>(null);
 const saveLabel = ref("");
 const saveFormEl = ref<HTMLFormElement | null>(null);
 

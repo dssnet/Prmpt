@@ -20,6 +20,7 @@ import {
   type TabOrigin,
   type WorkspaceNode,
 } from "./workspace";
+import type { SlotId } from "./ids";
 
 export interface SavedWorkspaceRow {
   id: number;
@@ -91,7 +92,7 @@ function nowIso(): string {
 
 /** Serialize the live workspace in `slotId` and store it under `label`.
  *  No-op if the slot has no workspace. Always inserts a new row. */
-export async function saveWorkspaceLayout(slotId: number, label: string): Promise<void> {
+export async function saveWorkspaceLayout(slotId: SlotId, label: string): Promise<void> {
   const ws = getWorkspace(slotId);
   if (!ws) return;
   // Snapshot each local terminal pane's current folder so it reopens there.

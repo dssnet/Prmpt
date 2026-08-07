@@ -43,6 +43,7 @@ import {
   type PaneRect,
   type Workspace,
 } from "./workspace";
+import type { PaneId, SlotId } from "./ids";
 import { onLeafDisposed } from "./paneDisposers";
 import { isPanelLeafId, type PanelKind } from "./panels";
 import {
@@ -125,7 +126,7 @@ let wsSplitBoxes = new Map<string, { x: number; y: number; w: number; h: number 
  *  rect is host/canvas-relative CSS px; `tabId` is the panel leaf's negative
  *  frontend id (stable identity for keys, drag-rearrange, close). */
 export interface PanelPane {
-  tabId: number;
+  tabId: PaneId;
   kind: PanelKind;
   title: string;
   /** files: saved host the source was seeded with. */
@@ -158,7 +159,7 @@ function panePad(): number {
 // structural mutation) so views can refresh divider overlays.
 export const layoutVersion = ref(0);
 
-function activeWs(): { slotId: number; ws: Workspace } | null {
+function activeWs(): { slotId: SlotId; ws: Workspace } | null {
   const { activeId } = useTabs();
   const ws = getWorkspace(activeId.value);
   return ws ? { slotId: activeId.value, ws } : null;
@@ -227,7 +228,7 @@ export function computeDims(): { cols: number; rows: number; w: number; h: numbe
 /** Split direction that leaves the halves of `tabId`'s pane closest to square:
  *  a wide pane splits side-by-side, a tall one top-and-bottom. Falls back to
  *  "h" when the pane hasn't rendered a snapshot yet. */
-export function autoSplitDir(tabId: number): "h" | "v" {
+export function autoSplitDir(tabId: PaneId): "h" | "v" {
   const snap = snapshotFor(tabId);
   if (!snap) return "h";
   return snap.rows * cellHeightPx > snap.cols * cellWidthPx ? "v" : "h";
@@ -757,7 +758,7 @@ function syncHoverCursor(): void {
 }
 
 /** Last hovered cell, so pointer motion within one cell skips the hit-test. */
-let lastHoverCell: { tabId: number; col: number; viewportRow: number } | null = null;
+let lastHoverCell: { tabId: PaneId; col: number; viewportRow: number } | null = null;
 
 export function onHoverMove(e: MouseEvent): void {
   if (dragging || e.target !== canvasEl) {
@@ -800,7 +801,7 @@ export function onHoverLeave(): void {
 // Shift always forces local selection — the only way to copy out of such apps.
 let mouseReporting = false;
 let mouseReportButton = 0;
-let mouseReportTabId = 0;
+let mouseReportTabId = 0 as PaneId;
 let lastReportCell: { col: number; row: number } | null = null;
 
 /** Focus the workspace pane under the pointer (no-op outside a workspace). */
@@ -818,7 +819,7 @@ function focusPaneUnder(e: MouseEvent): void {
 
 /** Pointer cell + target tab when the app under the pointer wants mouse events
  *  and Shift isn't held. Null otherwise (→ local selection / menu). */
-function mouseReportTarget(e: MouseEvent): { tabId: number; col: number; row: number } | null {
+function mouseReportTarget(e: MouseEvent): { tabId: PaneId; col: number; row: number } | null {
   if (e.shiftKey) return null;
   const at = cellAtPoint(e);
   if (!at || !at.snap.mouse_tracking) return null;
@@ -833,7 +834,7 @@ export function mouseReportActive(e: MouseEvent): boolean {
 
 /** Pointer cell + target tab regardless of mouse mode — used by the wheel path,
  *  which the backend routes (report vs arrow keys vs scroll) on its own. */
-export function pointerCell(e: MouseEvent): { tabId: number; col: number; row: number } | null {
+export function pointerCell(e: MouseEvent): { tabId: PaneId; col: number; row: number } | null {
   const at = cellAtPoint(e);
   return at ? { tabId: at.snap.tab_id, col: at.col, row: at.viewportRow } : null;
 }
@@ -1038,12 +1039,15 @@ export function copyCurrentSelection(): void {
 
 /** Tab id that keyboard / paste / scroll should target: the focused pane of
  *  the active workspace, or the active tab itself. Returns null for home. */
-export function inputTargetTabId(): number | null {
+export function inputTargetTabId(): PaneId | null {
   const { active } = useTabs();
   const a = active.value;
   if (!a || a.kind === "home") return null;
   const ws = activeWs();
-  if (!ws) return a.id;
+  // Every non-home tab is a workspace, so a missing one means the registry is
+  // out of sync — target nothing rather than routing keystrokes at a slot id,
+  // which names no PTY.
+  if (!ws) return null;
   // A panel-only SFTP workspace can have a panel focused (negative id): there
   // is no PTY to route keyboard / paste / scroll to, so target nothing.
   const focused = ws.ws.focusedTabId;
@@ -1066,7 +1070,7 @@ export async function focusedTerminalCwd(): Promise<string | undefined> {
 /** Paste into `targetTabId`, or the focused pane when omitted (keyboard
  *  chord / app menu). The context menu passes the pane that was right-clicked,
  *  which needn't be the focused one. */
-export async function pasteFromClipboard(targetTabId?: number): Promise<void> {
+export async function pasteFromClipboard(targetTabId?: PaneId): Promise<void> {
   const target = targetTabId ?? inputTargetTabId();
   if (target == null) return;
   let text: string | null = null;
@@ -1093,8 +1097,8 @@ export async function pasteFromClipboard(targetTabId?: number): Promise<void> {
 }
 
 export interface DropResolution {
-  slotId: number;
-  targetPaneTabId: number;
+  slotId: SlotId;
+  targetPaneTabId: PaneId;
   dir: "h" | "v";
   placeDraggedFirst: boolean;
   /** host-relative CSS-px rect to highlight (the half the new pane will take). */
@@ -1135,7 +1139,7 @@ function clientToLocal(
 export function resolveDropAt(
   clientX: number,
   clientY: number,
-  draggedId?: number,
+  draggedId?: PaneId | SlotId,
 ): DropResolution | null {
   const { active } = useTabs();
   const activeTab = active.value;
@@ -1157,7 +1161,14 @@ export function resolveDropAt(
   // Dropping a tab onto its own pane — or a workspace tab onto any pane of
   // itself — is a no-op (see dropTabIntoTarget); suppress the preview so the
   // active tab dragged over itself shows nothing.
-  if (draggedId != null && (draggedId === targetPaneTabId || draggedId === slotId)) {
+  // `draggedId` is a slot id for a whole-tab drag and a pane id for a pane
+  // drag — the one place both domains legitimately arrive at one parameter,
+  // so both comparisons are made on the raw numbers.
+  if (
+    draggedId != null &&
+    ((draggedId as number) === (targetPaneTabId as number) ||
+      (draggedId as number) === (slotId as number))
+  ) {
     return null;
   }
 
@@ -1191,7 +1202,7 @@ export function resolveDropAt(
 export function updateWorkspaceDragPreview(
   clientX: number,
   clientY: number,
-  draggedId?: number,
+  draggedId?: PaneId | SlotId,
 ): void {
   // WKWebView sometimes emits (0,0) during a drag — ignore those samples.
   if (clientX === 0 && clientY === 0) return;

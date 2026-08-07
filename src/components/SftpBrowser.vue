@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import type { PaneId } from "../state/ids";
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import type { UnlistenFn } from "@tauri-apps/api/event";
@@ -71,7 +72,7 @@ import { ConfirmDialog, DropdownMenu, Input } from "./ui";
 
 const props = withDefaults(
   defineProps<{
-    tabId: number;
+    tabId: PaneId;
     /** Picker entries (panel mode): "local" + "sftp:<id>" values, see FilesPanel. */
     sources?: { value: string; label: string }[];
     /** The picker entry this column currently shows. */
@@ -283,7 +284,7 @@ async function load(path: string): Promise<void> {
 
 /** Remember the current location so the next mount of this connection's
  *  browser (the panel unmounts on every tab switch) resumes it. */
-function saveLocation(tabId: number): void {
+function saveLocation(tabId: PaneId): void {
   if (!cwd.value) return;
   browserLocations.set(`sftp:${tabId}`, {
     cwd: cwd.value,

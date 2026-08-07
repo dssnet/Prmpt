@@ -1,5 +1,6 @@
 import { ref } from "vue";
 
+import type { PaneId, SlotId } from "./ids";
 import type { PanelDesc } from "./panels";
 
 // A workspace is a recursive (tmux-like) binary tiling tree. Each leaf is
@@ -39,7 +40,7 @@ export function collectTerminalLeaves(node: WorkspaceNode): LeafNode[] {
 export interface LeafNode {
   kind: "leaf";
   id: string;
-  tabId: number;
+  tabId: PaneId;
   origin: TabOrigin;
 }
 
@@ -56,11 +57,11 @@ export type WorkspaceNode = LeafNode | SplitNode;
 
 export interface Workspace {
   root: WorkspaceNode;
-  focusedTabId: number;
+  focusedTabId: PaneId;
 }
 
 export interface PaneRect {
-  tabId: number;
+  tabId: PaneId;
   x: number;
   y: number;
   w: number;
@@ -84,7 +85,7 @@ function nodeId(): string {
   return `n${nodeSeq++}`;
 }
 
-export function makeLeaf(tabId: number, origin: TabOrigin): LeafNode {
+export function makeLeaf(tabId: PaneId, origin: TabOrigin): LeafNode {
   return { kind: "leaf", id: nodeId(), tabId, origin };
 }
 
@@ -106,7 +107,7 @@ export function collectLeaves(node: WorkspaceNode): LeafNode[] {
 
 export function findLeafByTabId(
   node: WorkspaceNode,
-  tabId: number,
+  tabId: PaneId,
 ): LeafNode | null {
   if (node.kind === "leaf") return node.tabId === tabId ? node : null;
   return findLeafByTabId(node.a, tabId) ?? findLeafByTabId(node.b, tabId);
@@ -118,7 +119,7 @@ export function findLeafByTabId(
  *  kept by the first child (default even split). */
 export function splitLeaf(
   root: WorkspaceNode,
-  targetTabId: number,
+  targetTabId: PaneId,
   newNode: WorkspaceNode,
   dir: SplitDir,
   placeNewFirst: boolean,
@@ -140,7 +141,7 @@ export function splitLeaf(
  *  its surviving sibling. Returns the new root, or null if nothing remains. */
 export function removeLeaf(
   node: WorkspaceNode,
-  tabId: number,
+  tabId: PaneId,
 ): WorkspaceNode | null {
   if (node.kind === "leaf") return node.tabId === tabId ? null : node;
   const a = removeLeaf(node.a, tabId);
@@ -225,11 +226,11 @@ export function layout(
 // Heavy structures live outside Vue reactivity (same rationale as the snapshot
 // map in tabs.ts). `workspaceTick` is the reactive signal that something
 // structural changed so views can re-layout/redraw.
-const workspaces = new Map<number, Workspace>();
-const leafToWorkspace = new Map<number, number>();
+const workspaces = new Map<SlotId, Workspace>();
+const leafToWorkspace = new Map<PaneId, SlotId>();
 export const workspaceTick = ref(0);
 
-function reindex(slotId: number, ws: Workspace): void {
+function reindex(slotId: SlotId, ws: Workspace): void {
   for (const [tabId, owner] of leafToWorkspace) {
     if (owner === slotId) leafToWorkspace.delete(tabId);
   }
@@ -238,17 +239,17 @@ function reindex(slotId: number, ws: Workspace): void {
   }
 }
 
-export function getWorkspace(slotId: number): Workspace | undefined {
+export function getWorkspace(slotId: SlotId): Workspace | undefined {
   return workspaces.get(slotId);
 }
 
-export function setWorkspace(slotId: number, ws: Workspace): void {
+export function setWorkspace(slotId: SlotId, ws: Workspace): void {
   workspaces.set(slotId, ws);
   reindex(slotId, ws);
   workspaceTick.value++;
 }
 
-export function deleteWorkspace(slotId: number): void {
+export function deleteWorkspace(slotId: SlotId): void {
   for (const [tabId, owner] of leafToWorkspace) {
     if (owner === slotId) leafToWorkspace.delete(tabId);
   }
@@ -257,11 +258,11 @@ export function deleteWorkspace(slotId: number): void {
 }
 
 /** Slot id of the workspace owning `tabId` as a leaf, or undefined. */
-export function workspaceOfLeaf(tabId: number): number | undefined {
+export function workspaceOfLeaf(tabId: PaneId): SlotId | undefined {
   return leafToWorkspace.get(tabId);
 }
 
-export function isWorkspaceSlot(slotId: number): boolean {
+export function isWorkspaceSlot(slotId: SlotId): boolean {
   return workspaces.has(slotId);
 }
 

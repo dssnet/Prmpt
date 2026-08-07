@@ -46,6 +46,7 @@ import {
   useTabs,
 } from "./tabs";
 import { collectLeaves, getWorkspace, type SplitDir } from "./workspace";
+import type { PaneId, SlotId } from "./ids";
 
 const { active } = useTabs();
 
@@ -53,8 +54,8 @@ const { active } = useTabs();
  * working directory when knowable (local shells; SSH panes and dead shells
  * fall back to the default). Also used by the pane pill's split button. */
 export async function splitPane(
-  slotId: number,
-  paneId: number,
+  slotId: SlotId,
+  paneId: PaneId,
   dir: SplitDir,
   placeNewFirst: boolean,
 ): Promise<void> {

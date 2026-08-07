@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import type { PaneId, SlotId } from "../state/ids";
 import { computed, onBeforeUnmount, onMounted, ref, watch, type Component } from "vue";
 import { GitBranch, PanelRight, SquareSplitHorizontal, X } from "lucide-vue-next";
 
@@ -109,10 +110,10 @@ const PANEL_VIEWS: Record<
 // the terminal it sits on (its cwd / server). `fromTabId` is the originating
 // terminal pane; without one, seed from the active tab's first terminal pane
 // (slot ids name no backend, so the tab id itself can't seed a cwd).
-function openPanel(kind: PanelKind, fromTabId?: number): void {
+function openPanel(kind: PanelKind, fromTabId?: PaneId): void {
   const id =
     fromTabId ??
-    (active.value && active.value.kind !== "home"
+    (active.value?.kind === "workspace"
       ? firstTerminalLeafId(active.value.id) ?? undefined
       : undefined);
   if (id == null) return;
@@ -250,8 +251,8 @@ function onDividerUp() {
 // ---- Per-pane hover bar: close / move a pane ------------------------------
 
 let paneDrag: {
-  tabId: number;
-  slotId: number;
+  tabId: PaneId;
+  slotId: SlotId;
   label: string;
   startX: number;
   startY: number;
@@ -269,11 +270,11 @@ let paneDrag: {
   sole: boolean;
 } | null = null;
 
-function workspaceSlotId(): number | null {
+function workspaceSlotId(): SlotId | null {
   return active.value?.kind === "workspace" ? active.value.id : null;
 }
 
-function onPaneBarDown(p: { tabId: number; title: string }, e: MouseEvent) {
+function onPaneBarDown(p: { tabId: PaneId; title: string }, e: MouseEvent) {
   if (e.button !== 0) return;
   const slotId = workspaceSlotId();
   if (slotId == null) return;
@@ -367,7 +368,7 @@ function onPaneDragUp(e: MouseEvent) {
   if (newSlot != null && bar) moveTab(newSlot, bar.beforeId);
 }
 
-function onPaneClose(p: { tabId: number }) {
+function onPaneClose(p: { tabId: PaneId }) {
   // requestClosePane routes panel leaves to closePanelLeaf (no confirm) and
   // terminal leaves through the running-program guard.
   void requestClosePane(p.tabId);

@@ -19,6 +19,7 @@ import {
   prepareWindowClose,
   tabForegroundProcess,
 } from "../ipc";
+import type { PaneId, SlotId } from "./ids";
 import { confirmCloseRunning } from "./uiPrefs";
 import {
   closePanelLeaf,
@@ -36,12 +37,14 @@ import {
   workspaceOfLeaf,
 } from "./workspace";
 
-export interface PendingClose {
-  kind: "tab" | "pane" | "window";
-  /** The tab/pane to close on confirm. Unused for window closes. */
-  id?: number;
-  message: string;
-}
+/** What the confirm dialog is about. A discriminated union rather than one
+ *  shape with an optional `id`: a tab close names a slot, a pane close names a
+ *  pane, and a window close names nothing — three different id domains that a
+ *  shared `id?: number` field used to blur together. */
+export type PendingClose =
+  | { kind: "tab"; id: SlotId; message: string }
+  | { kind: "pane"; id: PaneId; message: string }
+  | { kind: "window"; message: string };
 
 /** The confirm dialog App.vue renders; null = no dialog. */
 export const pendingClose = ref<PendingClose | null>(null);
@@ -66,7 +69,7 @@ function closeWindowIfNoTabs(): void {
 /** Local-PTY leaf tab ids under a top-level tab (itself, or its workspace
  *  panes). SSH leaves are excluded — the tab-level guard can't see into
  *  them, per the window-only SSH rule. */
-function localLeafIds(t: TabState): number[] {
+function localLeafIds(t: TabState): PaneId[] {
   if (t.kind !== "workspace") return [];
   const ws = getWorkspace(t.id);
   if (!ws) return [];
@@ -78,7 +81,7 @@ function localLeafIds(t: TabState): number[] {
 /** Names of foreground programs running in the given local tabs (deduped;
  *  unnameable processes report as "a program"). Query failures count as
  *  not-running so a wedged tab can never block its own close. */
-async function runningNames(ids: number[]): Promise<string[]> {
+async function runningNames(ids: PaneId[]): Promise<string[]> {
   const procs = await Promise.all(
     ids.map((id) => tabForegroundProcess(id).catch(() => null)),
   );
@@ -116,7 +119,7 @@ export async function requestCloseTab(t: TabState): Promise<void> {
 /** Workspace pane X. Looks up the pane's origin itself; SSH panes close
  *  without confirmation, same as SSH tabs. Panel panes (file browser, git, …)
  *  are frontend-only views — close immediately, nothing can be "running". */
-export async function requestClosePane(tabId: number): Promise<void> {
+export async function requestClosePane(tabId: PaneId): Promise<void> {
   const wsId = workspaceOfLeaf(tabId);
   const ws = wsId !== undefined ? getWorkspace(wsId) : undefined;
   const leaf = ws ? findLeafByTabId(ws.root, tabId) : null;
@@ -147,7 +150,7 @@ export async function requestClosePane(tabId: number): Promise<void> {
  *  Used by App.vue's onCloseRequested handler. */
 export async function windowCloseMessage(): Promise<string | null> {
   if (!confirmCloseRunning.value) return null;
-  const localIds: number[] = [];
+  const localIds: PaneId[] = [];
   for (const t of tabs.value) {
     if (t.kind !== "workspace") continue;
     const ws = getWorkspace(t.id);
@@ -177,12 +180,12 @@ export function confirmPendingClose(): void {
   const p = pendingClose.value;
   pendingClose.value = null;
   if (!p) return;
-  if (p.kind === "tab" && p.id !== undefined) {
+  if (p.kind === "tab") {
     void closeTabAndForget(p.id);
     closeWindowIfNoTabs();
-  } else if (p.kind === "pane" && p.id !== undefined) {
+  } else if (p.kind === "pane") {
     void closeWorkspacePane(p.id);
-  } else if (p.kind === "window") {
+  } else {
     // destroy(), not close(): close() would re-fire onCloseRequested and
     // re-run this guard. The Destroyed handler on the backend still reaps
     // the window's tabs. Quiesce the render stream first (see

@@ -22,6 +22,8 @@
  * is the discriminator.
  */
 
+import type { PaneId, SlotId } from "./ids";
+
 export type PanelKind = "files" | "git";
 
 /** What a panel leaf shows. Carried in the leaf's `TabOrigin.panel`. All
@@ -37,19 +39,26 @@ export interface PanelDesc {
    *  their cwd; a host seeds the server via `seedHostId`, not a remote path. */
   seedPath?: string;
   /** files: initial cd / insert-path target terminal. */
-  seedTargetTabId?: number;
+  seedTargetTabId?: PaneId;
 }
 
+// Panel pane leaves AND workspace slot ids (every tab — see state/tabs.ts)
+// draw from this one counter, which is what keeps the two globally unique.
+// They are different *types* (see state/ids.ts) precisely because they look
+// identical: both negative, both minted here.
 let panelIdSeq = -1;
 
-/** Allocate a frontend id (negative, never reused): panel pane leaves AND
- *  workspace slot ids (every tab — see state/tabs.ts) draw from this one
- *  counter, which is what keeps leaf ids and slot ids globally unique. */
-export function allocPanelLeafId(): number {
-  return panelIdSeq--;
+/** Allocate a frontend leaf id for a panel pane. */
+export function allocPanelLeafId(): PaneId {
+  return panelIdSeq-- as PaneId;
 }
 
-export function isPanelLeafId(id: number): boolean {
+/** Allocate a tab-bar slot id (also its workspace's registry key). */
+export function allocSlotId(): SlotId {
+  return panelIdSeq-- as SlotId;
+}
+
+export function isPanelLeafId(id: PaneId): boolean {
   return id < 0;
 }
 

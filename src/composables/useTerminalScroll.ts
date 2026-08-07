@@ -2,6 +2,7 @@ import { computed, type ComputedRef } from "vue";
 
 import { scrollTab } from "../ipc";
 import { snapshotFor, useTabs } from "../state/tabs";
+import type { PaneId } from "../state/ids";
 
 export interface ScrollAdapter {
   position: ComputedRef<number>;
@@ -20,7 +21,7 @@ export interface ScrollAdapter {
  * to viewport row 0), `range` is the number of rows the viewport can travel,
  * and `viewportSize` is the visible row count.
  */
-export function useTerminalScroll(tabId: number): ScrollAdapter {
+export function useTerminalScroll(tabId: PaneId): ScrollAdapter {
   // Touching `renderSeq` inside the computeds wires Vue reactivity into the
   // imperative `snapshots` Map. Without it, `snapshotFor()` would only be
   // re-read on unrelated reactive deps.

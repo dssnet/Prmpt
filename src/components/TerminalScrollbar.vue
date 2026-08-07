@@ -1,9 +1,10 @@
 <script setup lang="ts">
+import type { PaneId } from "../state/ids";
 import { useTerminalScroll } from "../composables/useTerminalScroll";
 import { Scrollbar } from "./ui";
 
 const props = defineProps<{
-  tabId: number;
+  tabId: PaneId;
   rect?: { x: number; y: number; w: number; h: number };
 }>();
 

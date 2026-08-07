@@ -28,13 +28,13 @@ import { owningTabId, useTabs } from "./tabs";
 import { showToast } from "./toasts";
 import { notificationSounds, notificationSoundsBackgroundOnly } from "./uiPrefs";
 import { windowFocused } from "./windowFocus";
+import type { PaneId, SlotId } from "./ids";
 
 const { tabs: allTabs, active: activeTab } = useTabs();
 
 export interface AppNotification {
-  /** Originating tab — a workspace pane id is fine, the owning top-level
-   *  tab is resolved internally. */
-  tabId: number;
+  /** Originating pane. The owning top-level tab is resolved internally. */
+  tabId: PaneId;
   /** Origin badge for the toast: SSH host label or "Local". */
   host: string;
   title: string;
@@ -46,7 +46,7 @@ export interface AppNotification {
  *  unfocused, the owning tab isn't the active one, or the tab is gone.
  *  Column/panel visibility is deliberately NOT the criterion (persisted
  *  layouts can show a connection's column on a different tab). */
-export function isAway(tabId: number): boolean {
+export function isAway(tabId: PaneId): boolean {
   const owner = owningTabId(tabId);
   return !windowFocused.value || owner == null || owner !== activeTab.value?.id;
 }
@@ -84,7 +84,7 @@ export function notify(n: AppNotification): void {
 }
 
 /** Terminal BEL: blip + away-badge only, never logged or toasted. */
-export function notifyBell(tabId: number): void {
+export function notifyBell(tabId: PaneId): void {
   if (soundAllowed()) void playBell();
   if (isAway(tabId)) ringBell(tabId);
 }
@@ -93,7 +93,7 @@ export function notifyBell(tabId: number): void {
 
 export interface NotificationEntry {
   id: number;
-  tabId: number;
+  tabId: PaneId;
   host: string;
   title: string;
   detail: string;
@@ -124,7 +124,7 @@ export function markAllNotificationsRead(): void {
 /** Visiting a tab acknowledges its entries — same gesture that clears its
  *  tab-bar bell. Entries from closed tabs stay unread until the panel is
  *  opened (`markAllNotificationsRead`). */
-function markTabNotificationsRead(topId: number): void {
+function markTabNotificationsRead(topId: SlotId): void {
   if (!notificationLog.value.some((n) => !n.read && owningTabId(n.tabId) === topId))
     return;
   notificationLog.value = notificationLog.value.map((n) =>
@@ -146,9 +146,9 @@ export function clearNotifications(): void {
 // ---- tab-bar bells ----------------------------------------------------------
 // Top-level tabs with a notification that fired while the tab wasn't active;
 // TabBar shows a bell on them until they're visited.
-export const bellTabs = ref<Set<number>>(new Set());
+export const bellTabs = ref<Set<SlotId>>(new Set());
 
-function ringBell(tabId: number): void {
+function ringBell(tabId: PaneId): void {
   const top = owningTabId(tabId);
   // No badge for the active tab (the toast/chime already covered it — and
   // the visit-watch below would clear it immediately) or for a tab that's

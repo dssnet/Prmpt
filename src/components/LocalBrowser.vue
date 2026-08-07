@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import type { PaneId } from "../state/ids";
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import {
   ArrowLeft,
@@ -81,10 +82,10 @@ const props = withDefaults(
   defineProps<{
     /** Terminals offered as cd / insert-path targets in the row context menu
      *  (one direct item if a single terminal, a submenu otherwise). */
-    targets?: { id: number; title: string; focused?: boolean }[];
+    targets?: { id: PaneId; title: string; focused?: boolean }[];
     /** Implicit target for a single-click path insert (the panel's seed /
      *  focused terminal); null when there is none. */
-    defaultTargetTabId?: number | null;
+    defaultTargetTabId?: PaneId | null;
     /** Picker entries (panel mode): "local" + "sftp:<id>" values, see FilesPanel. */
     sources?: { value: string; label: string }[];
     /** The picker entry this column currently shows. */
@@ -431,16 +432,16 @@ function shellQuote(p: string): string {
   if (IS_WIN) return `"${p.replace(/"/g, '\\"')}"`;
   return `'${p.replace(/'/g, "'\\''")}'`;
 }
-function sendToTerminal(text: string, tabId: number | null): void {
+function sendToTerminal(text: string, tabId: PaneId | null): void {
   if (tabId == null) return;
   void writeInput(tabId, new TextEncoder().encode(text));
 }
-function cdInto(e: LocalEntry, tabId: number | null): void {
+function cdInto(e: LocalEntry, tabId: PaneId | null): void {
   sendToTerminal(`cd ${shellQuote(e.path)}\n`, tabId);
 }
 // A multi-selection inserts every path on one line, space-separated, so it
 // drops into the terminal as one command's worth of arguments.
-function insertPath(entries: LocalEntry[], tabId: number | null): void {
+function insertPath(entries: LocalEntry[], tabId: PaneId | null): void {
   sendToTerminal(entries.map((e) => shellQuote(e.path)).join(" "), tabId);
 }
 
@@ -642,7 +643,7 @@ const myTransfers = computed(() => transfers.value.filter((t) => t.key === "loca
 
 async function downloadInto(d: SftpDragItem, dstDir: string): Promise<void> {
   if (d.source !== "sftp") return;
-  const id = trackTransfer("local", props.defaultTargetTabId ?? -1, d.name, "down");
+  const id = trackTransfer("local", props.defaultTargetTabId ?? (-1 as PaneId), d.name, "down");
   try {
     await sftpDownload(d.srcTabId, d.path, joinLocal(dstDir, d.name), id);
     refresh();
@@ -699,7 +700,7 @@ function openToolbarMenu(): void {
  *  when several are, or null when there are none to target. */
 function terminalMenuItem(
   text: string,
-  send: (tabId: number) => void,
+  send: (tabId: PaneId) => void,
 ): FloatingMenuEntry {
   const terms = props.targets;
   if (terms.length === 0) return null;

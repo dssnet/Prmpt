@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import type { PaneId, SlotId } from "../state/ids";
 import { computed, onMounted, ref, watch } from "vue";
 import { X } from "lucide-vue-next";
 
@@ -30,16 +31,16 @@ import SftpBrowser from "./SftpBrowser.vue";
 
 const props = defineProps<{
   /** Workspace panel pane id (stable identity for column + consumer state). */
-  paneId?: number | null;
+  paneId?: PaneId | null;
   /** Workspace slot hosting this panel — source of the terminal list for the
    *  cd / insert-path target picker. */
-  slotId?: number | null;
+  slotId?: SlotId | null;
   /** Saved host to seed the source with (local files otherwise). */
   seedHostId?: number | null;
   /** Initial folder for the local column (seeded from a terminal's cwd). */
   seedPath?: string | null;
   /** Terminal to seed the cd / insert-path target picker with. */
-  seedTargetTabId?: number | null;
+  seedTargetTabId?: PaneId | null;
   /** Full-width mode: no terminal to reclaim, so no close affordance — and no
    *  left border, the panel isn't docked to anything. */
   hideClose?: boolean;
@@ -63,7 +64,7 @@ const terminals = computed(() => {
   void workspaceTick.value;
   return props.slotId != null ? listWorkspaceTerminals(props.slotId) : [];
 });
-const defaultTargetTabId = computed<number | null>(() => {
+const defaultTargetTabId = computed<PaneId | null>(() => {
   const list = terminals.value;
   if (props.seedTargetTabId != null && list.some((t) => t.id === props.seedTargetTabId))
     return props.seedTargetTabId;
@@ -207,7 +208,7 @@ watch(
       <SftpBrowser
         v-else-if="consumerId != null"
         class="flex-1 min-w-0"
-        :tab-id="consumerId"
+        :tab-id="(consumerId as PaneId)"
         :sources="sources"
         :source-value="encode(source)"
         @update:source="source = decode($event)"
