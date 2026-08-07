@@ -31,6 +31,7 @@ use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use tauri::{AppHandle, Emitter, EventTarget};
 
 use crate::ownership::{Ownership, WindowKind};
+use crate::render_gate::RenderGate;
 use crate::{
     config::Theme,
     error::{AppError, AppResult},
@@ -78,19 +79,6 @@ pub(crate) const PTY_EVENT_QUEUE_CAP: usize = 128;
 /// that spams BEL (`cat /dev/urandom` hits them constantly) costs one
 /// event per second instead of flooding the webview with chimes.
 const NOTIFY_THROTTLE: Duration = Duration::from_secs(1);
-
-/// Max render frames emitted ahead of the webview's acks. Frames are full
-/// snapshots, so skipping intermediates is lossless — this hard-bounds the
-/// webview-side backlog that fire-and-forget emits used to build during a
-/// PTY flood (each emit lands as an `ExecuteScript` whose IPC buffer sits
-/// in the renderer until decoded; a stalled renderer accumulated gigabytes
-/// and either OOM-killed itself or ghosted the window).
-const MAX_INFLIGHT_FRAMES: u64 = 2;
-
-/// Emit despite missing acks after this long. A webview that never acks
-/// (mid-reload, listener not yet installed during window boot, a dropped
-/// invoke) degrades to this cadence instead of freezing the picture.
-const ACK_STALL_FALLBACK: Duration = Duration::from_secs(1);
 
 #[derive(Clone, Copy, Debug)]
 pub enum ScrollKind {
@@ -890,6 +878,124 @@ impl TabRegistry {
     }
 }
 
+/// Encode one webview key event against the terminal's live modes (DECCKM,
+/// keypad mode, kitty keyboard flags). `Ok(None)` is normal — a bare modifier
+/// press with the kitty protocol off encodes to nothing.
+///
+/// The mouse path has had this shape since it was written
+/// (`encode_and_send_mouse`); the key path stayed inlined in the loop.
+fn encode_key(
+    terminal: &Terminal<'_, '_>,
+    encoder: &mut KeyEncoder,
+    event: &mut KeyEvent,
+    ev: &KeyEventWire,
+) -> Result<Option<Vec<u8>>, libghostty_vt::Error> {
+    // Sync the encoder with the terminal's current modes. This also resets
+    // macos-option-as-alt to False, which is what we want: the webview already
+    // delivers Option-composed characters in `utf8`.
+    encoder.set_options_from_terminal(terminal);
+
+    let mut mods = KeyMods::empty();
+    if ev.shift { mods |= KeyMods::SHIFT; }
+    if ev.ctrl { mods |= KeyMods::CTRL; }
+    if ev.alt { mods |= KeyMods::ALT; }
+    if ev.super_key { mods |= KeyMods::SUPER; }
+    if ev.caps_lock { mods |= KeyMods::CAPS_LOCK; }
+    if ev.num_lock { mods |= KeyMods::NUM_LOCK; }
+
+    let unshifted = char::from_u32(ev.unshifted_codepoint).unwrap_or('\0');
+    // Mods the keyboard layout already spent producing the text: Shift+a → "A"
+    // consumed shift; on macOS Option composes (Option+o → "ø") and is
+    // consumed too. The encoder must not ESC-prefix or CSI-modify for these.
+    let mut consumed = KeyMods::empty();
+    if let Some(text) = ev.utf8.as_deref() {
+        if text.chars().next() != Some(unshifted) {
+            if ev.shift { consumed |= KeyMods::SHIFT; }
+            if cfg!(target_os = "macos") && ev.alt {
+                consumed |= KeyMods::ALT;
+            }
+        }
+    }
+
+    event
+        .set_action(match ev.action.as_str() {
+            "release" => KeyAction::Release,
+            "repeat" => KeyAction::Repeat,
+            _ => KeyAction::Press,
+        })
+        .set_key(keymap::key_from_code(&ev.code))
+        .set_mods(mods)
+        .set_consumed_mods(consumed)
+        .set_utf8(ev.utf8.as_deref())
+        .set_unshifted_codepoint(unshifted);
+
+    let mut bytes = Vec::with_capacity(16);
+    encoder.encode_to_vec(event, &mut bytes)?;
+    Ok((!bytes.is_empty()).then_some(bytes))
+}
+
+/// Route one physical wheel notch, in the order the app's own modes dictate:
+/// a mouse-reporting app gets button-4/5 reports, an alternate-screen app
+/// without reporting gets arrow keys (what a pager expects), and anything else
+/// scrolls our own viewport. Returns whether the viewport moved and the tab
+/// needs a repaint.
+#[allow(clippy::too_many_arguments)]
+fn route_wheel(
+    terminal: &mut Terminal<'_, '_>,
+    mouse_encoder: &mut MouseEncoder,
+    mouse_event: &mut MouseEvent,
+    write_tx: &Sender<Vec<u8>>,
+    any_button_held: bool,
+    rows: i32,
+    col: u16,
+    row: u16,
+) -> bool {
+    if rows == 0 {
+        return false;
+    }
+    if terminal.is_mouse_tracking().unwrap_or(false) {
+        // One report per notch at the pointer cell, capped like the arrow-key
+        // path. A wheel button doesn't latch `any_button_held`.
+        let button = if rows < 0 { MouseButton::Four } else { MouseButton::Five };
+        for _ in 0..rows.unsigned_abs().min(WHEEL_ARROW_CAP) {
+            encode_and_send_mouse(
+                mouse_encoder,
+                mouse_event,
+                terminal,
+                write_tx,
+                MouseAction::Press,
+                Some(button),
+                KeyMods::empty(),
+                col,
+                row,
+                any_button_held,
+            );
+        }
+        return false;
+    }
+    let alt = terminal
+        .active_screen()
+        .map(|s| s == Screen::Alternate)
+        .unwrap_or(false);
+    if alt {
+        // Alternate screen, no mouse reporting → drive the app like the arrow
+        // keys do. input.ts sends ESC[A / ESC[B (no DECCKM handling), so match
+        // that exactly — apps like nano already respond to those.
+        let seq: &[u8] = if rows < 0 { b"\x1b[A" } else { b"\x1b[B" };
+        let count = rows.unsigned_abs().min(WHEEL_ARROW_CAP) as usize;
+        let mut bytes = Vec::with_capacity(seq.len() * count);
+        for _ in 0..count {
+            bytes.extend_from_slice(seq);
+        }
+        terminal.scroll_viewport(ScrollViewport::Bottom);
+        // Reliable blocking send, same path as TabCmd::Write.
+        let _ = write_tx.send(bytes);
+        return false;
+    }
+    terminal.scroll_viewport(ScrollViewport::Delta(rows as isize));
+    true
+}
+
 /// Encode one mouse event against the terminal's live tracking mode + output
 /// format and write it to the PTY. Cells are mapped 1:1 by giving the encoder a
 /// 1px cell so the surface-space position equals the cell coordinate. The
@@ -1119,20 +1225,10 @@ fn run_tab_loop(
     let mut render_state = RenderState::new()?;
     let mut row_iter = RowIterator::new()?;
     let mut cell_iter = CellIterator::new()?;
-    let mut generation: u64 = 0;
-    let mut pending_emit = false;
+    // Debounce + ack backpressure + focus backoff, all in one place (see
+    // `render_gate.rs`). Window liveness is the loop's to supply.
+    let mut gate = RenderGate::new(Instant::now());
     let mut emit_count: u64 = 0;
-    let mut last_emit = Instant::now();
-    // Highest generation the webview acked (ack_render). Emits are gated on
-    // `generation - last_acked_gen` — see MAX_INFLIGHT_FRAMES.
-    let mut last_acked_gen: u64 = 0;
-    // Backgrounded/occluded windows don't paint (rAF is paused), so a
-    // focused tab keeps the snappy 8ms debounce while an unfocused one
-    // backs off hard — nothing is consuming the intermediate frames, and
-    // emitting them anyway just floods the webview's IPC decode with a
-    // backlog it has to drain after refocus. TabCmd::SetFocused toggles
-    // this and forces one immediate emit on refocus.
-    let mut focused = true;
 
     let timeout_tick = Duration::from_millis(5);
     loop {
@@ -1146,50 +1242,9 @@ fn run_tab_loop(
                     user_input = Some(bytes);
                 }
                 Ok(TabCmd::Key(ev)) => {
-                    // Sync the encoder with the terminal's current modes.
-                    // This also resets macos-option-as-alt to False, which
-                    // is the behavior we want: the webview already delivers
-                    // Option-composed characters in `utf8`.
-                    key_encoder.set_options_from_terminal(&terminal);
-                    let mut mods = KeyMods::empty();
-                    if ev.shift { mods |= KeyMods::SHIFT; }
-                    if ev.ctrl { mods |= KeyMods::CTRL; }
-                    if ev.alt { mods |= KeyMods::ALT; }
-                    if ev.super_key { mods |= KeyMods::SUPER; }
-                    if ev.caps_lock { mods |= KeyMods::CAPS_LOCK; }
-                    if ev.num_lock { mods |= KeyMods::NUM_LOCK; }
-                    let unshifted = char::from_u32(ev.unshifted_codepoint).unwrap_or('\0');
-                    // Mods the keyboard layout already spent producing the
-                    // text: Shift+a → "A" consumed shift; on macOS Option
-                    // composes (Option+o → "ø") and is consumed too. The
-                    // encoder must not ESC-prefix or CSI-modify for these.
-                    let mut consumed = KeyMods::empty();
-                    if let Some(text) = ev.utf8.as_deref() {
-                        let composed = text.chars().next() != Some(unshifted);
-                        if composed {
-                            if ev.shift { consumed |= KeyMods::SHIFT; }
-                            if cfg!(target_os = "macos") && ev.alt {
-                                consumed |= KeyMods::ALT;
-                            }
-                        }
-                    }
-                    key_event
-                        .set_action(match ev.action.as_str() {
-                            "release" => KeyAction::Release,
-                            "repeat" => KeyAction::Repeat,
-                            _ => KeyAction::Press,
-                        })
-                        .set_key(keymap::key_from_code(&ev.code))
-                        .set_mods(mods)
-                        .set_consumed_mods(consumed)
-                        .set_utf8(ev.utf8.as_deref())
-                        .set_unshifted_codepoint(unshifted);
-                    let mut bytes = Vec::with_capacity(16);
-                    match key_encoder.encode_to_vec(&key_event, &mut bytes) {
-                        // Empty is normal: e.g. a bare modifier press with
-                        // the kitty protocol off encodes to nothing.
-                        Ok(()) if !bytes.is_empty() => user_input = Some(bytes),
-                        Ok(()) => {}
+                    match encode_key(&terminal, &mut key_encoder, &mut key_event, &ev) {
+                        Ok(Some(bytes)) => user_input = Some(bytes),
+                        Ok(None) => {}
                         Err(e) => eprintln!("[tab {tab_id}] key encode failed: {e:?}"),
                     }
                 }
@@ -1234,20 +1289,15 @@ fn run_tab_loop(
                         }
                     }
                     let _ = terminal.resize(cols, rows, cell_width_px, cell_height_px);
-                    pending_emit = true;
+                    gate.mark_dirty();
                 }
                 Ok(TabCmd::OwnerChanged) => {
                     // Repaint at once so a moved tab shows up in its new
                     // window without waiting for the child to produce output.
                     // The label itself is read from the registry below.
-                    pending_emit = true;
+                    gate.mark_dirty();
                 }
-                Ok(TabCmd::SetFocused(f)) => {
-                    focused = f;
-                    if f {
-                        pending_emit = true;
-                    }
-                }
+                Ok(TabCmd::SetFocused(f)) => gate.set_focused(f),
                 Ok(TabCmd::Scroll(kind)) => {
                     let sv = match kind {
                         ScrollKind::Top => ScrollViewport::Top,
@@ -1263,57 +1313,20 @@ fn run_tab_loop(
                         ScrollKind::Delta(n) => ScrollViewport::Delta(n as isize),
                     };
                     terminal.scroll_viewport(sv);
-                    pending_emit = true;
+                    gate.mark_dirty();
                 }
                 Ok(TabCmd::Wheel { rows, col, row }) => {
-                    let alt = terminal
-                        .active_screen()
-                        .map(|s| s == Screen::Alternate)
-                        .unwrap_or(false);
-                    let tracking = terminal.is_mouse_tracking().unwrap_or(false);
-                    if rows != 0 && tracking {
-                        // App is reporting mouse input → encode wheel notches as
-                        // button-4 (up) / button-5 (down) press reports at the
-                        // pointer cell. One report per notch, capped like the
-                        // arrow-key path. A wheel button doesn't latch
-                        // `any_button_held`.
-                        let button = if rows < 0 {
-                            MouseButton::Four
-                        } else {
-                            MouseButton::Five
-                        };
-                        let count = rows.unsigned_abs().min(WHEEL_ARROW_CAP);
-                        for _ in 0..count {
-                            encode_and_send_mouse(
-                                &mut mouse_encoder,
-                                &mut mouse_event,
-                                &terminal,
-                                &write_tx,
-                                MouseAction::Press,
-                                Some(button),
-                                KeyMods::empty(),
-                                col,
-                                row,
-                                any_button_held,
-                            );
-                        }
-                    } else if rows != 0 && alt {
-                        // Alternate screen, no mouse reporting → drive the app
-                        // like the arrow keys do. input.ts sends ESC[A / ESC[B
-                        // (no DECCKM handling), so match that exactly — apps like
-                        // nano already respond to those.
-                        let seq: &[u8] = if rows < 0 { b"\x1b[A" } else { b"\x1b[B" };
-                        let count = rows.unsigned_abs().min(WHEEL_ARROW_CAP) as usize;
-                        let mut bytes = Vec::with_capacity(seq.len() * count);
-                        for _ in 0..count {
-                            bytes.extend_from_slice(seq);
-                        }
-                        terminal.scroll_viewport(ScrollViewport::Bottom);
-                        // Reliable blocking send, same path as TabCmd::Write.
-                        let _ = write_tx.send(bytes);
-                    } else {
-                        terminal.scroll_viewport(ScrollViewport::Delta(rows as isize));
-                        pending_emit = true;
+                    if route_wheel(
+                        &mut terminal,
+                        &mut mouse_encoder,
+                        &mut mouse_event,
+                        &write_tx,
+                        any_button_held,
+                        rows,
+                        col,
+                        row,
+                    ) {
+                        gate.mark_dirty();
                     }
                 }
                 Ok(TabCmd::Mouse(ev)) => {
@@ -1397,9 +1410,7 @@ fn run_tab_loop(
                     let _ = reply.send(text);
                 }
                 Ok(TabCmd::RenderAck(gen)) => {
-                    // max(): acks can arrive out of order across the invoke
-                    // boundary; only ever move forward.
-                    last_acked_gen = last_acked_gen.max(gen);
+                    gate.ack(gen);
                 }
                 Ok(TabCmd::Shutdown) | Err(_) => {
                     // PTY children are killed + reaped after the loop (all exit
@@ -1451,7 +1462,7 @@ fn run_tab_loop(
                     }
                     let notes = scanned.notifications;
                     terminal.vt_write(&bytes);
-                    pending_emit = true;
+                    gate.mark_dirty();
                     let bell = bell_pending.take();
                     if (bell || !notes.is_empty())
                         && last_notify.is_none_or(|t| t.elapsed() >= NOTIFY_THROTTLE)
@@ -1494,7 +1505,7 @@ fn run_tab_loop(
         if let Some(bytes) = user_input.take() {
             let is_interrupt = bytes.contains(&0x03);
             terminal.scroll_viewport(ScrollViewport::Bottom);
-            pending_emit = true;
+            gate.mark_dirty();
             // Reliable send: input is tiny and must not be dropped. The
             // queue won't back up from a flood (replies use try_send).
             let _ = write_tx.send(bytes);
@@ -1524,36 +1535,22 @@ fn run_tab_loop(
             }
         }
 
-        let debounce = if focused {
-            Duration::from_millis(8)
-        } else {
-            Duration::from_millis(500)
-        };
-        // Backpressure gate: with MAX_INFLIGHT_FRAMES unacked, hold the frame
-        // (pending_emit stays set — the freshest snapshot goes out on the ack
-        // that wakes this loop, or after ACK_STALL_FALLBACK). Frames are full
-        // snapshots, so the held-back intermediates are never missed.
-        let inflight_ok = generation.saturating_sub(last_acked_gen) < MAX_INFLIGHT_FRAMES
-            || last_emit.elapsed() >= ACK_STALL_FALLBACK;
         // Where the frame goes — and whether it goes at all. One registry
         // query answers both, from one lock acquisition, so the gate and the
         // target can't disagree (they used to: the gate checked a label the
         // tab thread had cached, updated asynchronously by a channel message).
         // `None` means no owner, or an owner that is closing or gone: pushing
         // frames at a window being torn down is what kept WebKit committing
-        // layer trees for a dying page. `pending_emit` stays set, so the tab
-        // repaints as soon as it lands somewhere live again.
+        // layer trees for a dying page. The gate keeps the frame pending, so
+        // the tab repaints as soon as it lands somewhere live again.
         let target = if crate::SHUTTING_DOWN.load(std::sync::atomic::Ordering::Relaxed) {
             None
         } else {
             tauri::Manager::state::<SharedRegistry>(&app).emit_target(tab_id)
         };
-        if let (true, true, Some(owner_window)) = (
-            pending_emit && inflight_ok,
-            last_emit.elapsed() >= debounce,
-            target,
-        ) {
-            generation += 1;
+        let now = Instant::now();
+        if let Some(owner_window) = target.filter(|_| gate.should_emit(now, true)) {
+            let generation = gate.begin_emit(now);
             let theme = config.lock().theme.clone();
             match emit_render(
                 &app,
@@ -1574,8 +1571,6 @@ fn run_tab_loop(
                 }
                 Err(e) => eprintln!("[tab {tab_id}] emit failed: {e:?}"),
             }
-            pending_emit = false;
-            last_emit = Instant::now();
         }
     }
 

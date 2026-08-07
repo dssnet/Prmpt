@@ -14,6 +14,7 @@ mod ownership;
 mod paths;
 mod platform;
 mod protocol;
+mod render_gate;
 mod secret_store;
 mod secure_store;
 mod ssh;
