@@ -43,6 +43,7 @@ import {
   type PaneRect,
   type Workspace,
 } from "./workspace";
+import { onLeafDisposed } from "./paneDisposers";
 import { isPanelLeafId, type PanelKind } from "./panels";
 import {
   clearLinkHover,
@@ -84,10 +85,16 @@ let config: Config | null = null;
 // another tab's coordinates over unrelated content. User-facing operations
 // (mouse, copy, clear, select-all) act on the focused pane's entry. Leaf ids
 // are monotonic on both sides (backend AtomicU64, frontend negative counter),
-// never reused, so a stale entry can't leak onto a future pane; setSelection
-// prunes entries whose pane is gone regardless.
+// never reused, so a stale entry can't leak onto a future pane. Entries are
+// dropped by the shared pane teardown; this used to sweep itself against the
+// snapshot map on every write, a stand-in for the teardown hook that didn't
+// exist yet.
 const selections = new Map<number, Selection>();
 const selectionTick = ref(0);
+
+onLeafDisposed((leafId) => {
+  selections.delete(leafId);
+});
 
 function focusedSelection(): Selection | null {
   const id = inputTargetTabId();
@@ -98,9 +105,6 @@ function focusedSelection(): Selection | null {
 function setFocusedSelection(sel: Selection): void {
   const id = inputTargetTabId();
   if (id == null) return;
-  for (const key of selections.keys()) {
-    if (snapshotFor(key) === undefined) selections.delete(key);
-  }
   selections.set(id, sel);
 }
 

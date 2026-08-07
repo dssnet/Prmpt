@@ -35,7 +35,8 @@ import {
   type PanelKind,
 } from "./panels";
 import { setSftpAutoOpen, sftpAutoOpen } from "./sftp";
-import { paneSftpHost, releaseSftpForPane } from "./sftpConsumers";
+import { disposeLeafState, onLeafDisposed } from "./paneDisposers";
+import { paneSftpHost } from "./sftpConsumers";
 
 export const HOME_TAB_ID = 0;
 
@@ -100,6 +101,15 @@ export function clearSshReconnecting(id: number): void {
 export function isSshReconnecting(id: number): boolean {
   return sshReconnecting.has(id);
 }
+
+// Both per-leaf tables above are dropped by the shared pane teardown rather
+// than by each close path individually — `closeTabAndForget` used to be the
+// one path that forgot `sshReconnecting`, leaking an entry per pane closed
+// mid-reconnect.
+onLeafDisposed((leafId) => {
+  snapshots.delete(leafId);
+  sshReconnecting.delete(leafId);
+});
 
 export function useTabs() {
   const list = computed(() => tabs.value);
@@ -220,6 +230,34 @@ function spliceTab(id: number): void {
 function pickActiveAfterRemoval(): number {
   const next = tabs.value.find((t) => t.kind !== "home");
   return next ? next.id : HOME_TAB_ID;
+}
+
+/** Whether a pane's backend goes away with it. `"close"` kills the PTY (or
+ *  releases the pooled shell); `"detach"` leaves it running because the pane
+ *  has merely moved to another window. Per-pane *frontend* state is dropped
+ *  either way — this window is done with the pane regardless. */
+type DisposeMode = "close" | "detach";
+
+/** Drop one pane. Every per-pane side table is cleared through the single
+ *  disposer registry (`state/paneDisposers.ts`) rather than by each caller
+ *  remembering the current list — which is what let `closeTabAndForget` be
+ *  the one path that forgot `sshReconnecting`. */
+function disposeLeaf(leaf: LeafNode, mode: DisposeMode): void {
+  disposeLeafState(leaf.tabId);
+  if (mode === "close" && !isPanelLeaf(leaf)) {
+    closeTab(leaf.tabId).catch(() => undefined);
+  }
+}
+
+/** Drop a whole tab: its bar entry, its workspace, and every pane in it. */
+function disposeTab(slotId: number, mode: DisposeMode): void {
+  const ws = getWorkspace(slotId);
+  deleteWorkspace(slotId);
+  spliceTab(slotId);
+  if (activeId.value === slotId) activeId.value = pickActiveAfterRemoval();
+  if (ws) {
+    for (const leaf of collectLeaves(ws.root)) disposeLeaf(leaf, mode);
+  }
 }
 
 export function snapshotFor(tabId: number): RenderPayload | undefined {
@@ -394,23 +432,7 @@ export async function closeTabAndForget(id: number): Promise<void> {
   if (id === HOME_TAB_ID) return;
   const t = findTab(id);
   if (t && t.kind === "workspace") {
-    const ws = getWorkspace(id);
-    deleteWorkspace(id);
-    spliceTab(id);
-    if (activeId.value === id) activeId.value = pickActiveAfterRemoval();
-    if (ws) {
-      for (const leaf of collectLeaves(ws.root)) {
-        snapshots.delete(leaf.tabId);
-        if (!isPanelLeaf(leaf)) {
-          // Terminal pane → close its PTY (or release its pooled shell).
-          closeTab(leaf.tabId).catch(() => undefined);
-        } else if (leaf.origin.panel?.kind === "files") {
-          // File browser → release its SFTP consumer (drops the pooled
-          // connection when it was the last consumer).
-          releaseSftpForPane(leaf.tabId);
-        }
-      }
-    }
+    disposeTab(id, "close");
     return;
   }
   try {
@@ -549,7 +571,14 @@ function applyWorkspaceRemoval(
   newRoot: ReturnType<typeof removeLeaf>,
 ): void {
   if (!newRoot) {
-    void closeTabAndForget(slotId);
+    // Last pane gone, so the tab goes too. Nothing left to dispose: the
+    // removed leaf was disposed by the caller and it was the only one. This
+    // used to delegate to `closeTabAndForget`, which worked only because the
+    // workspace registry still held the *stale* tree at this point — an
+    // unstated ordering dependency that also re-closed an already-dead PTY.
+    deleteWorkspace(slotId);
+    spliceTab(slotId);
+    if (activeId.value === slotId) activeId.value = pickActiveAfterRemoval();
     return;
   }
   const ws = getWorkspace(slotId);
@@ -569,12 +598,11 @@ function applyWorkspaceRemoval(
 
 export function handleExit(p: ExitPayload): void {
   if (p.tab_id === HOME_TAB_ID) return;
-  sshReconnecting.delete(p.tab_id);
+  disposeLeafState(p.tab_id);
 
   const wsId = workspaceOfLeaf(p.tab_id);
   if (wsId !== undefined) {
     const ws = getWorkspace(wsId);
-    snapshots.delete(p.tab_id);
     forgetTab(p.tab_id).catch(() => undefined);
     if (!ws) return;
     applyWorkspaceRemoval(wsId, p.tab_id, removeLeaf(ws.root, p.tab_id));
@@ -590,7 +618,6 @@ export function handleExit(p: ExitPayload): void {
     if (tabs.value[idx].kind === "workspace") deleteWorkspace(p.tab_id);
     tabs.value.splice(idx, 1);
   }
-  snapshots.delete(p.tab_id);
   forgetTab(p.tab_id).catch(() => undefined);
   if (activeId.value === p.tab_id) {
     activeId.value = pickActiveAfterRemoval();
@@ -775,9 +802,8 @@ function makePanelLeaf(desc: PanelDesc, title?: string): LeafNode {
 export function closePanelLeaf(slotId: number, leafId: number): void {
   const ws = getWorkspace(slotId);
   if (!ws) return;
-  const leaf = findLeafByTabId(ws.root, leafId);
+  disposeLeafState(leafId);
   applyWorkspaceRemoval(slotId, leafId, removeLeaf(ws.root, leafId));
-  if (leaf?.origin.panel?.kind === "files") releaseSftpForPane(leafId);
 }
 
 /** Mirror the focused pane's title onto the workspace's tab-bar label, so the
@@ -950,10 +976,7 @@ export async function openPanelOnActive(kind: PanelKind): Promise<void> {
 export function removeWorkspaceLeafLocal(slotId: number, tabId: number): void {
   const ws = getWorkspace(slotId);
   if (!ws) return;
-  const leaf = findLeafByTabId(ws.root, tabId);
-  snapshots.delete(tabId);
-  sshReconnecting.delete(tabId);
-  if (leaf?.origin.panel?.kind === "files") releaseSftpForPane(tabId);
+  disposeLeafState(tabId);
   applyWorkspaceRemoval(slotId, tabId, removeLeaf(ws.root, tabId));
 }
 
@@ -962,27 +985,11 @@ export function removeWorkspaceLeafLocal(slotId: number, tabId: number): void {
  *  tree and per-leaf state so nothing here keeps mapping the moved panes. */
 export function removeTabLocal(id: number): void {
   if (id === HOME_TAB_ID) return;
-  const idx = tabs.value.findIndex((t) => t.id === id);
-  if (idx < 0) return;
-  const ws = getWorkspace(id);
-  tabs.value.splice(idx, 1);
-  if (ws) {
-    for (const leaf of collectLeaves(ws.root)) {
-      snapshots.delete(leaf.tabId);
-      // If it was mid-reconnect, the destination window re-acquires the flag
-      // on the next retry — "ssh:reconnecting" re-fires on every failed
-      // attempt.
-      sshReconnecting.delete(leaf.tabId);
-      // A files-panel leaf's SFTP consumer is registered to this window;
-      // release it here the same way closeTabAndForget/closePanelLeaf do,
-      // so the pooled connection drops (or hands off) instead of leaking a
-      // registration to a window that no longer holds the pane.
-      if (leaf.origin.panel?.kind === "files") releaseSftpForPane(leaf.tabId);
-    }
-  }
-  deleteWorkspace(id);
-  if (activeId.value === id) {
-    const next = tabs.value.find((t) => t.kind !== "home");
-    activeId.value = next ? next.id : HOME_TAB_ID;
-  }
+  if (!findTab(id)) return;
+  // "detach": the backends live on in the destination window. Everything
+  // else goes — including a files pane's SFTP consumer, which is registered
+  // to *this* window and would otherwise leak a registration for a pane we
+  // no longer hold, and a mid-reconnect flag, which the destination
+  // re-acquires on the next retry ("ssh:reconnecting" re-fires each attempt).
+  disposeTab(id, "detach");
 }

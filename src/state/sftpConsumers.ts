@@ -16,6 +16,7 @@
 import { getHost } from "../db";
 import { sftpAcquire, sftpRelease } from "../ipc";
 import { buildSshConnectConfig } from "./connect";
+import { onLeafDisposed } from "./paneDisposers";
 
 interface PaneSftp {
   hostId: number;
@@ -64,6 +65,16 @@ export function releaseSftpForPane(paneId: number): void {
     sftpRelease(cur.consumerId).catch(() => undefined);
   }
 }
+
+// Released through the shared pane teardown, so every close path gets it
+// without having to know a files panel might be involved. Dropping the pane's
+// generation entry is part of the release: an in-flight acquire compares
+// against it and a missing entry can't match, so it still releases itself on
+// resolve. Pane ids are never reused, so nothing can come back to this slot.
+onLeafDisposed((leafId) => {
+  releaseSftpForPane(leafId);
+  gen.delete(leafId);
+});
 
 /** The host id a pane's browser is currently bound to, or null. Lets the
  *  connection-identity helpers report which hosts have a live SFTP consumer. */

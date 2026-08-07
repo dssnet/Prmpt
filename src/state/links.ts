@@ -17,6 +17,7 @@ import {
   type RenderPayload,
 } from "../ipc";
 import { buildRowText, detectUrls, type RowText } from "../lib/urlDetect";
+import { onLeafDisposed } from "./paneDisposers";
 
 export type LinkSource = "osc8" | "regex";
 
@@ -55,13 +56,18 @@ let lastPointerCell: {
 const WRAP_CHAIN_CAP = 4;
 
 // Row text is rebuilt at most once per (tab, generation, row) — hover moves
-// within one row and repeated revalidations hit the cache.
+// within one row and repeated revalidations hit the cache. Bounded by the
+// pane teardown hook rather than by a blunt "clear everything past 16
+// entries", which is what it used to do for lack of one.
 const rowTextCache = new Map<number, { generation: number; rows: Map<number, RowText> }>();
+
+onLeafDisposed((leafId) => {
+  rowTextCache.delete(leafId);
+});
 
 function rowTextFor(snap: RenderPayload, row: number): RowText {
   let entry = rowTextCache.get(snap.tab_id);
   if (!entry || entry.generation !== snap.generation) {
-    if (rowTextCache.size > 16) rowTextCache.clear();
     entry = { generation: snap.generation, rows: new Map() };
     rowTextCache.set(snap.tab_id, entry);
   }
