@@ -315,6 +315,61 @@ jobs:
           SCCACHE_GHA_ENABLED: 'false'
         run: bash scripts/configure-windows-signing.sh
 
+      # libsodium-sys-stable (via iota_stronghold) has no vendored source path
+      # on MSVC: its build script downloads a prebuilt libsodium mid-compile,
+      # over PLAIN HTTP, and `.unwrap()`s the result with no retry. One refused
+      # connection kills a 12-minute build — which is exactly how the Windows
+      # aarch64 leg failed while every other leg of the same run passed.
+      #
+      # Fetch it ourselves instead, over HTTPS, with retries and a pinned
+      # digest, and point the crate at the result via SODIUM_LIB_DIR (which
+      # makes its build script skip the download entirely). The archive name
+      # and the per-arch path below are what the crate itself expects — see
+      # `extract_libsodium_precompiled_msvc` / `get_precompiled_lib_dir_msvc_*`
+      # in libsodium-sys-stable's build.rs. Both are pinned there too, so if a
+      # future bump changes them this step's hash check fails loudly rather
+      # than linking something unexpected.
+      - name: Provide prebuilt libsodium (Windows)
+        if: matrix.platform.family == 'windows'
+        shell: pwsh
+        env:
+          SODIUM_ARCHIVE: libsodium-1.0.22-stable-msvc.zip
+          # sha256 of the archive above. We bypass the crate's minisign check
+          # by not using its download path, so verify integrity here.
+          SODIUM_SHA256: d0a945a6ac8f6b60e47e1d9778b99b0beb6e0817602ef53543defbd39c108e7f
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $dest = Join-Path $env:RUNNER_TEMP 'libsodium'
+          $zip  = Join-Path $env:RUNNER_TEMP $env:SODIUM_ARCHIVE
+          $url  = "https://download.libsodium.org/libsodium/releases/$env:SODIUM_ARCHIVE"
+
+          for ($i = 1; $i -le 5; $i++) {
+            try {
+              Invoke-WebRequest -Uri $url -OutFile $zip -UseBasicParsing -TimeoutSec 120
+              break
+            } catch {
+              if ($i -eq 5) { throw "libsodium download failed after 5 attempts: $_" }
+              Write-Host "attempt $i failed ($_); retrying in $(5 * $i)s"
+              Start-Sleep -Seconds (5 * $i)
+            }
+          }
+
+          $actual = (Get-FileHash -Algorithm SHA256 $zip).Hash.ToLower()
+          if ($actual -ne $env:SODIUM_SHA256) {
+            throw "libsodium archive digest mismatch: got $actual, want $env:SODIUM_SHA256"
+          }
+
+          Expand-Archive -Path $zip -DestinationPath $dest -Force
+          $arch = if ('${{ matrix.platform.arch }}' -eq 'aarch64') { 'ARM64' } else { 'x64' }
+          $lib  = Join-Path $dest "libsodium/$arch/Release/v143/static"
+          if (-not (Test-Path (Join-Path $lib 'libsodium.lib'))) {
+            throw "libsodium.lib not found under $lib — archive layout changed"
+          }
+          # Static link is the crate's default when SODIUM_SHARED is unset,
+          # which matches the .lib we just staged.
+          "SODIUM_LIB_DIR=$lib" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "SODIUM_LIB_DIR=$lib"
+
       - name: Build & upload Tauri bundle
         uses: tauri-apps/tauri-action@v0
         env:
