@@ -181,9 +181,27 @@ jobs:
             wget \
             libfuse2
 
+      # Pinned, not `@stable`. We link the MSVC CRT statically on Windows on
+      # purpose (src-tauri/.cargo/config.toml — otherwise prmpt.exe needs the
+      # VC++ redist and dies with a silent loader error). rustc 1.98.1, three
+      # days old when v0.7.6 was cut, links that as static VC runtime + the
+      # *dynamic* UCRT:
+      #
+      #   /DEFAULTLIB:libcmt.lib /DEFAULTLIB:libvcruntime.lib
+      #   /DEFAULTLIB:ucrt.lib   /NODEFAULTLIB:libucrt.lib
+      #
+      # but the toolset's libcmt.lib references UCRT internals — __acrt_initialize,
+      # __acrt_thread_attach, _is_c_termination_complete, … — that only the
+      # *static* libucrt.lib exports, which that same line excludes. Six
+      # unresolved externals, both Windows legs, on a tree whose Rust code
+      # hasn't changed a line since v0.7.5 built fine on 1.97.1.
+      #
+      # 1.97.1 is that toolchain. Revisit when a later stable links this
+      # combination again; the alternative is giving up the static CRT.
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: '1.97.1'
           # Empty string is accepted and means "no extra targets".
           targets: ${{ matrix.platform.extra_rust_targets }}
 
