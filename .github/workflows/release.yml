@@ -190,28 +190,45 @@ jobs:
       # artifact-signing-cli (the Azure Trusted Signing tool Tauri's docs
       # recommend) shells out to signtool and the Azure Code Signing Dlib,
       # which need the .NET 8 runtime. windows-latest ships it, but pin it
-      # explicitly so both Windows legs (incl. the native windows-11-arm
-      # runner) are deterministic. No-op on macOS/Linux legs.
-      - name: Setup .NET 8 (Windows, for artifact-signing-cli)
-        if: matrix.platform.family == 'windows'
+      # explicitly so this leg is deterministic. No-op on macOS/Linux legs.
+      - name: Setup .NET 8 (Windows x64, for artifact-signing-cli)
+        if: ${{ matrix.platform.family == 'windows' && matrix.platform.arch == 'x86_64' }}
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '8.x'
 
-      # artifact-signing-cli always drives the x64 signtool + x64
-      # Azure.CodeSigning.Dlib, which need the x64 .NET 8 *runtime*. The
-      # windows-11-arm runner only has arm64 .NET, so the x64 dlib can't load
-      # its runtime and signtool exits with code 3. Install the x64 runtime to
-      # a dedicated dir (xcopy install — no registry) and point the x64 .NET
-      # host at it via DOTNET_ROOT_X64, which hostfxr checks ahead of
-      # DOTNET_ROOT for x64 processes; the bundle step's signtool inherits it.
-      - name: Install x64 .NET 8 runtime (Windows arm64, for x64 signtool)
+      # Same .NET 8 for the windows-11-arm leg, but installed by hand rather
+      # than via actions/setup-dotnet: on the current arm image that action
+      # dies three seconds in while laying down the 8.x SDK —
+      #
+      #   Fatal error. Internal CLR error. (0x80131506)
+      #   ##[error]Failed to install dotnet, exit code: 3221225477
+      #
+      # (0xC0000005, an access violation; the image now ships .NET 10 and the
+      # action's own installer crashes on it). It passed here in v0.7.5 and
+      # took down the first v0.7.6 run, so this is the image changing under
+      # us, not our config. Microsoft's dotnet-install.ps1 — already proven on
+      # this runner by the x64 install below — does the job without the
+      # action, and we only ever need the *runtime*: artifact-signing-cli is a
+      # Rust binary, the SDK was never used.
+      #
+      # Both architectures, because the two halves of signing disagree about
+      # bitness: the signtool the signing script puts on PATH is the runner's
+      # native arm64 one, while artifact-signing-cli drives the x64
+      # Azure.CodeSigning.Dlib. arm64 goes to the default root so the normal
+      # host finds it; x64 goes to a dedicated dir (xcopy install — no
+      # registry) that the x64 host is pointed at via DOTNET_ROOT_X64, which
+      # hostfxr checks ahead of DOTNET_ROOT for x64 processes; the bundle
+      # step's signtool inherits it.
+      - name: Install .NET 8 runtimes (Windows arm64, for signtool)
         if: ${{ matrix.platform.family == 'windows' && matrix.platform.arch == 'aarch64' }}
         shell: powershell
         run: |
+          $install = [scriptblock]::Create((Invoke-RestMethod 'https://dot.net/v1/dotnet-install.ps1'))
+          & $install -Architecture arm64 -Runtime dotnet -Channel 8.0 `
+            -InstallDir (Join-Path $env:ProgramFiles 'dotnet')
           $dir = Join-Path $env:RUNNER_TEMP 'dotnet-x64'
-          & ([scriptblock]::Create((Invoke-RestMethod 'https://dot.net/v1/dotnet-install.ps1'))) `
-            -Architecture x64 -Runtime dotnet -Channel 8.0 -InstallDir $dir
+          & $install -Architecture x64 -Runtime dotnet -Channel 8.0 -InstallDir $dir
           "DOTNET_ROOT_X64=$dir" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
       # sccache caches individual `rustc` invocations to the GitHub
@@ -323,25 +340,37 @@ jobs:
       #
       # Fetch it ourselves instead, over HTTPS, with retries and a pinned
       # digest, and point the crate at the result via SODIUM_LIB_DIR (which
-      # makes its build script skip the download entirely). The archive name
-      # and the per-arch path below are what the crate itself expects — see
-      # `extract_libsodium_precompiled_msvc` / `get_precompiled_lib_dir_msvc_*`
-      # in libsodium-sys-stable's build.rs. Both are pinned there too, so if a
-      # future bump changes them this step's hash check fails loudly rather
-      # than linking something unexpected.
+      # makes its build script skip the download entirely). The per-arch path
+      # below is what the crate itself expects — see
+      # `get_precompiled_lib_dir_msvc_*` in libsodium-sys-stable's build.rs.
+      # It is pinned there too, so if a future bump changes it the existence
+      # check fails loudly rather than linking something unexpected.
       - name: Provide prebuilt libsodium (Windows)
         if: matrix.platform.family == 'windows'
         shell: pwsh
         env:
-          SODIUM_ARCHIVE: libsodium-1.0.22-stable-msvc.zip
+          # The tagged GitHub release asset, NOT the crate's own
+          # download.libsodium.org/…/libsodium-1.0.22-stable-msvc.zip. Those
+          # "-stable" archives are periodically rebuilt from the stable
+          # branch under an unchanged name, so a pinned digest goes stale on
+          # its own: the hash below was correct in v0.7.5 and both Windows
+          # legs of the first v0.7.6 run died on it (got f7a07ec1…, want
+          # d0a945a6…) without a line of our code changing. A release asset
+          # is immutable, so the pin stays true release over release.
+          #
+          # Same upstream, same 1.0.22, same archive layout; the release
+          # build's static lib exports the public API identically (it lacks
+          # only two AVX-512 *internal* implementation symbols the stable
+          # branch added, which nothing outside libsodium references).
+          SODIUM_URL: https://github.com/jedisct1/libsodium/releases/download/1.0.22-RELEASE/libsodium-1.0.22-msvc.zip
           # sha256 of the archive above. We bypass the crate's minisign check
           # by not using its download path, so verify integrity here.
-          SODIUM_SHA256: d0a945a6ac8f6b60e47e1d9778b99b0beb6e0817602ef53543defbd39c108e7f
+          SODIUM_SHA256: 3e03a726fac4bc09cb61d8f29d658ef7a5eca0811de59082130414f7ca2e4279
         run: |
           $ErrorActionPreference = 'Stop'
           $dest = Join-Path $env:RUNNER_TEMP 'libsodium'
-          $zip  = Join-Path $env:RUNNER_TEMP $env:SODIUM_ARCHIVE
-          $url  = "https://download.libsodium.org/libsodium/releases/$env:SODIUM_ARCHIVE"
+          $zip  = Join-Path $env:RUNNER_TEMP 'libsodium-msvc.zip'
+          $url  = $env:SODIUM_URL
 
           for ($i = 1; $i -le 5; $i++) {
             try {
