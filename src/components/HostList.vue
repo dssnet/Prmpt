@@ -4,6 +4,7 @@ import {
   ChevronDown,
   Combine,
   Copy,
+  Folder,
   FolderOpen,
   FolderPlus,
   Info,
@@ -12,10 +13,12 @@ import {
   LockOpen,
   Pencil,
   Plus,
+  Search,
   Server,
   Settings,
   Terminal,
   Trash2,
+  X,
 } from "lucide-vue-next";
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 
@@ -34,6 +37,7 @@ import {
   type SshHostRow,
 } from "../db";
 import { buildGroupTree, concealedGroupIds, descendantGroupIds } from "../lib/groupTree";
+import { searchHosts } from "../lib/hostSearch";
 import {
   deleteSecret,
   hostPasswordKey,
@@ -147,14 +151,21 @@ const groupTree = computed(() =>
   buildGroupTree(groups.value.filter((g) => !concealed.value.has(g.id))),
 );
 
+// Everything the lock lets us show, before the group filter. Search counts
+// "matches elsewhere" against this, so a hidden group stays hidden even as a
+// number.
+const unconcealedHosts = computed(() =>
+  concealed.value.size === 0
+    ? hosts.value
+    : hosts.value.filter((h) => h.group_id == null || !concealed.value.has(h.group_id)),
+);
+
 const visibleHosts = computed(() => {
-  let list = hosts.value;
-  if (concealed.value.size > 0) {
-    list = list.filter((h) => h.group_id == null || !concealed.value.has(h.group_id));
-  }
-  if (selectedGroupId.value == null) return list;
+  if (selectedGroupId.value == null) return unconcealedHosts.value;
   const ids = descendantGroupIds(groups.value, selectedGroupId.value);
-  return list.filter((h) => h.group_id != null && ids.has(h.group_id));
+  return unconcealedHosts.value.filter(
+    (h) => h.group_id != null && ids.has(h.group_id),
+  );
 });
 
 const selectedGroupLabel = computed(() =>
@@ -162,6 +173,80 @@ const selectedGroupLabel = computed(() =>
     ? "All hosts"
     : (groups.value.find((g) => g.id === selectedGroupId.value)?.label ?? "All hosts"),
 );
+
+// ---------- search ----------
+
+// The search box narrows whatever the sidebar selected; it doesn't override it.
+// A group filter that hides matches is called out below the header ("N more in
+// other groups") rather than silently widened — the selection stays the user's.
+const searchQuery = ref("");
+const searchInput = ref<HTMLInputElement | null>(null);
+
+const searchActive = computed(() => searchQuery.value.trim().length > 0);
+
+const groupLabelById = computed(() => {
+  const byId = new Map<number, string>();
+  for (const g of groups.value) byId.set(g.id, g.label);
+  return byId;
+});
+
+// Group names are searchable and shown per row, but they live in a different
+// table than the host — hence the lookup rather than a field read.
+function groupLabelOf(groupId: number | null): string | null {
+  return groupId == null ? null : (groupLabelById.value.get(groupId) ?? null);
+}
+
+const shownHosts = computed(() =>
+  searchHosts(searchQuery.value, visibleHosts.value, groupLabelOf),
+);
+
+const otherGroupMatches = computed(() => {
+  if (!searchActive.value || selectedGroupId.value == null) return 0;
+  const shown = new Set(shownHosts.value.map((h) => h.id));
+  return searchHosts(searchQuery.value, unconcealedHosts.value, groupLabelOf).filter(
+    (h) => !shown.has(h.id),
+  ).length;
+});
+
+function clearSearch() {
+  searchQuery.value = "";
+  searchInput.value?.focus();
+}
+
+function onSearchEscape() {
+  // First Escape clears, a second one gives focus back — so Escape never
+  // leaves a stale filter behind without the user noticing.
+  if (searchActive.value) searchQuery.value = "";
+  else searchInput.value?.blur();
+}
+
+// Enter connects to the top hit: type three characters, press Enter, you're in.
+function onSearchEnter() {
+  const top = shownHosts.value[0];
+  if (!top || top.broken || connecting.value != null) return;
+  void onConnect(top);
+}
+
+// Any of our own modals up: Cmd+F must not pull focus to a field behind it.
+const modalOpen = computed(
+  () =>
+    groupModalOpen.value ||
+    advancedHost.value != null ||
+    deleteHostTarget.value != null ||
+    deleteGroupTarget.value != null ||
+    hideGroupTarget.value != null,
+);
+
+function onWindowKeydown(e: KeyboardEvent) {
+  if (e.key !== "f" && e.key !== "F") return;
+  if (!(e.metaKey || e.ctrlKey) || e.altKey) return;
+  // Both the home tab and this pane are v-show'd; `display: none` clears
+  // offsetParent, which is the cheapest "am I actually on screen" test.
+  if (containerRef.value?.offsetParent == null || modalOpen.value) return;
+  e.preventDefault();
+  searchInput.value?.focus();
+  searchInput.value?.select();
+}
 
 async function refresh() {
   errorText.value = null;
@@ -186,8 +271,11 @@ async function refresh() {
 onMounted(async () => {
   const saved = parseFloat(localStorage.getItem(SIDEBAR_KEY) ?? "");
   if (Number.isFinite(saved)) sidebarPct.value = clampPct(saved);
+  window.addEventListener("keydown", onWindowKeydown);
   await refresh();
 });
+
+onBeforeUnmount(() => window.removeEventListener("keydown", onWindowKeydown));
 // WebDAV sync applied remote changes — reload from the DB.
 watch(syncDataVersion, () => void refresh());
 defineExpose({ refresh });
@@ -555,14 +643,60 @@ async function confirmDeleteGroup() {
       <div ref="scrollRoot" class="absolute inset-0 flex flex-col gap-3.5 px-9 pt-2 pb-6 overflow-y-auto scrollbar-none">
         <PageHeader :title="selectedGroupLabel">
           <template #actions>
+            <div class="relative flex items-center">
+              <Search :size="14" class="absolute left-2 text-fg-subtle pointer-events-none" />
+              <input
+                ref="searchInput"
+                v-model="searchQuery"
+                type="text"
+                placeholder="Search hosts…"
+                aria-label="Search hosts"
+                autocomplete="off"
+                spellcheck="false"
+                class="w-56 bg-surface-1 border border-border text-fg placeholder:text-fg-subtle rounded-md pl-7 pr-7 py-1.5 text-sm focus:outline-none focus:border-border-strong"
+                @keydown.esc.stop.prevent="onSearchEscape"
+                @keydown.enter.prevent="onSearchEnter"
+              />
+              <button
+                v-if="searchActive"
+                type="button"
+                title="Clear search"
+                aria-label="Clear search"
+                class="absolute right-1.5 grid place-items-center w-5 h-5 rounded text-fg-subtle hover:text-fg hover:bg-surface-2 cursor-pointer transition-colors duration-150"
+                @click="clearSearch"
+              >
+                <X :size="13" />
+              </button>
+            </div>
             <Button :icon="Plus" @click="emit('addHost')">Add host</Button>
             <Button variant="secondary" :icon="KeyRound" @click="emit('manageKeys')">Manage keys</Button>
           </template>
         </PageHeader>
 
+        <!-- Result count, plus the escape hatch when the group filter is what's
+             hiding the host the user is looking for. -->
+        <div
+          v-if="searchActive"
+          class="flex items-center gap-2 -mt-2 text-xs text-fg-muted"
+        >
+          <span>
+            {{ shownHosts.length }}
+            {{ shownHosts.length === 1 ? "match" : "matches" }}
+            <template v-if="selectedGroupId != null">in “{{ selectedGroupLabel }}”</template>
+          </span>
+          <button
+            v-if="otherGroupMatches > 0"
+            type="button"
+            class="text-accent hover:underline cursor-pointer"
+            @click="selectedGroupId = null"
+          >
+            {{ otherGroupMatches }} more in other groups — search all hosts
+          </button>
+        </div>
+
         <div class="flex flex-col gap-2">
           <div
-            v-for="h in visibleHosts"
+            v-for="h in shownHosts"
             :key="h.id"
             class="flex items-center justify-between gap-3 px-3.5 py-3 border border-border rounded-lg bg-surface-1 hover:border-border-strong transition-colors duration-150"
           >
@@ -580,7 +714,17 @@ async function confirmDeleteGroup() {
                   title="Stored credentials could not be unlocked. Edit this host to re-enter the password."
                 />
               </div>
-              <div class="text-xs text-fg-muted font-mono">{{ h.username }}@{{ h.hostname }}:{{ h.port }}</div>
+              <div class="flex items-center gap-2 min-w-0">
+                <span class="text-xs text-fg-muted font-mono truncate">{{ h.username }}@{{ h.hostname }}:{{ h.port }}</span>
+                <!-- While searching, results can come from anywhere in the tree
+                     — name the group so a hit is locatable. -->
+                <span
+                  v-if="searchActive && groupLabelOf(h.group_id)"
+                  class="shrink-0 inline-flex items-center gap-1 text-xs text-fg-subtle"
+                >
+                  <Folder :size="11" />{{ groupLabelOf(h.group_id) }}
+                </span>
+              </div>
             </div>
             <div class="flex gap-1.5">
               <div class="inline-flex items-stretch">
@@ -678,12 +822,14 @@ async function confirmDeleteGroup() {
           </div>
         </div>
 
-        <EmptyState v-if="visibleHosts.length === 0 || errorText">
+        <EmptyState v-if="shownHosts.length === 0 || errorText">
           {{
             errorText
-              ?? (selectedGroupId == null
-                ? "No SSH hosts yet. Click \"Add host\" to save your first connection."
-                : `No hosts in "${selectedGroupLabel}" yet. Edit a host to assign it to this group.`)
+              ?? (searchActive
+                ? `No hosts match "${searchQuery.trim()}".`
+                : selectedGroupId == null
+                  ? "No SSH hosts yet. Click \"Add host\" to save your first connection."
+                  : `No hosts in "${selectedGroupLabel}" yet. Edit a host to assign it to this group.`)
           }}
         </EmptyState>
       </div>
