@@ -4,7 +4,6 @@ A desktop terminal emulator. Tauri 2 shell, Ghostty's VT engine driving terminal
 
 ## Hard rules
 
-- **Do not run `bun tauri dev` in the background, monitor it, or otherwise launch the GUI from an agent session.** The user runs it manually for visual testing. Compiling (`cargo check`, `bun run build`) is fine; launching the windowed app is not.
 - **Do not modify the user's config file** at `~/Library/Application Support/Prmpt/config.toml` (macOS) / `~/.config/Prmpt/config.toml` (Linux) / `%APPDATA%\Prmpt\config.toml` (Windows). If a new default needs to apply, instruct the user to delete that file (it auto-regenerates) — do not overwrite it.
 - **Do not bump the version** in `src-tauri/tauri.conf.json` / `src-tauri/Cargo.toml` / `package.json`. The user owns the release version and bumps it manually before dispatching the release workflow. Leave the version field alone even when the change you just made is the headline fix for the next release.
 - **SQL migrations are append-only and additive.** Never edit, renumber, or delete a shipped entry in `src-tauri/migrations/` / the `MIGRATIONS` array in `lib.rs`; never `DROP` or repurpose columns/tables; new `NOT NULL` columns need a `DEFAULT` valid for existing rows. To change schema, append `NNNN_name.sql` + one `MIGRATIONS` tuple. This is what lets `db_compat.rs` reconcile `_sqlx_migrations` at startup so an *older* binary opens a *newer* DB without erroring (placeholder migrations + checksum re-stamp) — dev and the installed release share `prmpt.db` — and it's required for the planned cross-install DB sync. (Installed builds that predate `db_compat.rs` still error on a newer DB until updated.)
@@ -60,8 +59,7 @@ cd src-tauri && cargo check       # type-check backend
 cd src-tauri && cargo test        # backend unit tests
 bun run build                     # type-check + bundle frontend
 bun run test                      # frontend unit tests (vitest)
-# Launching the GUI: USER does this, not the agent:
-bun tauri dev
+bun tauri dev                     # launch the app (long-running; Ctrl+C to stop)
 ```
 
 `PRMPT_DATA_DIR=/some/dir` points an instance at an isolated data dir (config, DB, stronghold snapshot all follow — `paths.rs` honors it). That's how a second instance runs side by side, e.g. for testing WebDAV sync locally: start `bun tauri dev` normally, then launch `PRMPT_DATA_DIR=/tmp/prmpt-b src-tauri/target/debug/prmpt` — the second (debug) instance reuses the first one's Vite dev server.
