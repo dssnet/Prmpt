@@ -23,12 +23,18 @@ onMounted(async () => {
 async function onAccept() {
   busy.value = true;
   try {
-    await recordHostFingerprint(
-      props.payload.host_id,
-      props.payload.fingerprint,
-      props.payload.algorithm,
-    );
-    await sshConfirmHostKey(props.payload.host_id, true);
+    // Claim the verdict first. The same pooled connection can be prompted in
+    // another window, and only the window that actually decides may persist
+    // the fingerprint — otherwise accepting here would trust a key that the
+    // other window already rejected.
+    const decided = await sshConfirmHostKey(props.payload.host_id, true);
+    if (decided) {
+      await recordHostFingerprint(
+        props.payload.host_id,
+        props.payload.fingerprint,
+        props.payload.algorithm,
+      );
+    }
   } catch (err) {
     console.error("host key accept failed:", err);
   }

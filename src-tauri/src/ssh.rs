@@ -21,7 +21,7 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 use parking_lot::Mutex;
 use russh::client::{self, Handle, Handler};
@@ -30,7 +30,7 @@ use russh::keys::ssh_key;
 use russh::{Channel, ChannelMsg, Disconnect};
 use russh_sftp::client::SftpSession;
 use russh_sftp::protocol::OpenFlags;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, EventTarget};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -43,7 +43,7 @@ use crate::{
     error::{AppError, AppResult},
     protocol::{
         SftpAvailability, SftpEntry, SftpTransferProgress, SshConnectError,
-        SshConnected, SshHostKeyFirstConnect, SshHostKeyMismatch,
+        SshConnected, SshHostKeyFirstConnect, SshHostKeyMismatch, SshHostKeyResolved,
         SshPortForwardError, SshReconnecting,
     },
     tab::{PtyEvent, SftpReq, SshIoCmd},
@@ -209,6 +209,22 @@ struct ClientHandler {
     app: AppHandle,
     host_id: i64,
     state: Arc<Mutex<HandlerState>>,
+    /// The connection this handshake belongs to, for addressing the host-key
+    /// prompts at its consumers' windows. Weak because the live `Handle` that
+    /// owns this handler is itself parked in `PooledConn::state` — an owning
+    /// reference would be a cycle that leaks every connection ever opened.
+    conn: Weak<PooledConn>,
+}
+
+impl ClientHandler {
+    /// Host-key prompts go to the windows using this connection. Both are
+    /// security-critical decisions about *this* connection, so an unrelated
+    /// window must never be asked to make them — see `consumer_windows`.
+    fn emit_consumers<S: Serialize + Clone>(&self, event: &str, payload: S) {
+        if let Some(conn) = self.conn.upgrade() {
+            conn.emit_consumers(event, payload);
+        }
+    }
 }
 
 #[async_trait::async_trait]
@@ -272,10 +288,12 @@ impl Handler for ClientHandler {
                 let prompts = self.app.state::<crate::ssh::HostKeyPrompts>();
                 let (tx, rx) = tokio::sync::oneshot::channel();
                 prompts.lock().insert(self.host_id, tx);
-                // Broadcast: a pooled connection may back consumers in more
-                // than one window; whichever shows the modal can confirm
-                // (the prompt is keyed by host id).
-                let _ = self.app.emit(
+                // Every window using this connection, so a host opened as a
+                // terminal here and a file browser there prompts in both and
+                // whichever answers first wins (the prompt is keyed by host
+                // id). Windows with no stake in it are not asked to vouch for
+                // a fingerprint they never requested.
+                self.emit_consumers(
                     "ssh:host_key_first_connect",
                     SshHostKeyFirstConnect {
                         tab_id: 0,
@@ -299,7 +317,7 @@ impl Handler for ClientHandler {
             }
             Some(stored) if stored == &fp => Ok(true),
             Some(stored) => {
-                let _ = self.app.emit(
+                self.emit_consumers(
                     "ssh:host_key_mismatch",
                     SshHostKeyMismatch {
                         tab_id: 0,
@@ -555,6 +573,16 @@ struct SftpReg {
     window: String,
 }
 
+/// One registered shell consumer. See `PooledConn::shell_regs`.
+#[derive(Clone)]
+struct ShellReg {
+    /// Window that owns this terminal, for connection-wide event routing.
+    window: String,
+    /// The terminal's PTY feed, for status the consumer task cannot write
+    /// itself while it waits out a reconnect.
+    pty_tx: crossbeam_channel::Sender<PtyEvent>,
+}
+
 /// Mutable transport state for a pooled connection, behind one async mutex.
 struct TransportState {
     handle: Option<Arc<AsyncMutex<Handle<ClientHandler>>>>,
@@ -574,6 +602,9 @@ struct TransportState {
     /// connect failed, or host key rejected) — stops all (re)connect attempts.
     shutdown: bool,
     backoff: u64,
+    /// Failed reconnect attempts since the last successful connect, so the
+    /// status line in the terminal can count them. Reset alongside `backoff`.
+    reconnect_attempts: u64,
 }
 
 /// A shared SSH connection for one saved host. See the section comment.
@@ -587,6 +618,13 @@ pub struct PooledConn {
     connect_lock: AsyncMutex<()>,
     /// Live SFTP consumers, keyed by consumer id.
     sftp_regs: Mutex<HashMap<u64, SftpReg>>,
+    /// Live shell consumers, keyed by consumer id — the terminal-side
+    /// counterpart of `sftp_regs`. Their channels live in their own tasks; what
+    /// the connection needs is the window each belongs to (so events reach
+    /// those windows and only them) and a way to write into their terminals
+    /// from *inside* a reconnect, which the consumer task cannot do because it
+    /// is parked in `await_session` for the whole retry sequence.
+    shell_regs: Mutex<HashMap<u64, ShellReg>>,
     /// Number of live consumers (shells + browsers). Drops to 0 → teardown.
     refcount: AtomicUsize,
     /// Sync mirror of `state.shutdown` so the (sync) pool lock can skip a dead
@@ -610,9 +648,11 @@ impl PooledConn {
                 reconnecting: false,
                 shutdown: false,
                 backoff: 1,
+                reconnect_attempts: 0,
             }),
             connect_lock: AsyncMutex::new(()),
             sftp_regs: Mutex::new(HashMap::new()),
+            shell_regs: Mutex::new(HashMap::new()),
             refcount: AtomicUsize::new(0),
             dead: AtomicBool::new(false),
         }
@@ -622,9 +662,63 @@ impl PooledConn {
         self.state.lock().await.handle.clone()
     }
 
+    /// Every window with a live consumer on this connection, deduped. A pooled
+    /// connection can back a terminal here and a file browser there, so this is
+    /// the union of both registries — the addressees for a connection-wide
+    /// event. Empty means nobody is waiting any more (the last consumer left
+    /// while we were dialing).
+    ///
+    /// Anything connection-wide and user-visible must go to *these* windows via
+    /// `emit_to`, never through a bare `app.emit`: a broadcast reaches every
+    /// webview regardless of the `target` its JS listener registered with
+    /// (tauri's `emit_js` iterates all webviews and its filter is `None`), so
+    /// the reserve-pool window and every unrelated window would act on it too.
+    fn consumer_windows(&self) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        let mut push = |w: &String| {
+            if !out.iter().any(|e| e == w) {
+                out.push(w.clone());
+            }
+        };
+        for reg in self.sftp_regs.lock().values() {
+            push(&reg.window);
+        }
+        for reg in self.shell_regs.lock().values() {
+            push(&reg.window);
+        }
+        out
+    }
+
+    /// Write a status line into every terminal on this connection.
+    ///
+    /// `try_send`, never `send`: this runs on the SSH runtime inside the
+    /// reconnect loop, and a bounded PTY queue that happened to be full would
+    /// otherwise park the whole reconnect on a cosmetic line. Dropping the
+    /// line is the right trade — the next attempt prints one anyway.
+    fn notify_shells(&self, text: &str) {
+        let bytes = text.as_bytes().to_vec();
+        for reg in self.shell_regs.lock().values() {
+            let _ = reg.pty_tx.try_send(PtyEvent::Data(bytes.clone()));
+        }
+    }
+
+    /// Deliver a connection-wide event to exactly the windows using this
+    /// connection. The one way this module is allowed to reach the frontend
+    /// with anything that isn't already addressed by consumer id — see
+    /// `consumer_windows` for why a plain `app.emit` is never that way.
+    fn emit_consumers<S: Serialize + Clone>(&self, event: &str, payload: S) {
+        for w in self.consumer_windows() {
+            let _ = self
+                .app
+                .emit_to(EventTarget::webview_window(&w), event, payload.clone());
+        }
+    }
+
     /// One connect+auth attempt. `Ok(Some)` connected; `Ok(None)` host key
     /// rejected (never retry); `Err` other failure (caller decides retry).
-    async fn connect_once(&self) -> AppResult<Option<Arc<AsyncMutex<Handle<ClientHandler>>>>> {
+    async fn connect_once(
+        self: &Arc<Self>,
+    ) -> AppResult<Option<Arc<AsyncMutex<Handle<ClientHandler>>>>> {
         let config = self.config.lock().clone();
         let stored_fp = self.state.lock().await.stored_fp.clone();
 
@@ -652,6 +746,7 @@ impl PooledConn {
             app: self.app.clone(),
             host_id: self.host_id,
             state: state.clone(),
+            conn: Arc::downgrade(self),
         };
 
         let addr = format!("{}:{}", config.hostname, config.port);
@@ -715,6 +810,7 @@ impl PooledConn {
                         st.reconnecting = false;
                         st.ever_connected = true;
                         st.backoff = 1;
+                        st.reconnect_attempts = 0;
                         st.generation
                     };
                     self.on_connected(&session, gen).await;
@@ -733,29 +829,44 @@ impl PooledConn {
                             let c = self.config.lock();
                             (c.label.clone(), c.hostname.clone())
                         };
-                        let _ = self.app.emit(
-                            "ssh:connect_error",
-                            SshConnectError {
-                                tab_id: 0,
-                                host_id: self.host_id,
-                                host_label: label,
-                                hostname,
-                                kind: classify_connect_error(&raw).to_string(),
-                                message: raw,
-                            },
-                        );
+                        // Only the windows that actually asked for this
+                        // connection. A broadcast would pop the modal in every
+                        // window (see `consumer_windows`) — including the
+                        // hidden reserve, which then opens showing a stale
+                        // error, and including windows whose dismiss handler
+                        // would close them on the way out.
+                        let payload = SshConnectError {
+                            tab_id: 0,
+                            host_id: self.host_id,
+                            host_label: label,
+                            hostname,
+                            kind: classify_connect_error(&raw).to_string(),
+                            message: raw,
+                        };
+                        self.emit_consumers("ssh:connect_error", payload);
                         self.dead.store(true, Ordering::SeqCst);
                         self.state.lock().await.shutdown = true;
                         return Err(e);
                     }
                     // Reconnect attempt failed — back off and retry, staying
                     // responsive to shutdown.
-                    let backoff = {
+                    let (backoff, attempt) = {
                         let mut st = self.state.lock().await;
                         let b = st.backoff;
                         st.backoff = (st.backoff * 2).min(30);
-                        b
+                        st.reconnect_attempts += 1;
+                        (b, st.reconnect_attempts)
                     };
+                    // Say so in the terminal. The consumer wrote "connection
+                    // lost — reconnecting…" once and is now parked in this
+                    // call for the whole retry sequence, so without this the
+                    // banner is the last thing the user ever sees: no reason,
+                    // no progress, and no way to tell a server that is coming
+                    // back from one that is gone for good.
+                    self.notify_shells(&format!(
+                        "\r\n\x1b[33m\u{26a0} reconnect attempt {attempt} failed:\x1b[0m {e} \
+                         \x1b[2m— retrying in {backoff}s\x1b[0m\r\n"
+                    ));
                     for _ in 0..backoff {
                         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                         if self.state.lock().await.shutdown {
@@ -792,7 +903,7 @@ impl PooledConn {
             *slot.lock().await = None;
         }
         let label = self.config.lock().label.clone();
-        let _ = self.app.emit(
+        self.emit_consumers(
             "ssh:reconnecting",
             SshReconnecting {
                 tab_id: 0,
@@ -814,20 +925,27 @@ impl PooledConn {
         let mut forward_tasks = Vec::new();
         for fw in config.forwards.clone() {
             let handle = session.clone();
-            let app = self.app.clone();
+            // Weak, not Arc: these tasks are parked in `state.forward_tasks`,
+            // so an owning handle here would be a cycle that keeps the whole
+            // connection alive after its last consumer left. A forward can
+            // fail long after `on_connected` returned, so resolve the
+            // addressees at failure time rather than snapshotting them now.
+            let conn = Arc::downgrade(self);
             let host_id = self.host_id;
             let fw_id = fw.id;
             forward_tasks.push(tokio::spawn(async move {
                 if let Err(e) = run_forward(handle, fw).await {
-                    let _ = app.emit(
-                        "ssh:port_forward_error",
-                        SshPortForwardError {
-                            tab_id: 0,
-                            host_id,
-                            forward_id: fw_id,
-                            message: e.to_string(),
-                        },
-                    );
+                    if let Some(conn) = conn.upgrade() {
+                        conn.emit_consumers(
+                            "ssh:port_forward_error",
+                            SshPortForwardError {
+                                tab_id: 0,
+                                host_id,
+                                forward_id: fw_id,
+                                message: e.to_string(),
+                            },
+                        );
+                    }
                 }
             }));
         }
@@ -855,7 +973,7 @@ impl PooledConn {
             );
         }
 
-        let _ = self.app.emit(
+        self.emit_consumers(
             "ssh:connected",
             SshConnected {
                 tab_id: 0,
@@ -1107,6 +1225,7 @@ impl ConnectionPool {
     pub fn acquire_shell(
         self: &Arc<Self>,
         app: &AppHandle,
+        window: String,
         config: SshConnectConfig,
         pty_tx: crossbeam_channel::Sender<PtyEvent>,
         cols: u16,
@@ -1115,6 +1234,16 @@ impl ConnectionPool {
         let (out_tx, out_rx) = mpsc::channel::<SshIoCmd>(128);
         let conn = self.get_or_create(app, &config);
         let consumer_id = self.alloc_consumer_id();
+        // Registered before the consumer task starts, so it is already in
+        // place when that task's very first `await_session` fails and looks
+        // up who to deliver `ssh:connect_error` to.
+        conn.shell_regs.lock().insert(
+            consumer_id,
+            ShellReg {
+                window,
+                pty_tx: pty_tx.clone(),
+            },
+        );
         let pool = self.clone();
         self.rt.spawn(run_shell_consumer(
             pool, conn, consumer_id, pty_tx, out_rx, cols, rows,
@@ -1180,6 +1309,21 @@ impl ConnectionPool {
         consumer_id
     }
 
+    /// A host-key prompt has been answered — tell every window using that
+    /// host's connection to take its copy of the dialog down. Without this the
+    /// windows that lost the race sit on a dialog whose handshake is long
+    /// decided, and clicking Accept there would still write the fingerprint to
+    /// the DB. No-op for a host with no live connection (nothing was prompted).
+    pub fn notify_host_key_resolved(&self, host_id: i64) {
+        let conn = self.inner.lock().get(&host_id).cloned();
+        if let Some(conn) = conn {
+            conn.emit_consumers(
+                "ssh:host_key_resolved",
+                SshHostKeyResolved { host_id },
+            );
+        }
+    }
+
     /// Release every SFTP consumer a (now-destroyed) window held. File
     /// browsers have no backend tab for the window-Destroyed handler to reap,
     /// so without this their consumers — and the pooled connections they keep
@@ -1207,6 +1351,7 @@ impl ConnectionPool {
     /// dead connection was already replaced.
     pub fn release_conn(self: &Arc<Self>, conn: &Arc<PooledConn>, consumer_id: u64) {
         conn.sftp_regs.lock().remove(&consumer_id);
+        conn.shell_regs.lock().remove(&consumer_id);
         let teardown = {
             let mut map = self.inner.lock();
             let prev = conn.refcount.fetch_sub(1, Ordering::SeqCst);
@@ -2237,4 +2382,48 @@ fn finish_transfer(
         ),
     }
     result.map(|_| ())
+}
+
+#[cfg(test)]
+mod tests {
+    /// Nothing in this module may reach the frontend with a bare `app.emit`.
+    ///
+    /// A broadcast is delivered to *every* webview regardless of the `target`
+    /// its JS listener registered with (tauri's `emit_js` walks all webviews
+    /// and passes no filter), so `listenScoped` in `ipc.ts` is no defence
+    /// against one. That is how `ssh:connect_error` came to pop its modal in
+    /// every open window — the focused one the user was looking at, unrelated
+    /// windows whose dismiss handler would then close them, and the hidden
+    /// reserve window, which later opened still showing a stale error.
+    ///
+    /// Connection-wide events go through `PooledConn::emit_consumers`
+    /// (the windows actually using that connection); everything addressed by
+    /// consumer id uses `emit_to` with the consumer's own window. If you need
+    /// a genuine broadcast here, that is a deliberate decision — say why, then
+    /// add it to `ALLOWED` rather than deleting this test.
+    #[test]
+    fn no_bare_broadcasts_to_the_frontend() {
+        const ALLOWED: &[&str] = &[];
+        let src = include_str!("ssh.rs");
+        // Scan the module proper, not this test — the needles below would
+        // otherwise match themselves.
+        let src = src.split("\n#[cfg(test)]\n").next().unwrap();
+        let offenders: Vec<(usize, &str)> = src
+            .lines()
+            .enumerate()
+            .filter(|(_, l)| {
+                let t = l.trim_start();
+                !t.starts_with("//")
+                    && (t.contains("app.emit(") || t.contains("app.emit_str("))
+            })
+            .filter(|(_, l)| !ALLOWED.iter().any(|a| l.contains(a)))
+            .map(|(i, l)| (i + 1, l.trim()))
+            .collect();
+        assert!(
+            offenders.is_empty(),
+            "bare app.emit broadcasts in ssh.rs reach every window \
+             (including the hidden reserve) — route them through \
+             PooledConn::emit_consumers or emit_to instead:\n{offenders:#?}"
+        );
+    }
 }

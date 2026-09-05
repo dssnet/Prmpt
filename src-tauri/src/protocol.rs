@@ -303,6 +303,14 @@ pub struct SshHostKeyFirstConnect {
     pub algorithm: String,
 }
 
+/// Emitted once a host-key prompt for `host_id` has been answered, so the
+/// windows that were prompted alongside the answerer can drop their now-moot
+/// dialog instead of leaving it up as a decision nobody can make any more.
+#[derive(Serialize, Clone, Debug)]
+pub struct SshHostKeyResolved {
+    pub host_id: i64,
+}
+
 #[derive(Serialize, Clone, Debug)]
 pub struct SshPortForwardError {
     pub tab_id: u64,
