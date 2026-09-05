@@ -701,9 +701,26 @@ export function onSshHostKeyFirstConnect(
 
 /** Resolve a pending first-connect host-key prompt. The SSH handshake is
  *  parked until this delivers the verdict; rejecting aborts the connection
- *  before any credentials are sent. */
-export async function sshConfirmHostKey(hostId: number, accept: boolean): Promise<void> {
-  await invoke("ssh_confirm_host_key", { hostId, accept });
+ *  before any credentials are sent.
+ *
+ *  Returns whether *this* call decided it. One pooled connection can be
+ *  prompted in several windows (a terminal here, a file browser there) and the
+ *  first answer wins — a `false` means somebody else already answered, so the
+ *  caller must not persist its own verdict. */
+export async function sshConfirmHostKey(hostId: number, accept: boolean): Promise<boolean> {
+  return await invoke<boolean>("ssh_confirm_host_key", { hostId, accept });
+}
+
+/** Fires once a host-key prompt has been answered (in any window), so the
+ *  other windows that were prompted can drop their now-moot dialog. */
+export interface SshHostKeyResolved {
+  host_id: number;
+}
+
+export function onSshHostKeyResolved(
+  handler: (payload: SshHostKeyResolved) => void,
+): Promise<UnlistenFn> {
+  return listenScoped<SshHostKeyResolved>("ssh:host_key_resolved", handler);
 }
 
 export function onSshPortForwardError(

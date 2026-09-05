@@ -718,7 +718,14 @@ pub fn connect_ssh_host(
     // SSH channel loop parks on the full queue, which stops window
     // replenishment and lets the SSH flow control throttle the server.
     let (pty_tx, pty_rx) = crossbeam_channel::bounded::<PtyEvent>(crate::tab::PTY_EVENT_QUEUE_CAP);
-    let out_tx = pool.acquire_shell(&app, args.config, pty_tx, cols, rows);
+    let out_tx = pool.acquire_shell(
+        &app,
+        window.label().to_string(),
+        args.config,
+        pty_tx,
+        cols,
+        rows,
+    );
 
     registry.start_ssh_tab(
         id,
@@ -773,16 +780,26 @@ pub fn sftp_release(
 /// handshake for `host_id` is parked in `check_server_key` until this delivers
 /// the user's verdict; rejecting (or never answering) aborts the connection
 /// before any credentials are sent.
+///
+/// Returns whether this call is the one that decided it. A pooled connection
+/// can be shared by a terminal in one window and a file browser in another, so
+/// both are prompted and the first answer wins; the loser gets `false` and
+/// must not act on its own verdict — accepting there would record a
+/// fingerprint for a handshake somebody else already rejected. Deciding also
+/// tells the other windows to take their now-moot dialog down.
 #[tauri::command]
 pub fn ssh_confirm_host_key(
+    pool: State<'_, SharedPool>,
     prompts: State<'_, ssh::HostKeyPrompts>,
     host_id: i64,
     accept: bool,
-) -> AppResult<()> {
+) -> AppResult<bool> {
     if let Some(tx) = prompts.lock().remove(&host_id) {
         let _ = tx.send(accept);
+        pool.notify_host_key_resolved(host_id);
+        return Ok(true);
     }
-    Ok(())
+    Ok(false)
 }
 
 // ---------- SFTP file browser ----------

@@ -18,6 +18,7 @@ import {
   onSshConnected,
   onSshHostKeyFirstConnect,
   onSshHostKeyMismatch,
+  onSshHostKeyResolved,
   onSshPortForwardError,
   onSshReconnecting,
   onTerminalNotification,
@@ -620,6 +621,12 @@ onMounted(async () => {
   unlisteners.push(await onSshHostKeyMismatch((p) => (hostKeyModal.value = p)));
   // The SSH handshake is parked in the backend until the modal answers.
   unlisteners.push(await onSshHostKeyFirstConnect((p) => (firstConnectModal.value = p)));
+  // Someone answered the prompt — in this window or, for a connection shared
+  // with another one, over there. Either way the decision is made and our copy
+  // of the dialog would only invite a verdict nobody can act on.
+  unlisteners.push(await onSshHostKeyResolved((p) => {
+    if (firstConnectModal.value?.host_id === p.host_id) firstConnectModal.value = null;
+  }));
   unlisteners.push(await onSshPortForwardError((p) => {
     console.error(
       `[ssh] port-forward error tab=${p.tab_id} host=${p.host_id}: ${p.message}`,
